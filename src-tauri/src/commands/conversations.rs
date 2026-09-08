@@ -20,11 +20,15 @@ pub async fn list_conversations(
 pub async fn create_conversation(
     state: State<'_, AppState>,
     title: Option<String>,
+    bot_id: Option<String>,
 ) -> Result<Conversation, String> {
     let db = state.db.clone();
-    tokio::task::spawn_blocking(move || db.create_conversation(title).map_err(|e| e.to_string()))
-        .await
-        .map_err(|e| e.to_string())?
+    tokio::task::spawn_blocking(move || {
+        db.create_conversation(title, bot_id.as_deref())
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]

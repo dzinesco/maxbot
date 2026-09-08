@@ -5,6 +5,7 @@
 //! `invoke` IPC; long-running streams emit `chat://chunk` events back to the
 //! renderer so the UI can show tokens as they arrive.
 
+mod bots;
 mod commands;
 mod llm;
 mod storage;
@@ -44,6 +45,10 @@ pub fn run() {
             let db = Database::open(&db_path).expect("open MaxBot sqlite database");
             app.manage(AppState { db: Arc::new(db) });
             app.manage(Arc::new(AsyncMutex::new(StreamRegistry::default())));
+            // Start the bot scheduler. It runs in a background tokio task
+            // for the lifetime of the process, waking every 30s to fire
+            // any bot whose schedule is due.
+            bots::scheduler::spawn(app.handle().clone());
             log::info!("MaxBot ready; data dir = {}", data_dir.display());
             Ok(())
         })
@@ -58,6 +63,18 @@ pub fn run() {
             commands::conversations::get_messages,
             commands::chat::send_message,
             commands::chat::stop_message,
+            commands::bots::list_bots,
+            commands::bots::get_bot,
+            commands::bots::upsert_bot,
+            commands::bots::delete_bot,
+            commands::bots::get_schedule,
+            commands::bots::upsert_schedule,
+            commands::bots::list_all_schedules,
+            commands::bots::list_bot_runs,
+            commands::bots::list_inbox,
+            commands::bots::mark_inbox_read,
+            commands::bots::list_available_tools,
+            commands::bots::run_bot_now,
         ])
         .run(tauri::generate_context!())
         .expect("error while running MaxBot");

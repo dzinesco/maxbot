@@ -68,6 +68,10 @@ pub struct Conversation {
     pub title: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    /// If this conversation was started by (or for) a bot, the bot's id.
+    /// Null for human-initiated chats. Used by the bot executor to keep
+    /// a single conversation per recurring bot.
+    pub bot_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -112,7 +116,8 @@ impl Database {
                 id          TEXT PRIMARY KEY,
                 title       TEXT NOT NULL,
                 created_at  TEXT NOT NULL,
-                updated_at  TEXT NOT NULL
+                updated_at  TEXT NOT NULL,
+                bot_id      TEXT
              );
              CREATE TABLE IF NOT EXISTS messages (
                 id              TEXT PRIMARY KEY,
@@ -127,7 +132,47 @@ impl Database {
              CREATE TABLE IF NOT EXISTS settings (
                 key   TEXT PRIMARY KEY,
                 value TEXT NOT NULL
-             );",
+             );
+             CREATE TABLE IF NOT EXISTS bots (
+                id              TEXT PRIMARY KEY,
+                name            TEXT NOT NULL,
+                description     TEXT NOT NULL DEFAULT '',
+                system_prompt   TEXT NOT NULL DEFAULT '',
+                default_model   TEXT NOT NULL DEFAULT 'MiniMax-M3',
+                allowed_tools   TEXT NOT NULL DEFAULT '[]',
+                icon            TEXT NOT NULL DEFAULT '',
+                color           TEXT NOT NULL DEFAULT '',
+                created_at      TEXT NOT NULL,
+                updated_at      TEXT NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS bot_schedules (
+                bot_id              TEXT PRIMARY KEY REFERENCES bots(id) ON DELETE CASCADE,
+                interval_seconds    INTEGER NOT NULL DEFAULT 0,
+                last_run_at         TEXT,
+                last_conversation_id TEXT
+             );
+             CREATE TABLE IF NOT EXISTS bot_runs (
+                id              TEXT PRIMARY KEY,
+                bot_id          TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+                conversation_id TEXT NOT NULL,
+                status          TEXT NOT NULL,
+                started_at      TEXT NOT NULL,
+                finished_at     TEXT,
+                result_summary  TEXT NOT NULL DEFAULT ''
+             );
+             CREATE INDEX IF NOT EXISTS bot_runs_by_bot
+                 ON bot_runs(bot_id, started_at DESC);
+             CREATE TABLE IF NOT EXISTS bot_messages (
+                id              TEXT PRIMARY KEY,
+                from_bot_id     TEXT NOT NULL,
+                to_bot_id       TEXT NOT NULL,
+                body            TEXT NOT NULL,
+                created_at      TEXT NOT NULL,
+                read            INTEGER NOT NULL DEFAULT 0,
+                conversation_id TEXT
+             );
+             CREATE INDEX IF NOT EXISTS bot_messages_inbox
+                 ON bot_messages(to_bot_id, read, created_at);",
         )?;
         Ok(())
     }
@@ -137,7 +182,7 @@ impl Database {
     pub fn list_conversations(&self) -> rusqlite::Result<Vec<Conversation>> {
         let conn = self.conn.lock().expect("db lock poisoned");
         let mut stmt = conn.prepare(
-            "SELECT id, title, created_at, updated_at
+            "SELECT id, title, created_at, updated_at, bot_id
              FROM conversations
              ORDER BY updated_at DESC",
         )?;
@@ -147,6 +192,7 @@ impl Database {
                 title: row.get(1)?,
                 created_at: parse_dt(row.get::<_, String>(2)?),
                 updated_at: parse_dt(row.get::<_, String>(3)?),
+                bot_id: row.get(4)?,
             })
         })?;
         let mut out = Vec::new();
@@ -156,22 +202,58 @@ impl Database {
         Ok(out)
     }
 
-    pub fn create_conversation(&self, title: Option<String>) -> rusqlite::Result<Conversation> {
+    pub fn create_conversation(
+        &self,
+        title: Option<String>,
+        bot_id: Option<&str>,
+    ) -> rusqlite::Result<Conversation> {
         let now = Utc::now();
         let convo = Conversation {
             id: Uuid::new_v4().to_string(),
             title: title.unwrap_or_else(|| "New chat".to_string()),
             created_at: now,
             updated_at: now,
+            bot_id: bot_id.map(str::to_string),
         };
         let conn = self.conn.lock().expect("db lock poisoned");
         conn.execute(
-            "INSERT INTO conversations (id, title, created_at, updated_at) VALUES (?, ?, ?, ?)",
+            "INSERT INTO conversations (id, title, created_at, updated_at, bot_id) VALUES (?, ?, ?, ?, ?)",
             params![
                 convo.id,
                 convo.title,
                 convo.created_at.to_rfc3339(),
                 convo.updated_at.to_rfc3339(),
+                convo.bot_id,
+            ],
+        )?;
+        Ok(convo)
+    }
+
+    /// Create a conversation that belongs to a specific bot. The bot
+    /// executor uses this for scheduled runs so the recurring bot has
+    /// a single persistent log.
+    pub fn create_bot_conversation(
+        &self,
+        bot_id: &str,
+        title: Option<String>,
+    ) -> rusqlite::Result<Conversation> {
+        let now = Utc::now();
+        let convo = Conversation {
+            id: Uuid::new_v4().to_string(),
+            title: title.unwrap_or_else(|| format!("Bot: {}", bot_id)),
+            created_at: now,
+            updated_at: now,
+            bot_id: Some(bot_id.to_string()),
+        };
+        let conn = self.conn.lock().expect("db lock poisoned");
+        conn.execute(
+            "INSERT INTO conversations (id, title, created_at, updated_at, bot_id) VALUES (?, ?, ?, ?, ?)",
+            params![
+                convo.id,
+                convo.title,
+                convo.created_at.to_rfc3339(),
+                convo.updated_at.to_rfc3339(),
+                convo.bot_id,
             ],
         )?;
         Ok(convo)
@@ -283,6 +365,325 @@ impl Database {
         conn.execute(
             "UPDATE messages SET content = content || ? WHERE id = ?",
             params![delta, message_id],
+        )?;
+        Ok(())
+    }
+
+    // ----- bots -----
+
+    pub fn list_bots(&self) -> rusqlite::Result<Vec<crate::bots::Bot>> {
+        let conn = self.conn.lock().expect("db lock poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT id, name, description, system_prompt, default_model, allowed_tools, icon, color, created_at, updated_at
+             FROM bots ORDER BY name COLLATE NOCASE ASC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let allowed_tools_json: String = row.get(5)?;
+            let allowed_tools: Vec<String> =
+                serde_json::from_str(&allowed_tools_json).unwrap_or_default();
+            Ok(crate::bots::Bot {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                description: row.get(2)?,
+                system_prompt: row.get(3)?,
+                default_model: row.get(4)?,
+                allowed_tools,
+                icon: row.get(6)?,
+                color: row.get(7)?,
+                created_at: parse_dt(row.get::<_, String>(8)?),
+                updated_at: parse_dt(row.get::<_, String>(9)?),
+            })
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    pub fn get_bot(&self, id: &str) -> rusqlite::Result<Option<crate::bots::Bot>> {
+        let conn = self.conn.lock().expect("db lock poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT id, name, description, system_prompt, default_model, allowed_tools, icon, color, created_at, updated_at
+             FROM bots WHERE id = ?",
+        )?;
+        let mut rows = stmt.query(params![id])?;
+        let row = match rows.next()? {
+            Some(r) => r,
+            None => return Ok(None),
+        };
+        let allowed_tools_json: String = row.get(5)?;
+        let allowed_tools: Vec<String> =
+            serde_json::from_str(&allowed_tools_json).unwrap_or_default();
+        Ok(Some(crate::bots::Bot {
+            id: row.get(0)?,
+            name: row.get(1)?,
+            description: row.get(2)?,
+            system_prompt: row.get(3)?,
+            default_model: row.get(4)?,
+            allowed_tools,
+            icon: row.get(6)?,
+            color: row.get(7)?,
+            created_at: parse_dt(row.get::<_, String>(8)?),
+            updated_at: parse_dt(row.get::<_, String>(9)?),
+        }))
+    }
+
+    pub fn upsert_bot(&self, bot: &crate::bots::Bot) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().expect("db lock poisoned");
+        let allowed_tools_json =
+            serde_json::to_string(&bot.allowed_tools).unwrap_or_else(|_| "[]".to_string());
+        conn.execute(
+            "INSERT INTO bots (id, name, description, system_prompt, default_model, allowed_tools, icon, color, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(id) DO UPDATE SET
+                name = excluded.name,
+                description = excluded.description,
+                system_prompt = excluded.system_prompt,
+                default_model = excluded.default_model,
+                allowed_tools = excluded.allowed_tools,
+                icon = excluded.icon,
+                color = excluded.color,
+                updated_at = excluded.updated_at",
+            params![
+                bot.id,
+                bot.name,
+                bot.description,
+                bot.system_prompt,
+                bot.default_model,
+                allowed_tools_json,
+                bot.icon,
+                bot.color,
+                bot.created_at.to_rfc3339(),
+                bot.updated_at.to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_bot(&self, id: &str) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().expect("db lock poisoned");
+        conn.execute("DELETE FROM bots WHERE id = ?", params![id])?;
+        Ok(())
+    }
+
+    pub fn get_schedule(&self, bot_id: &str) -> rusqlite::Result<Option<crate::bots::BotSchedule>> {
+        let conn = self.conn.lock().expect("db lock poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT bot_id, interval_seconds, last_run_at, last_conversation_id
+             FROM bot_schedules WHERE bot_id = ?",
+        )?;
+        let mut rows = stmt.query(params![bot_id])?;
+        let row = match rows.next()? {
+            Some(r) => r,
+            None => return Ok(None),
+        };
+        let last_run_str: Option<String> = row.get(2)?;
+        Ok(Some(crate::bots::BotSchedule {
+            bot_id: row.get(0)?,
+            interval_seconds: row.get::<_, i64>(1)? as u32,
+            last_run_at: last_run_str.map(parse_dt),
+            last_conversation_id: row.get(3)?,
+        }))
+    }
+
+    pub fn upsert_schedule(&self, schedule: &crate::bots::BotSchedule) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().expect("db lock poisoned");
+        let last_run_at = schedule
+            .last_run_at
+            .as_ref()
+            .map(|d| d.to_rfc3339());
+        conn.execute(
+            "INSERT INTO bot_schedules (bot_id, interval_seconds, last_run_at, last_conversation_id)
+             VALUES (?, ?, ?, ?)
+             ON CONFLICT(bot_id) DO UPDATE SET
+                interval_seconds = excluded.interval_seconds,
+                last_run_at = excluded.last_run_at,
+                last_conversation_id = excluded.last_conversation_id",
+            params![
+                schedule.bot_id,
+                schedule.interval_seconds as i64,
+                last_run_at,
+                schedule.last_conversation_id,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_due_schedules(&self, now: DateTime<Utc>) -> rusqlite::Result<Vec<crate::bots::BotSchedule>> {
+        let conn = self.conn.lock().expect("db lock poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT bot_id, interval_seconds, last_run_at, last_conversation_id
+             FROM bot_schedules
+             WHERE interval_seconds > 0
+               AND (last_run_at IS NULL OR
+                    (julianday(?) - julianday(last_run_at)) * 86400.0 >= interval_seconds)",
+        )?;
+        let rows = stmt.query_map(params![now.to_rfc3339()], |row| {
+            let last_run_str: Option<String> = row.get(2)?;
+            Ok(crate::bots::BotSchedule {
+                bot_id: row.get(0)?,
+                interval_seconds: row.get::<_, i64>(1)? as u32,
+                last_run_at: last_run_str.map(parse_dt),
+                last_conversation_id: row.get(3)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    pub fn list_all_schedules(&self) -> rusqlite::Result<Vec<crate::bots::BotSchedule>> {
+        let conn = self.conn.lock().expect("db lock poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT bot_id, interval_seconds, last_run_at, last_conversation_id FROM bot_schedules",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let last_run_str: Option<String> = row.get(2)?;
+            Ok(crate::bots::BotSchedule {
+                bot_id: row.get(0)?,
+                interval_seconds: row.get::<_, i64>(1)? as u32,
+                last_run_at: last_run_str.map(parse_dt),
+                last_conversation_id: row.get(3)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    pub fn upsert_bot_run(&self, run: &crate::bots::BotRun) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().expect("db lock poisoned");
+        let finished_at = run.finished_at.as_ref().map(|d| d.to_rfc3339());
+        let status_str = match run.status {
+            crate::bots::BotRunStatus::Running => "running",
+            crate::bots::BotRunStatus::Succeeded => "succeeded",
+            crate::bots::BotRunStatus::Failed => "failed",
+            crate::bots::BotRunStatus::Cancelled => "cancelled",
+        };
+        conn.execute(
+            "INSERT INTO bot_runs (id, bot_id, conversation_id, status, started_at, finished_at, result_summary)
+             VALUES (?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(id) DO UPDATE SET
+                status = excluded.status,
+                finished_at = excluded.finished_at,
+                result_summary = excluded.result_summary",
+            params![
+                run.id,
+                run.bot_id,
+                run.conversation_id,
+                status_str,
+                run.started_at.to_rfc3339(),
+                finished_at,
+                run.result_summary,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_bot_runs(&self, bot_id: &str, limit: u32) -> rusqlite::Result<Vec<crate::bots::BotRun>> {
+        let conn = self.conn.lock().expect("db lock poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT id, bot_id, conversation_id, status, started_at, finished_at, result_summary
+             FROM bot_runs WHERE bot_id = ?
+             ORDER BY started_at DESC LIMIT ?",
+        )?;
+        let rows = stmt.query_map(params![bot_id, limit as i64], |row| {
+            let status_str: String = row.get(3)?;
+            let finished_str: Option<String> = row.get(5)?;
+            let status = match status_str.as_str() {
+                "running" => crate::bots::BotRunStatus::Running,
+                "failed" => crate::bots::BotRunStatus::Failed,
+                "cancelled" => crate::bots::BotRunStatus::Cancelled,
+                _ => crate::bots::BotRunStatus::Succeeded,
+            };
+            Ok(crate::bots::BotRun {
+                id: row.get(0)?,
+                bot_id: row.get(1)?,
+                conversation_id: row.get(2)?,
+                status,
+                started_at: parse_dt(row.get::<_, String>(4)?),
+                finished_at: finished_str.map(parse_dt),
+                result_summary: row.get(6)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    // ----- inter-agent messages -----
+
+    pub fn enqueue_bot_message(&self, msg: &crate::bots::BotMessage) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().expect("db lock poisoned");
+        conn.execute(
+            "INSERT INTO bot_messages (id, from_bot_id, to_bot_id, body, created_at, read, conversation_id)
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
+            params![
+                msg.id,
+                msg.from_bot_id,
+                msg.to_bot_id,
+                msg.body,
+                msg.created_at.to_rfc3339(),
+                msg.read as i64,
+                msg.conversation_id,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_inbox(&self, bot_id: &str, include_read: bool) -> rusqlite::Result<Vec<crate::bots::BotMessage>> {
+        let conn = self.conn.lock().expect("db lock poisoned");
+        let query = if include_read {
+            "SELECT id, from_bot_id, to_bot_id, body, created_at, read, conversation_id
+             FROM bot_messages WHERE to_bot_id = ? ORDER BY created_at ASC"
+        } else {
+            "SELECT id, from_bot_id, to_bot_id, body, created_at, read, conversation_id
+             FROM bot_messages WHERE to_bot_id = ? AND read = 0 ORDER BY created_at ASC"
+        };
+        let mut stmt = conn.prepare(query)?;
+        let rows = stmt.query_map(params![bot_id], |row| {
+            Ok(crate::bots::BotMessage {
+                id: row.get(0)?,
+                from_bot_id: row.get(1)?,
+                to_bot_id: row.get(2)?,
+                body: row.get(3)?,
+                created_at: parse_dt(row.get::<_, String>(4)?),
+                read: row.get::<_, i64>(5)? != 0,
+                conversation_id: row.get(6)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    pub fn mark_bot_messages_read(&self, bot_id: &str) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().expect("db lock poisoned");
+        conn.execute(
+            "UPDATE bot_messages SET read = 1 WHERE to_bot_id = ? AND read = 0",
+            params![bot_id],
+        )?;
+        Ok(())
+    }
+
+    // ----- conversations (continued) -----
+
+    /// Update a conversation's bot ownership. Used by the bot executor
+    /// when it creates a fresh conversation for a scheduled run.
+    pub fn set_conversation_bot(&self, conversation_id: &str, bot_id: Option<&str>) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().expect("db lock poisoned");
+        conn.execute(
+            "UPDATE conversations SET bot_id = ? WHERE id = ?",
+            params![bot_id, conversation_id],
         )?;
         Ok(())
     }

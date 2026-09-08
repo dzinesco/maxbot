@@ -5,6 +5,14 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
+  Bot,
+  BotChunkEvent,
+  BotDoneEvent,
+  BotErrorEvent,
+  BotMessage,
+  BotRun,
+  BotRunOutput,
+  BotSchedule,
   ChunkEvent,
   Conversation,
   DoneEvent,
@@ -12,14 +20,21 @@ import type {
   Message,
   SendMessageResponse,
   Settings,
+  ToolSummary,
 } from "./api";
 
 export async function listConversations(): Promise<Conversation[]> {
   return invoke<Conversation[]>("list_conversations");
 }
 
-export async function createConversation(title?: string): Promise<Conversation> {
-  return invoke<Conversation>("create_conversation", { title: title ?? null });
+export async function createConversation(
+  title?: string,
+  botId?: string,
+): Promise<Conversation> {
+  return invoke<Conversation>("create_conversation", {
+    title: title ?? null,
+    botId: botId ?? null,
+  });
 }
 
 export async function deleteConversation(id: string): Promise<void> {
@@ -78,4 +93,88 @@ export async function onError(
   handler: (event: ErrorEvent) => void,
 ): Promise<UnlistenFn> {
   return listen<ErrorEvent>("chat://error", (e) => handler(e.payload));
+}
+
+// ---- Bot commands ----
+
+export async function listBots(): Promise<Bot[]> {
+  return invoke<Bot[]>("list_bots");
+}
+
+export async function getBot(id: string): Promise<Bot | null> {
+  return invoke<Bot | null>("get_bot", { id });
+}
+
+export async function upsertBot(bot: Bot): Promise<Bot> {
+  return invoke<Bot>("upsert_bot", { bot });
+}
+
+export async function deleteBot(id: string): Promise<void> {
+  await invoke("delete_bot", { id });
+}
+
+export async function getBotSchedule(
+  botId: string,
+): Promise<BotSchedule | null> {
+  return invoke<BotSchedule | null>("get_schedule", { botId });
+}
+
+export async function upsertBotSchedule(
+  schedule: BotSchedule,
+): Promise<BotSchedule> {
+  return invoke<BotSchedule>("upsert_schedule", { schedule });
+}
+
+export async function listAllSchedules(): Promise<BotSchedule[]> {
+  return invoke<BotSchedule[]>("list_all_schedules");
+}
+
+export async function listBotRuns(
+  botId: string,
+  limit?: number,
+): Promise<BotRun[]> {
+  return invoke<BotRun[]>("list_bot_runs", {
+    botId,
+    limit: limit ?? null,
+  });
+}
+
+export async function listInbox(
+  botId: string,
+  includeRead?: boolean,
+): Promise<BotMessage[]> {
+  return invoke<BotMessage[]>("list_inbox", {
+    botId,
+    includeRead: includeRead ?? null,
+  });
+}
+
+export async function markInboxRead(botId: string): Promise<void> {
+  await invoke("mark_inbox_read", { botId });
+}
+
+export async function listAvailableTools(): Promise<ToolSummary[]> {
+  return invoke<ToolSummary[]>("list_available_tools");
+}
+
+export async function runBotNow(botId: string): Promise<BotRunOutput> {
+  return invoke<BotRunOutput>("run_bot_now", { botId });
+}
+
+export async function onBotChunk(
+  handler: (event: BotChunkEvent) => void,
+): Promise<UnlistenFn> {
+  return listen<BotChunkEvent>("bot://chunk", (e) => handler(e.payload));
+}
+
+export async function onBotDone(
+  handler: (event: BotDoneEvent) => void,
+): Promise<UnlistenFn> {
+  return listen<BotDoneEvent>("bot://done", (e) => handler(e.payload));
+}
+
+export async function onBotError(
+  handler: (event: BotErrorEvent) => void,
+): Promise<UnlistenFn> {
+  return listen<BotErrorEvent>("bot://error", (e) => handler(e.payload));
 }

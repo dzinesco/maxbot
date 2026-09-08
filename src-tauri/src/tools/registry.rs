@@ -70,6 +70,20 @@ impl ToolRegistry {
             .ok_or_else(|| ToolError::UnknownTool(invocation.name.clone()))?;
         tool.execute(invocation, context).await
     }
+
+    /// Return a new registry with only the named tools. Unknown names
+    /// are silently dropped — this is how a bot's `allowed_tools` list
+    /// gets enforced. Consent requirements are taken from the
+    /// underlying tool unchanged.
+    pub fn filtered(&self, allowed: &[String]) -> ToolRegistry {
+        let mut by_name: HashMap<&'static str, Arc<dyn Tool>> = HashMap::new();
+        for name in allowed {
+            if let Some(tool) = self.by_name.get(name.as_str()) {
+                by_name.insert(tool.name(), tool.clone());
+            }
+        }
+        ToolRegistry { by_name }
+    }
 }
 
 /// Convenience for tests: a totally empty registry.

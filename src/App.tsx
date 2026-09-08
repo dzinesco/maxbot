@@ -3,29 +3,56 @@ import { Sidebar } from "./components/Sidebar";
 import { ChatView } from "./components/ChatView";
 import { Composer } from "./components/Composer";
 import { Settings } from "./components/Settings";
+import { BotsPanel } from "./components/BotsPanel";
+import { BotEditor } from "./components/BotEditor";
+import { BotInbox } from "./components/BotInbox";
 import {
   createConversation,
+  deleteBot,
   deleteConversation,
+  getBot,
+  getBotSchedule,
   getMessages,
   getSettings,
+  listAllSchedules,
+  listAvailableTools,
+  listBots,
+  listBotRuns,
   listConversations,
+  listInbox,
+  markInboxRead,
+  onBotChunk,
+  onBotDone,
+  onBotError,
   onChunk,
   onDone,
   onError,
   renameConversation,
+  runBotNow,
   saveSettings,
   sendMessage,
   stopMessage,
+  upsertBot,
+  upsertBotSchedule,
 } from "./lib/tauri";
-import type {
-  ChunkEvent,
-  Conversation,
-  DoneEvent,
-  ErrorEvent,
-  Message,
-  Settings as SettingsT,
+import {
+  blankBot,
+  DEFAULT_SETTINGS,
+  type Bot,
+  type BotChunkEvent,
+  type BotDoneEvent,
+  type BotErrorEvent,
+  type BotMessage,
+  type BotRun,
+  type BotSchedule,
+  type ChunkEvent,
+  type Conversation,
+  type DoneEvent,
+  type ErrorEvent,
+  type Message,
+  type Settings as SettingsT,
+  type ToolSummary,
 } from "./lib/api";
-import { DEFAULT_SETTINGS } from "./lib/api";
 
 interface PendingTurn {
   /** id of the assistant message we're streaming into */
@@ -44,26 +71,87 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [streamingId, setStreamingId] = useState<string | null>(null);
   const [bootError, setBootError] = useState<string | null>(null);
+  const [bots, setBots] = useState<Bot[]>([]);
+  const [botSchedules, setBotSchedules] = useState<Record<string, BotSchedule>>(
+    {},
+  );
+  const [botLastRuns, setBotLastRuns] = useState<Record<string, BotRun>>({});
+  const [unreadCounts, setUnreadCounts] = useState<Record<string, number>>({});
+  const [availableTools, setAvailableTools] = useState<ToolSummary[]>([]);
+  const [editorState, setEditorState] = useState<
+    | { mode: "closed" }
+    | { mode: "new" }
+    | { mode: "edit"; botId: string }
+    | { mode: "inbox"; botId: string }
+  >({ mode: "closed" });
+  const [editorDraft, setEditorDraft] = useState<{
+    bot: Bot;
+    schedule: BotSchedule | null;
+  } | null>(null);
+  const [editorAvailableTools, setEditorAvailableTools] = useState<
+    ToolSummary[]
+  >([]);
+  const [botsCollapsed, setBotsCollapsed] = useState(false);
+  const [runningBotId, setRunningBotId] = useState<string | null>(null);
   /** Map of assistantId -> accumulated streaming state. Cleared on done. */
   const pendingRef = useRef<PendingTurn | null>(null);
+  /** Same as `pendingRef` but for bot runs (assistantMessageId keyed). */
+  const botPendingRef = useRef<PendingTurn | null>(null);
+  /** Last finished bot run per bot — surfaces in the chat view as a banner. */
+  const [lastBotFinish, setLastBotFinish] = useState<{
+    botId: string;
+    runId: string;
+    conversationId: string;
+    summary: string;
+  } | null>(null);
   const requestSeq = useRef(0);
 
   // --- bootstrap ---
   useEffect(() => {
     (async () => {
       try {
-        const [s, c] = await Promise.all([getSettings(), listConversations()]);
+        const [s, c, b, sched, tools] = await Promise.all([
+          getSettings(),
+          listConversations(),
+          listBots(),
+          listAllSchedules(),
+          listAvailableTools(),
+        ]);
         setSettings(s);
         setConversations(c);
+        setBots(b);
+        const schedMap: Record<string, BotSchedule> = {};
+        for (const sc of sched) schedMap[sc.bot_id] = sc;
+        setBotSchedules(schedMap);
+        setAvailableTools(tools);
         if (c.length > 0) {
           setActiveId(c[0].id);
         } else {
           // No conversations yet — create a fresh "New chat" so the user
           // can start typing immediately.
-          const created = await createConversation(undefined);
+          const created = await createConversation(undefined, undefined);
           setConversations([created]);
           setActiveId(created.id);
         }
+        // Last-run snapshot per bot, plus unread counts.
+        const runsEntries = await Promise.all(
+          b.map(async (bot) => {
+            const runs = await listBotRuns(bot.id, 1);
+            return [bot.id, runs[0]] as const;
+          }),
+        );
+        const runMap: Record<string, BotRun> = {};
+        for (const [id, r] of runsEntries) if (r) runMap[id] = r;
+        setBotLastRuns(runMap);
+        const inboxEntries = await Promise.all(
+          b.map(async (bot) => {
+            const msgs = await listInbox(bot.id, false);
+            return [bot.id, msgs.length] as const;
+          }),
+        );
+        const unread: Record<string, number> = {};
+        for (const [id, n] of inboxEntries) if (n > 0) unread[id] = n;
+        setUnreadCounts(unread);
       } catch (e) {
         setBootError(String(e));
       }
@@ -135,12 +223,90 @@ export default function App() {
         pendingRef.current = null;
         setStreamingId(null);
       });
+      // Bot events: route into the active conversation's messages so the
+      // user sees the bot streaming into its own thread in the chat view.
+      const u4 = await onBotChunk((event: BotChunkEvent) => {
+        // Only render the bot's stream if the user is currently looking
+        // at the bot's conversation; otherwise we'd be writing into the
+        // wrong thread.
+        if (event.conversation_id !== activeIdRef.current) return;
+        let p = botPendingRef.current;
+        if (!p || p.assistantId !== "bot-active") {
+          p = {
+            assistantId: "bot-active",
+            text: "",
+            toolCalls: new Map(),
+          };
+          botPendingRef.current = p;
+        }
+        if (event.chunk.kind === "text") {
+          p.text += event.chunk.delta;
+          setMessages((prev) =>
+            upsertBotStreamMessage(prev, p.text, p.toolCalls),
+          );
+        } else if (event.chunk.kind === "tool_call_delta") {
+          const tc = event.chunk;
+          const existing = p.toolCalls.get(tc.id) ?? {
+            id: tc.id,
+            name: "",
+            arguments: "",
+          };
+          if (tc.name) existing.name = tc.name;
+          if (tc.arguments_delta) existing.arguments += tc.arguments_delta;
+          p.toolCalls.set(tc.id, existing);
+        }
+      });
+      const u5 = await onBotDone((event: BotDoneEvent) => {
+        const pending = botPendingRef.current;
+        if (pending) {
+          setMessages((prev) =>
+            upsertBotStreamMessage(
+              prev,
+              pending.text,
+              pending.toolCalls,
+              true,
+            ),
+          );
+        }
+        botPendingRef.current = null;
+        setRunningBotId(null);
+        setLastBotFinish({
+          botId: event.bot_id,
+          runId: event.bot_run_id,
+          conversationId: event.conversation_id,
+          summary: event.result_summary,
+        });
+        // Refresh last-run map for the affected bot.
+        listBotRuns(event.bot_id, 1)
+          .then((runs) => {
+            const r = runs[0];
+            if (r) setBotLastRuns((prev) => ({ ...prev, [event.bot_id]: r }));
+          })
+          .catch(() => {});
+        // Refresh conversations in case a new bot-conversation was created.
+        listConversations()
+          .then(setConversations)
+          .catch(() => {});
+      });
+      const u6 = await onBotError((event: BotErrorEvent) => {
+        setLastBotFinish({
+          botId: event.bot_id,
+          runId: event.bot_run_id,
+          conversationId: event.conversation_id,
+          summary: `[error] ${event.message}`,
+        });
+        botPendingRef.current = null;
+        setRunningBotId(null);
+      });
       if (cancelled) {
         u1();
         u2();
         u3();
+        u4();
+        u5();
+        u6();
       } else {
-        unlistens.push(u1, u2, u3);
+        unlistens.push(u1, u2, u3, u4, u5, u6);
       }
     })();
     return () => {
@@ -148,6 +314,13 @@ export default function App() {
       for (const u of unlistens) u();
     };
   }, []);
+
+  // Keep a ref to the active conversation id so the bot chunk handler
+  // (registered once) can see the latest value without re-subscribing.
+  const activeIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    activeIdRef.current = activeId;
+  }, [activeId]);
 
   // --- load messages when active conversation changes ---
   useEffect(() => {
@@ -159,6 +332,8 @@ export default function App() {
       try {
         const m = await getMessages(activeId);
         setMessages(m);
+        // Clear any stale "bot streaming" state when switching threads.
+        botPendingRef.current = null;
       } catch (e) {
         console.error("load messages failed:", e);
       }
@@ -176,7 +351,7 @@ export default function App() {
   }, []);
 
   const handleNewConversation = useCallback(async () => {
-    const created = await createConversation(undefined);
+    const created = await createConversation(undefined, undefined);
     await refreshConversations();
     setActiveId(created.id);
   }, [refreshConversations]);
@@ -190,7 +365,7 @@ export default function App() {
         if (remaining.length > 0) {
           setActiveId(remaining[0].id);
         } else {
-          const created = await createConversation(undefined);
+          const created = await createConversation(undefined, undefined);
           setConversations([created]);
           setActiveId(created.id);
         }
@@ -217,10 +392,6 @@ export default function App() {
       const requestId = `req-${++requestSeq.current}`;
       try {
         const result = await sendMessage(activeId, content, requestId);
-        // Optimistically add the user + placeholder assistant message so the
-        // UI shows the turn before any chunks arrive. The Rust side has
-        // already persisted them, so a follow-up reloadMessages would
-        // re-fetch the same data.
         const now = new Date().toISOString();
         const userMsg: Message = {
           id: result.user_message_id,
@@ -267,6 +438,164 @@ export default function App() {
     setSettings(next);
   }, []);
 
+  // --- bot handlers ---
+
+  const refreshBots = useCallback(async () => {
+    const [b, sched] = await Promise.all([listBots(), listAllSchedules()]);
+    setBots(b);
+    const schedMap: Record<string, BotSchedule> = {};
+    for (const sc of sched) schedMap[sc.bot_id] = sc;
+    setBotSchedules(schedMap);
+    const runsEntries = await Promise.all(
+      b.map(async (bot) => {
+        const runs = await listBotRuns(bot.id, 1);
+        return [bot.id, runs[0]] as const;
+      }),
+    );
+    const runMap: Record<string, BotRun> = {};
+    for (const [id, r] of runsEntries) if (r) runMap[id] = r;
+    setBotLastRuns(runMap);
+    const inboxEntries = await Promise.all(
+      b.map(async (bot) => {
+        const msgs = await listInbox(bot.id, false);
+        return [bot.id, msgs.length] as const;
+      }),
+    );
+    const unread: Record<string, number> = {};
+    for (const [id, n] of inboxEntries) if (n > 0) unread[id] = n;
+    setUnreadCounts(unread);
+  }, []);
+
+  const handleNewBot = useCallback(() => {
+    setEditorDraft({ bot: blankBot(), schedule: null });
+    setEditorAvailableTools(availableTools);
+    setEditorState({ mode: "new" });
+  }, [availableTools]);
+
+  const handleEditBot = useCallback(
+    async (id: string) => {
+      const [bot, schedule] = await Promise.all([
+        getBot(id),
+        getBotSchedule(id),
+      ]);
+      if (!bot) {
+        alert("Bot no longer exists.");
+        return;
+      }
+      setEditorDraft({ bot, schedule });
+      setEditorAvailableTools(availableTools);
+      setEditorState({ mode: "edit", botId: id });
+    },
+    [availableTools],
+  );
+
+  const handleDeleteBot = useCallback(
+    async (id: string) => {
+      await deleteBot(id);
+      await refreshBots();
+    },
+    [refreshBots],
+  );
+
+  const handleRunBot = useCallback(
+    async (id: string) => {
+      setRunningBotId(id);
+      setLastBotFinish(null);
+      try {
+        const out = await runBotNow(id);
+        // Switch the active view to the bot's conversation so the user
+        // sees the streaming output. Refresh conversations first so
+        // any newly-created bot thread is in the sidebar.
+        await refreshConversations();
+        if (out.conversation_id) {
+          setActiveId(out.conversation_id);
+        }
+      } catch (e) {
+        alert(`Run failed: ${String(e)}`);
+        setRunningBotId(null);
+      }
+    },
+    [refreshConversations],
+  );
+
+  const handleOpenInbox = useCallback(
+    async (id: string) => {
+      // Mark the bot's inbox as read so the badge clears, then open
+      // the inbox modal. We could open the modal first and then mark
+      // read, but doing it up front means the user sees the right
+      // count immediately on next reload.
+      await markInboxRead(id);
+      setUnreadCounts((prev) => {
+        const next = { ...prev };
+        delete next[id];
+        return next;
+      });
+      setEditorState({ mode: "inbox", botId: id });
+    },
+    [],
+  );
+
+  const handleSaveBot = useCallback(
+    async (bot: Bot, schedule: BotSchedule) => {
+      const saved = await upsertBot(bot);
+      await upsertBotSchedule({ ...schedule, bot_id: saved.id });
+      setEditorState({ mode: "closed" });
+      setEditorDraft(null);
+      await refreshBots();
+    },
+    [refreshBots],
+  );
+
+  // --- derived ---
+
+  const activeConversation = useMemo(
+    () => conversations.find((c) => c.id === activeId) ?? null,
+    [conversations, activeId],
+  );
+  const activeBot = useMemo(() => {
+    if (!activeConversation?.bot_id) return null;
+    return bots.find((b) => b.id === activeConversation.bot_id) ?? null;
+  }, [activeConversation, bots]);
+  const inboxMessagesForModal = useMemo<BotMessage[]>(() => [], []);
+
+  // Editor draft drives the modal: when the user clicks New/Edit, we
+  // prefill the draft. The save handler is in `handleSaveBot` above.
+  const editorModal = (() => {
+    if (editorState.mode === "closed" || !editorDraft) return null;
+    if (editorState.mode === "inbox") {
+      const bot = bots.find((b) => b.id === editorState.botId);
+      if (!bot) return null;
+      return (
+        <BotInboxView
+          botId={editorState.botId}
+          onClose={() => setEditorState({ mode: "closed" })}
+        />
+      );
+    }
+    return (
+      <BotEditor
+        initial={editorDraft.bot}
+        schedule={editorDraft.schedule}
+        availableTools={editorAvailableTools}
+        isNew={editorState.mode === "new"}
+        onClose={() => {
+          setEditorState({ mode: "closed" });
+          setEditorDraft(null);
+        }}
+        onSave={handleSaveBot}
+        onDelete={
+          editorState.mode === "edit"
+            ? () => {
+                handleDeleteBot(editorState.botId);
+                setEditorState({ mode: "closed" });
+                setEditorDraft(null);
+              }
+            : undefined
+        }
+      />
+    );
+  })();
+
   const status = useMemo<"online" | "missing" | "checking">(() => {
     if (bootError) return "missing";
     if (!settings) return "checking";
@@ -278,14 +607,68 @@ export default function App() {
       <Sidebar
         conversations={conversations}
         activeId={activeId}
+        bots={bots}
         onSelect={setActiveId}
         onNew={handleNewConversation}
         onDelete={handleDeleteConversation}
         onRename={handleRenameConversation}
         onOpenSettings={() => setSettingsOpen(true)}
         status={status}
+        botPanel={
+          <BotsPanel
+            bots={bots}
+            schedules={botSchedules}
+            runs={botLastRuns}
+            unreadCounts={unreadCounts}
+            onNewBot={handleNewBot}
+            onEditBot={handleEditBot}
+            onDeleteBot={handleDeleteBot}
+            onRunBot={handleRunBot}
+            onOpenInbox={handleOpenInbox}
+            runningBotId={runningBotId}
+            collapsed={botsCollapsed}
+            onToggleCollapsed={() => setBotsCollapsed((v) => !v)}
+          />
+        }
       />
       <main className="main">
+        {activeBot && (
+          <div className="bot-banner">
+            <span className="bot-icon">{activeBot.icon || "🤖"}</span>
+            <span>
+              Viewing <strong>{activeBot.name}</strong>'s thread
+            </span>
+            {runningBotId === activeBot.id && (
+              <span className="bot-running-dot" title="Running now…" />
+            )}
+            <button
+              className="ghost small"
+              onClick={() => handleEditBot(activeBot.id)}
+            >
+              Edit bot
+            </button>
+          </div>
+        )}
+        {lastBotFinish && lastBotFinish.conversationId === activeId && (
+          <div
+            className={`bot-finish-banner${
+              lastBotFinish.summary.startsWith("[error]") ? " error" : ""
+            }`}
+          >
+            <span>
+              Bot run finished:{" "}
+              {lastBotFinish.summary.length > 200
+                ? lastBotFinish.summary.slice(0, 200) + "…"
+                : lastBotFinish.summary}
+            </span>
+            <button
+              className="ghost small"
+              onClick={() => setLastBotFinish(null)}
+            >
+              Dismiss
+            </button>
+          </div>
+        )}
         {messages.length === 0 ? (
           <div className="main-empty">
             <h1>MaxBot</h1>
@@ -315,6 +698,69 @@ export default function App() {
           onSave={handleSaveSettings}
         />
       )}
+      {editorModal}
     </div>
   );
+}
+
+/**
+ * Helper used by the bot chunk handler: keeps a single "bot-streaming"
+ * message in the message list. While the bot is streaming, we upsert
+ * one ephemeral message with id `__bot_stream__`; on done/error we
+ * finalize it (clear the placeholder id, leave content in place).
+ */
+function upsertBotStreamMessage(
+  prev: Message[],
+  text: string,
+  toolCalls: Map<string, { id: string; name: string; arguments: string }>,
+  finalize: boolean = false,
+): Message[] {
+  const placeholderId = "__bot_stream__";
+  const now = new Date().toISOString();
+  const tcs = Array.from(toolCalls.values());
+  if (finalize) {
+    // Drop the placeholder; the persistent assistant messages from the
+    // server-side run are already in the DB and will appear on next
+    // reload. We just leave the streaming text in the ephemeral row
+    // and then remove it.
+    return prev.filter((m) => m.id !== placeholderId);
+  }
+  const idx = prev.findIndex((m) => m.id === placeholderId);
+  if (idx === -1) {
+    return [
+      ...prev,
+      {
+        id: placeholderId,
+        conversation_id: "",
+        role: "assistant",
+        content: text,
+        tool_calls: tcs,
+        created_at: now,
+      },
+    ];
+  }
+  const next = prev.slice();
+  next[idx] = { ...next[idx], content: text, tool_calls: tcs };
+  return next;
+}
+
+/** Modal wrapper that fetches and renders the bot's full inbox. */
+function BotInboxView({
+  botId,
+  onClose,
+}: {
+  botId: string;
+  onClose: () => void;
+}) {
+  const [bot, setBot] = useState<Bot | null>(null);
+  const [msgs, setMsgs] = useState<BotMessage[]>([]);
+  useEffect(() => {
+    (async () => {
+      const [b, m] = await Promise.all([getBot(botId), listInbox(botId, true)]);
+      setBot(b);
+      setMsgs(m);
+    })();
+  }, [botId]);
+  if (!bot) return null;
+  return <BotInbox bot={bot} messages={msgs} onClose={onClose} />;
 }

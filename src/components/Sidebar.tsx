@@ -1,29 +1,36 @@
-import { useState } from "react";
-import type { Conversation } from "../lib/api";
+import { useState, type ReactNode } from "react";
+import type { Bot, Conversation } from "../lib/api";
 
 interface SidebarProps {
   conversations: Conversation[];
   activeId: string | null;
+  bots: Bot[];
   onSelect: (id: string) => void;
   onNew: () => void;
   onDelete: (id: string) => void;
   onRename: (id: string, title: string) => void;
   onOpenSettings: () => void;
   status: "online" | "missing" | "checking";
+  /** Slot for the BotsPanel component (rendered between conversation
+   *  list and the footer). */
+  botPanel?: ReactNode;
 }
 
 export function Sidebar({
   conversations,
   activeId,
+  bots,
   onSelect,
   onNew,
   onDelete,
   onRename,
   onOpenSettings,
   status,
+  botPanel,
 }: SidebarProps) {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
+  const botsById = new Map(bots.map((b) => [b.id, b]));
 
   return (
     <aside className="sidebar">
@@ -48,65 +55,78 @@ export function Sidebar({
             No conversations yet.
           </div>
         )}
-        {conversations.map((c) => (
-          <div
-            key={c.id}
-            className={`conversation-item${activeId === c.id ? " active" : ""}`}
-            onClick={() => {
-              if (editingId === c.id) return;
-              onSelect(c.id);
-            }}
-            onDoubleClick={() => {
-              setEditingId(c.id);
-              setDraft(c.title);
-            }}
-            title="Double-click to rename"
-          >
-            {editingId === c.id ? (
-              <input
-                autoFocus
-                value={draft}
-                onChange={(e) => setDraft(e.target.value)}
-                onBlur={() => {
-                  const trimmed = draft.trim();
-                  if (trimmed && trimmed !== c.title) onRename(c.id, trimmed);
-                  setEditingId(null);
-                }}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") {
-                    (e.target as HTMLInputElement).blur();
-                  } else if (e.key === "Escape") {
-                    setEditingId(null);
-                  }
-                }}
-                style={{ flex: 1, fontSize: 13, padding: "2px 6px" }}
-                onClick={(e) => e.stopPropagation()}
-              />
-            ) : (
-              <span className="title">{c.title}</span>
-            )}
-            <span
-              className="actions"
-              onClick={(e) => e.stopPropagation()}
+        {conversations.map((c) => {
+          const bot = c.bot_id ? botsById.get(c.bot_id) : undefined;
+          return (
+            <div
+              key={c.id}
+              className={`conversation-item${activeId === c.id ? " active" : ""}`}
+              onClick={() => {
+                if (editingId === c.id) return;
+                onSelect(c.id);
+              }}
+              onDoubleClick={() => {
+                setEditingId(c.id);
+                setDraft(c.title);
+              }}
+              title="Double-click to rename"
             >
-              <button
-                className="danger"
-                onClick={() => {
-                  if (
-                    confirm(
-                      `Delete "${c.title}"? This cannot be undone.`,
-                    )
-                  ) {
-                    onDelete(c.id);
-                  }
-                }}
+              {bot && (
+                <span
+                  className="conv-bot-dot"
+                  style={bot.color ? { background: bot.color } : undefined}
+                  title={bot.name}
+                >
+                  {bot.icon || "🤖"}
+                </span>
+              )}
+              {editingId === c.id ? (
+                <input
+                  autoFocus
+                  value={draft}
+                  onChange={(e) => setDraft(e.target.value)}
+                  onBlur={() => {
+                    const trimmed = draft.trim();
+                    if (trimmed && trimmed !== c.title) onRename(c.id, trimmed);
+                    setEditingId(null);
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      (e.target as HTMLInputElement).blur();
+                    } else if (e.key === "Escape") {
+                      setEditingId(null);
+                    }
+                  }}
+                  style={{ flex: 1, fontSize: 13, padding: "2px 6px" }}
+                  onClick={(e) => e.stopPropagation()}
+                />
+              ) : (
+                <span className="title">{c.title}</span>
+              )}
+              <span
+                className="actions"
+                onClick={(e) => e.stopPropagation()}
               >
-                Delete
-              </button>
-            </span>
-          </div>
-        ))}
+                <button
+                  className="danger"
+                  onClick={() => {
+                    if (
+                      confirm(
+                        `Delete "${c.title}"? This cannot be undone.`,
+                      )
+                    ) {
+                      onDelete(c.id);
+                    }
+                  }}
+                >
+                  Delete
+                </button>
+              </span>
+            </div>
+          );
+        })}
       </div>
+      {botPanel}
       <div className="sidebar-footer">
         <div
           className={`status ${status === "online" ? "online" : status === "missing" ? "missing" : ""}`}

@@ -22,6 +22,7 @@ export interface Conversation {
   title: string;
   created_at: string;
   updated_at: string;
+  bot_id: string | null;
 }
 
 export interface Settings {
@@ -68,4 +69,99 @@ export interface ErrorEvent {
   request_id: string;
   assistant_message_id: string;
   message: string;
+}
+
+// ---- Bot types ----
+
+export interface Bot {
+  id: string;
+  name: string;
+  description: string;
+  system_prompt: string;
+  default_model: string;
+  allowed_tools: string[];
+  icon: string;
+  color: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export type BotRunStatus = "running" | "succeeded" | "failed" | "cancelled";
+
+export interface BotRun {
+  id: string;
+  bot_id: string;
+  conversation_id: string;
+  status: BotRunStatus;
+  started_at: string;
+  finished_at: string | null;
+  result_summary: string;
+}
+
+export interface BotSchedule {
+  bot_id: string;
+  interval_seconds: number;
+  last_run_at: string | null;
+  last_conversation_id: string | null;
+}
+
+export interface BotMessage {
+  id: string;
+  from_bot_id: string;
+  to_bot_id: string;
+  body: string;
+  created_at: string;
+  read: boolean;
+  conversation_id: string | null;
+}
+
+export interface ToolSummary {
+  name: string;
+  description: string;
+  requires_consent: boolean;
+}
+
+export interface BotChunkEvent {
+  bot_id: string;
+  bot_run_id: string;
+  conversation_id: string;
+  chunk: StreamChunk;
+}
+
+export interface BotDoneEvent {
+  bot_id: string;
+  bot_run_id: string;
+  conversation_id: string;
+  result_summary: string;
+}
+
+export interface BotErrorEvent {
+  bot_id: string;
+  bot_run_id: string;
+  conversation_id: string;
+  message: string;
+}
+
+export interface BotRunOutput {
+  run_id: string;
+  conversation_id: string;
+  status: BotRunStatus;
+  result_summary: string;
+}
+
+// Helper: build a fresh empty bot (used by the editor's "New bot" path).
+export function blankBot(): Bot {
+  const now = new Date().toISOString();
+  return {
+    id: "",
+    name: "",
+    description: "",
+    system_prompt: "",
+    default_model: "MiniMax-M3",
+    allowed_tools: [],
+    icon: "🤖",
+    color: "",
+    created_at: now,
+    updated_at: now,
+  };
 }
