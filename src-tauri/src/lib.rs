@@ -8,6 +8,7 @@
 mod commands;
 mod llm;
 mod storage;
+mod tools;
 
 use std::sync::Arc;
 
