@@ -21,6 +21,12 @@
   --radius-sm: 6px;
   --radius-md: 10px;
   --radius-lg: 14px;
+  /* Avenir Next is a system font on macOS with a distinctive
+   * geometric-humanist character. Used for display surfaces
+   * (brand mark, empty-state title, sidebar wordmark). No
+   * network fetch — falls back to system-ui elsewhere. */
+  --font-display: "Avenir Next", "Avenir Next Condensed Demi Bold",
+    "Avenir", system-ui, sans-serif;
   --font-sans: -apple-system, BlinkMacSystemFont, "Inter", "SF Pro Text",
     "Segoe UI", system-ui, sans-serif;
   --font-mono: "JetBrains Mono", "SF Mono", "Menlo", "Consolas", monospace;
@@ -131,16 +137,48 @@ textarea:focus {
   display: flex;
   align-items: center;
   gap: 8px;
-  font-weight: 600;
-  letter-spacing: 0.2px;
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 15px;
+  letter-spacing: -0.01em;
+  color: var(--text-0);
 }
 
-.brand-dot {
-  width: 10px;
-  height: 10px;
-  border-radius: 50%;
-  background: var(--accent);
-  box-shadow: 0 0 12px var(--accent-soft);
+.brand-wordmark {
+  /* The "M" inside the wordmark is set slightly larger than
+   * the rest of the letters to make the brand feel
+   * intentional, not templated. */
+  font-size: 16px;
+  letter-spacing: -0.02em;
+  color: var(--accent);
+  font-weight: 800;
+}
+
+/* A miniature version of the monogram for the sidebar. Same
+ * gradient as the main mark but no shadow, no accent dot, no
+ * pulse — the full effect is reserved for the empty state. */
+.brand-mark {
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  background: linear-gradient(135deg, #8b5cf6 0%, #7c3aed 50%, #4c1d95 100%);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--font-display);
+  font-size: 13px;
+  font-weight: 800;
+  letter-spacing: -0.04em;
+  color: #fff;
+  flex-shrink: 0;
+}
+
+.brand-name {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 15px;
+  letter-spacing: -0.01em;
+  color: var(--text-0);
 }
 
 .conversation-list {
@@ -261,27 +299,86 @@ textarea:focus {
   }
 }
 
+/* The brand monogram. Tighter than a generic "letter in a
+ * square" — the M is set in the display face at heavy weight
+ * with a subtle negative letter-spacing, and a small accent
+ * dot sits in the bottom-right corner as a signature
+ * affordance (it pulses to signal "agent is here"). The
+ * gradient is three-stop for depth, not a flat fill. */
 .main-empty-mark {
-  width: 56px;
-  height: 56px;
-  border-radius: 16px;
-  background: linear-gradient(135deg, var(--accent), #5b21b6);
+  width: 52px;
+  height: 52px;
+  border-radius: 14px;
+  background: linear-gradient(135deg, #8b5cf6 0%, #7c3aed 50%, #4c1d95 100%);
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 22px;
-  font-weight: 700;
+  font-family: var(--font-display);
+  font-size: 24px;
+  font-weight: 800;
+  letter-spacing: -0.04em;
   color: #fff;
-  margin-bottom: 4px;
-  box-shadow: 0 8px 24px rgba(124, 58, 237, 0.32);
+  margin-bottom: 6px;
+  box-shadow:
+    0 10px 28px rgba(124, 58, 237, 0.32),
+    inset 0 1px 0 rgba(255, 255, 255, 0.18);
+  position: relative;
+  overflow: hidden;
+}
+
+.main-empty-mark::before {
+  /* Soft inner highlight on the top edge for a hint of
+   * dimensionality — a common technique in icon design. */
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 50%;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.12), transparent);
+  pointer-events: none;
+}
+
+.main-empty-mark::after {
+  /* Signature accent dot — a small, deliberate mark in the
+   * bottom-right. It pulses subtly to feel alive without
+   * being noisy. */
+  content: "";
+  position: absolute;
+  bottom: 7px;
+  right: 7px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #34d399;
+  box-shadow: 0 0 8px rgba(52, 211, 153, 0.6);
+  animation: mark-pulse 2.4s ease-in-out infinite;
+}
+
+@keyframes mark-pulse {
+  0%, 100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.55;
+    transform: scale(0.85);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .main-empty-mark::after {
+    animation: none;
+  }
 }
 
 .main-empty h1 {
   margin: 0;
-  font-size: 28px;
-  font-weight: 600;
+  font-family: var(--font-display);
+  font-size: 30px;
+  font-weight: 700;
   color: var(--text-0);
-  letter-spacing: -0.01em;
+  letter-spacing: -0.02em;
 }
 
 .main-empty-tagline {
@@ -329,16 +426,17 @@ textarea:focus {
 .message .avatar {
   width: 28px;
   height: 28px;
-  border-radius: 50%;
+  border-radius: 8px;
   background: var(--bg-3);
   color: var(--text-1);
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 11px;
-  font-weight: 600;
+  font-family: var(--font-display);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
   flex-shrink: 0;
-  text-transform: uppercase;
 }
 
 .message.user .avatar {
@@ -346,9 +444,15 @@ textarea:focus {
   color: var(--accent);
 }
 
+/* The assistant avatar is the brand monogram in miniature —
+ * the same gradient as the empty-state mark and the sidebar
+ * wordmark, tying the whole product together. */
 .message.assistant .avatar {
-  background: var(--bg-3);
-  color: var(--text-0);
+  background: linear-gradient(135deg, #8b5cf6 0%, #7c3aed 50%, #4c1d95 100%);
+  color: #fff;
+  font-size: 14px;
+  font-weight: 800;
+  box-shadow: 0 2px 8px rgba(124, 58, 237, 0.24);
 }
 
 .message .body {

@@ -65,8 +65,10 @@ export function Sidebar({
     <aside className="sidebar">
       <div className="sidebar-header">
         <div className="brand">
-          <span className="brand-dot" />
-          MaxBot
+          <span className="brand-mark" aria-hidden>
+            M
+          </span>
+          <span className="brand-name">MaxBot</span>
         </div>
         <button onClick={onNew} className="primary">
           + New chat
