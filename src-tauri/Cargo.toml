@@ -1,6 +1,6 @@
 [package]
 name = "maxbot"
-version = "0.1.0"
+version = "1.0.0"
 description = "MaxBot — a MiniMax-powered desktop chat, tool, and Computer Use client."
 authors = ["Tyler Martinez"]
 edition = "2021"
