@@ -1,15 +1,16 @@
-// v2.0.4 ComputerFileBrowser — minimal SFTP-backed file
-// browser for a per-Bot VM.
+// v2.1 ComputerFileBrowser — SFTP-backed file browser for
+// a per-Bot VM, with an in-place Edit / Save / Cancel
+// affordance on top of the read-only viewer.
 //
 // Two-pane layout:
 //   ┌─ left: directory listing (path bar + entries)
-//   └─ right: file viewer (or empty state)
+//   └─ right: file viewer (read-only) or editor (textarea)
 //
-// Read-only in this slice. `computerFileWrite` is wired
-// through `src/lib/tauri.ts` but the UI doesn't expose an
-// edit affordance yet — that's a separate slice. The
-// underlying Rust write uses atomic rename, so adding
-// the UI later is just a `<textarea>` + a Save button.
+// Saving calls `computerFileWrite` which writes atomically
+// (temp + rename) on the Rust side; the in-memory
+// `fileContent` is updated on success so a follow-up
+// cancel-then-reopen is consistent. Cancel just discards
+// the edit buffer and re-renders the last saved content.
 //
 // `botId` is opaque to the browser; the parent passes
 // the ID and the browser calls the SFTP Tauri commands.
@@ -19,7 +20,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import type { SftpEntry } from "../lib/api";
-import { computerFileList, computerFileRead } from "../lib/tauri";
+import { computerFileList, computerFileRead, computerFileWrite } from "../lib/tauri";
 
 interface ComputerFileBrowserProps {
   botId: string;
@@ -40,6 +41,13 @@ export function ComputerFileBrowser({ botId }: ComputerFileBrowserProps) {
   const [fileContent, setFileContent] = useState<string | null>(null);
   const [loadingFile, setLoadingFile] = useState(false);
   const [fileError, setFileError] = useState<string | null>(null);
+  // v2.1 edit affordance: `editing` flips the viewer into
+  // a `<textarea>`; `editContent` is the in-memory buffer
+  // that gets persisted to the VM on Save (or thrown away
+  // on Cancel). `saving` is the transient "Saving…" state.
+  const [editing, setEditing] = useState(false);
+  const [editContent, setEditContent] = useState<string>("");
+  const [saving, setSaving] = useState(false);
 
   const refresh = useCallback(
     async (path: string) => {
@@ -76,6 +84,8 @@ export function ComputerFileBrowser({ botId }: ComputerFileBrowserProps) {
       setOpenFile(null);
       setFileContent(null);
       setFileError(null);
+      setEditing(false);
+      setEditContent("");
     },
     [],
   );
@@ -88,6 +98,8 @@ export function ComputerFileBrowser({ botId }: ComputerFileBrowserProps) {
     setOpenFile(null);
     setFileContent(null);
     setFileError(null);
+    setEditing(false);
+    setEditContent("");
   }, [stack]);
 
   const openEntry = useCallback(
@@ -100,6 +112,8 @@ export function ComputerFileBrowser({ botId }: ComputerFileBrowserProps) {
       setOpenFile(path);
       setFileContent(null);
       setFileError(null);
+      setEditing(false);
+      setEditContent("");
       setLoadingFile(true);
       try {
         const content = await computerFileRead(botId, path);
@@ -112,6 +126,46 @@ export function ComputerFileBrowser({ botId }: ComputerFileBrowserProps) {
     },
     [botId, cwd, navigateTo],
   );
+
+  const startEdit = useCallback(() => {
+    // Seed the editor with the last-read content. If the
+    // read failed (`fileContent === null`) we fall back to
+    // an empty buffer so the user can still write a new
+    // file in this slot — though the typical flow is to
+    // start from an existing file.
+    setEditContent(fileContent ?? "");
+    setFileError(null);
+    setEditing(true);
+  }, [fileContent]);
+
+  const cancelEdit = useCallback(() => {
+    // Discard the in-memory buffer; return to read-only
+    // view of the last-saved content. No Tauri call.
+    setEditing(false);
+    setEditContent("");
+    setFileError(null);
+  }, []);
+
+  const saveEdit = useCallback(async () => {
+    if (openFile === null) return;
+    setSaving(true);
+    setFileError(null);
+    try {
+      await computerFileWrite(botId, openFile, editContent);
+      // Persist the edit into the canonical `fileContent`
+      // so a follow-up Cancel / re-open is consistent and
+      // the read-only view shows the freshly written text.
+      setFileContent(editContent);
+      setEditing(false);
+      setEditContent("");
+    } catch (e) {
+      setFileError(String(e));
+      // Stay in edit mode on failure so the user's text
+      // isn't lost — they can fix and retry.
+    } finally {
+      setSaving(false);
+    }
+  }, [botId, openFile, editContent]);
 
   return (
     <div className="cfb" data-testid="computer-file-browser">
@@ -188,16 +242,69 @@ export function ComputerFileBrowser({ botId }: ComputerFileBrowserProps) {
           </div>
         ) : loadingFile ? (
           <div className="cfb__viewer-loading">Loading {openFile}…</div>
-        ) : fileError !== null ? (
+        ) : fileError !== null && !editing ? (
           <div className="cfb__error" data-testid="cfb-file-error">
             {fileError}
           </div>
-        ) : fileContent !== null ? (
+        ) : fileContent !== null || editing ? (
           <>
             <div className="cfb__viewer-header" title={openFile}>
               {openFile}
             </div>
-            <pre className="cfb__viewer-content">{fileContent}</pre>
+            {!editing ? (
+              <>
+                <div className="cfb__editor-toolbar">
+                  <button
+                    type="button"
+                    className="cfb__editor-btn"
+                    onClick={startEdit}
+                    data-testid="cfb-edit-btn"
+                    aria-label="Edit file"
+                  >
+                    Edit
+                  </button>
+                </div>
+                <pre className="cfb__viewer-content">{fileContent}</pre>
+              </>
+            ) : (
+              <>
+                <div className="cfb__editor-toolbar">
+                  <button
+                    type="button"
+                    className="cfb__editor-btn cfb__editor-btn--primary"
+                    onClick={saveEdit}
+                    disabled={saving}
+                    data-testid="cfb-save-btn"
+                    aria-label="Save file"
+                  >
+                    {saving ? "Saving…" : "Save"}
+                  </button>
+                  <button
+                    type="button"
+                    className="cfb__editor-btn"
+                    onClick={cancelEdit}
+                    disabled={saving}
+                    data-testid="cfb-cancel-btn"
+                    aria-label="Cancel editing"
+                  >
+                    Cancel
+                  </button>
+                </div>
+                <textarea
+                  className="cfb__editor-textarea"
+                  value={editContent}
+                  onChange={(e) => setEditContent(e.target.value)}
+                  disabled={saving}
+                  spellCheck={false}
+                  data-testid="cfb-editor-textarea"
+                />
+                {fileError !== null ? (
+                  <div className="cfb__error" data-testid="cfb-file-error">
+                    {fileError}
+                  </div>
+                ) : null}
+              </>
+            )}
           </>
         ) : null}
       </div>

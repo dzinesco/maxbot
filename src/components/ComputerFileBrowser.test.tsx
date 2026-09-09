@@ -1,7 +1,7 @@
 // Component tests for the v2.0.4 `ComputerFileBrowser`.
 // happy-dom doesn't ship a Tauri runtime, so we mock
 // `../lib/tauri` and feed canned `computerFileList` /
-// `computerFileRead` results.
+// `computerFileRead` / `computerFileWrite` results.
 
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { render, screen, waitFor, fireEvent } from "@testing-library/react";
@@ -16,11 +16,12 @@ vi.mock("../lib/tauri", () => ({
 // lazy import must come AFTER the mock so the mocked module
 // is what the component sees.
 import { ComputerFileBrowser } from "./ComputerFileBrowser";
-import { computerFileList, computerFileRead } from "../lib/tauri";
+import { computerFileList, computerFileRead, computerFileWrite } from "../lib/tauri";
 
 beforeEach(() => {
   vi.mocked(computerFileList).mockReset();
   vi.mocked(computerFileRead).mockReset();
+  vi.mocked(computerFileWrite).mockReset();
 });
 
 describe("ComputerFileBrowser", () => {
@@ -106,6 +107,62 @@ describe("ComputerFileBrowser", () => {
     });
     expect(
       screen.getByText("ssh: no route to host"),
+    ).toBeInTheDocument();
+  });
+
+  it("supports Edit / Save: clicking Edit shows a textarea, Save calls computerFileWrite", async () => {
+    vi.mocked(computerFileList).mockResolvedValueOnce([
+      { name: "notes.txt", is_dir: false, size: 13 },
+    ]);
+    vi.mocked(computerFileRead).mockResolvedValueOnce(
+      "original\n",
+    );
+    vi.mocked(computerFileWrite).mockResolvedValueOnce(undefined);
+    render(<ComputerFileBrowser botId="bot-1" />);
+    // Open the file so the right-pane viewer renders.
+    await waitFor(() => {
+      expect(screen.getByText("notes.txt")).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByText("notes.txt"));
+    await waitFor(() => {
+      expect(screen.getByTestId("cfb-edit-btn")).toBeInTheDocument();
+    });
+    // No textarea yet — we're in read-only view.
+    expect(
+      screen.queryByTestId("cfb-editor-textarea"),
+    ).not.toBeInTheDocument();
+    // Click Edit → textarea appears, pre-filled with the
+    // read content.
+    fireEvent.click(screen.getByTestId("cfb-edit-btn"));
+    const textarea = await screen.findByTestId(
+      "cfb-editor-textarea",
+    );
+    expect(textarea).toBeInTheDocument();
+    expect((textarea as HTMLTextAreaElement).value).toBe("original\n");
+    // Type into the textarea, then click Save.
+    fireEvent.change(textarea, {
+      target: { value: "edited content\n" },
+    });
+    fireEvent.click(screen.getByTestId("cfb-save-btn"));
+    // The write must have been called with the bot id, the
+    // full joined path, and the new content.
+    await waitFor(() => {
+      expect(vi.mocked(computerFileWrite)).toHaveBeenCalledWith(
+        "bot-1",
+        "/home/bot/notes.txt",
+        "edited content\n",
+      );
+    });
+    // After a successful save we drop back to read-only
+    // view, so the textarea is gone and the Edit button is
+    // back.
+    await waitFor(() => {
+      expect(
+        screen.queryByTestId("cfb-editor-textarea"),
+      ).not.toBeInTheDocument();
+    });
+    expect(
+      screen.getByTestId("cfb-edit-btn"),
     ).toBeInTheDocument();
   });
 });

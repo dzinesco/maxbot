@@ -4139,3 +4139,74 @@ button.link:hover {
   white-space: pre;
   overflow: auto;
 }
+
+/* v2.1: Edit / Save / Cancel toolbar above the file viewer.
+   The toolbar is a small flex row sitting between the
+   viewer header and the body. The Save button is the
+   "primary" action and gets a subtle accent; Cancel stays
+   neutral so the destructive intent is unambiguous. */
+.cfb__editor-toolbar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  background: var(--bg-1, #18181b);
+  border-bottom: 1px solid var(--border-1, #27272a);
+}
+
+.cfb__editor-btn {
+  appearance: none;
+  background: transparent;
+  border: 1px solid var(--border-1, #27272a);
+  border-radius: 4px;
+  color: var(--text-1, #d4d4d8);
+  font-family: inherit;
+  font-size: 12px;
+  padding: 3px 10px;
+  cursor: pointer;
+  transition: background 0.12s ease, border-color 0.12s ease;
+}
+
+.cfb__editor-btn:hover:not(:disabled) {
+  background: var(--bg-2, #27272a);
+  color: var(--text-0, #fafafa);
+}
+
+.cfb__editor-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.cfb__editor-btn--primary {
+  border-color: var(--accent, #6366f1);
+  color: var(--text-0, #fafafa);
+  background: var(--accent, #6366f1);
+}
+
+.cfb__editor-btn--primary:hover:not(:disabled) {
+  background: var(--accent-hover, #818cf8);
+  border-color: var(--accent-hover, #818cf8);
+}
+
+.cfb__editor-textarea {
+  flex: 1 1 auto;
+  width: 100%;
+  margin: 0;
+  padding: 12px 16px;
+  background: var(--bg-0);
+  color: var(--text-0, #fafafa);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  border: none;
+  outline: none;
+  resize: none;
+  white-space: pre;
+  overflow: auto;
+  box-sizing: border-box;
+}
+
+.cfb__editor-textarea:disabled {
+  opacity: 0.7;
+}
