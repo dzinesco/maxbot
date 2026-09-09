@@ -7,13 +7,31 @@ interface MessageBubbleProps {
   streaming?: boolean;
 }
 
+/** Strip `<think>...</think>` blocks (and any other reasoning-style
+ * tags the model may emit) from the visible content. The raw
+ * reasoning is preserved in the DB and the streaming layer — we
+ * only hide it from the chat view. Multi-line, nested-safe.
+ */
+function stripReasoningTags(input: string): string {
+  // Repeatedly strip non-greedy `<think>…</think>` runs until none
+  // remain. This handles nested tags that some reasoning models emit.
+  let out = input;
+  let prev: string | null = null;
+  while (out !== prev) {
+    prev = out;
+    out = out.replace(/<think>[\s\S]*?<\/think>/gi, "");
+  }
+  return out;
+}
+
 /** Very small markdown subset: paragraphs, fenced code blocks, inline code,
  * and links. Enough to make MiniMax responses readable without pulling in a
  * 200KB markdown library. Anything else renders as plain text.
  */
 function renderMarkdown(input: string): React.ReactNode {
+  const cleaned = stripReasoningTags(input);
   const nodes: React.ReactNode[] = [];
-  const lines = input.split("\n");
+  const lines = cleaned.split("\n");
   let i = 0;
   let key = 0;
   while (i < lines.length) {
