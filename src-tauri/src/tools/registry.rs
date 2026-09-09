@@ -22,6 +22,7 @@ use super::browsers::{
 };
 use super::calendar::{CalendarCreateEventTool, CalendarTodayTool, CalendarWeekTool};
 use super::clipboard::{ClipboardReadTool, ClipboardWriteTool};
+use super::ego_browser::EgoBrowserTool;
 use super::file_read::FileReadTool;
 use super::file_write::FileWriteTool;
 use super::mail::{MailDraftTool, MailInboxTool, MailSearchTool, MailSendTool};
@@ -101,6 +102,12 @@ impl ToolRegistry {
             // v0.6.7 — App launcher (open any macOS app by name)
             Arc::new(AppOpenTool),
             Arc::new(AppListTool),
+            // v0.6.9 — ego-browser integration: run a JS script in
+            // the ego (lite) embedded Node.js runtime, which drives a
+            // real Chromium browser the agent controls. Replaces the
+            // AppleScript safari_*/chrome_* path for the common
+            // "drive a real browser" workflow. Per-call consent.
+            Arc::new(EgoBrowserTool),
             // v0.6.8 — Per-bot filesystem (memory / scratchpad / outputs)
             Arc::new(MemoryReadTool),
             Arc::new(MemoryWriteTool),
