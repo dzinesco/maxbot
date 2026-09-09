@@ -1,12 +1,15 @@
 # MaxBot
 
-MaxBot is a personal multi-provider AI desktop client with sub-agents, browser automation, and the Grok Build CLI wired into the same chat surface. It's a Tauri 2 app (Rust core, React 19 / Vite 6 / TypeScript-strict renderer) that keeps conversations and bot state on disk so a model can keep working across launches without leaning on a server.
+MaxBot is a personal multi-provider AI desktop client with **per-Bot Linux computers**, browser automation, and the Grok Build CLI wired into the same chat surface. It's a Tauri 2 app (Rust core, React 19 / Vite 6 / TypeScript-strict renderer) that keeps conversations, bots, and their VMs on disk so a model can keep working across launches without leaning on a server.
 
 ## Features
 
 - **Multi-provider LLM** — MiniMax (default), OpenAI, Anthropic, xAI; switch in Settings → General. Each provider has its own API key and base URL override.
 - **Streaming chat with tool use** — SSE-driven token streaming, structured tool-call deltas, per-call consent for the tools that touch the outside world.
-- **Sub-agents (Bots)** — first-class bots in the sidebar with a system prompt, a default model, an allow-list of tools, and a per-bot folder on disk. Schedule them with cron expressions or an interval, run them on demand, or message them from the main composer.
+- **Per-Bot Linux computers (v2.0)** — each Bot gets its own QEMU/KVM VM on a Linux server you control (libvirt, virbr0, cloud-init, Ubuntu 24.04 + XFCE). MaxBot drives libvirt over SSH, generates per-Bot Ed25519 keypairs (encrypted at rest with Argon2id + ChaCha20-Poly1305), and tunnels the VNC desktop to the Mac via `ssh -L` + a local WebSocket↔RFB proxy. No SaaS, no remote-desktop provider.
+- **Bot roster + 6-state presence (v2.0)** — the sidebar opens to a **Bot roster**, not a conversation list. Each Bot has an avatar that animates through `idle / thinking / working / waiting / blocked / done`. The roster is the primary surface; conversations are scoped per-Bot.
+- **Three access levels per Bot (Status / Preview / Takeover)** — a tiny status chip in the title bar; a pinned Preview side panel with the noVNC viewer; full-window Takeover with mouse + keyboard. The human can see what the Bot is doing at any time.
+- **Specialist-Bot templates** — one-click starters for Figma Specialist (Figma Bro), Code Reviewer (Devbot), Researcher (Detective), and Inbox Triage (Mailroom) — the names and system prompts are seeded, the user can edit before saving.
 - **ego-browser** — drives a real Chromium via the [ego (lite)](https://github.com/ego-lite/ego) embedded Node.js runtime, so the agent can work with authenticated sites without competing for the user's own tabs.
 - **Grok Build CLI integration** — spawns `grok agent stdio` as a JSON-RPC subprocess and persists the session id, so a relaunch resumes the same Grok Build conversation.
 - **TTS via macOS `say`** — speak the last response with a single keystroke; per-message 🔊 buttons for the older turns. Voice is configurable from the Settings → TTS tab.
@@ -37,12 +40,14 @@ The first launch walks you through a short onboarding wizard that surfaces the m
 
 Everything lives in `~/Library/Application Support/com.maxbot.app/`:
 
-- `maxbot.sqlite` — conversations, messages, settings, bots, schedules, runs, bot inbox
+- `maxbot.sqlite` — conversations, messages, settings, bots, schedules, runs, bot inbox, computers (per-Bot VM state), ssh_keys (encrypted per-Bot SSH keypairs)
 - `bots/<bot-id>/` — per-bot folder (system prompt scratch, memory, downloaded artifacts)
 - `grok/` — the working directory for the Grok Build subprocess when no override is set
 - `mcp_servers.json` — the MCP server registry
 
-Conversations are local-first. Nothing is sent to a third party except the configured LLM provider (the API key you set in Settings determines where the prompts and completions go), the Grok Build subprocess (when the agent invokes it), and any MCP servers you've enabled.
+**Per-Bot VMs** live on your Linux server, not on the Mac. They're created and destroyed via libvirt over SSH — see `docs/server-setup.md` for the one-time server setup.
+
+Conversations are local-first. Nothing is sent to a third party except the configured LLM provider (the API key you set in Settings determines where the prompts and completions go), the Grok Build subprocess (when the agent invokes it), the Linux server you point Settings → Computer at, and any MCP servers you've enabled.
 
 ## Keyboard shortcuts
 

@@ -47,30 +47,133 @@ tool calls) to the clipboard.
 
 ## Sub-agents (Bots)
 
-Bots are first-class citizens — they live in the sidebar below the
-conversation list, each gets a per-bot folder on disk, and they can
-message each other through a shared inbox.
+Bots are first-class citizens — they live in the sidebar as a **Bot
+roster** (the primary surface), each gets a per-bot folder on disk,
+and they can message each other through a shared inbox. In v2.0, each
+Bot can also have its own **Linux computer** (a QEMU/KVM VM on a
+server you control) — see [Per-Bot computers](#per-bot-computers) below.
+
+The Bot roster replaces the v1.0 conversation list as the sidebar's
+primary list. Conversations are scoped per-Bot.
 
 ### Create a bot
 
-1. In the sidebar, expand the **Bots** section.
-2. Click <kbd>+ New bot</kbd>.
-3. Fill in:
-   - **Name** — what shows in the sidebar
+1. In the sidebar, click <kbd>+ New Bot</kbd>.
+2. Fill in:
+   - **Name** — what shows in the sidebar. Specialist-Bot templates
+     below suggest good single-responsibility names.
    - **Description** — one-line summary, surfaces in tooltips
-   - **System prompt** — the bot's persona + instructions
+   - **System prompt** — the bot's persona + instructions. The
+     specialist-Bot templates below fill this in for you.
    - **Default model** — overrides the global default if you want a
      different model for this bot
    - **Allowed tools** — pick from the tool list; the bot can only
      invoke the ones you check
    - **Icon + color** — visual identifier in the sidebar
-4. Save. The bot appears in the sidebar immediately.
+3. (Optional) Check **Provision a computer** to give this Bot its
+   own Linux VM (see [Per-Bot computers](#per-bot-computers)). Set
+   the disk size (default 10 GB) and RAM (default 2048 MB).
+4. Save. The bot appears in the roster immediately.
+
+### Specialist-Bot templates
+
+The Bot editor has four one-click specialist templates. Click a chip
+to fill in the name placeholder + system prompt:
+
+- **Figma Specialist** (placeholder: "Figma Bro") — uses the Figma
+  desktop app and plugins to design screens, components, and
+  prototypes. Hands work back when a design is ready for review.
+- **Code Reviewer** (placeholder: "Devbot") — reads diffs, runs
+  tests, and surfaces issues. Hands work back when the review is
+  ready.
+- **Researcher** (placeholder: "Detective") — uses the browser,
+  web search, and file tools to gather and synthesize information.
+  Hands work back when the research is ready.
+- **Inbox Triage** (placeholder: "Mailroom") — uses mail.app,
+  calendar.app, and reminders.app to sort, schedule, and follow up
+  on messages. Hands work back when the queue is processed.
+
+You can edit any field after picking a template before saving.
+
+### Per-Bot computers
+
+Each Bot can have its own Linux VM on a server you control. The
+server runs QEMU/KVM + libvirt; MaxBot drives it over SSH. The VM has
+an XFCE desktop and an SSH-accessible shell. The Bot drives its own
+computer via tool calls (`shell_run`, `file_read`, `file_write`);
+the human operator can see what the Bot is doing at any time.
+
+#### One-time server setup
+
+See `docs/server-setup.md`. Run that once on the Linux box you want
+to use, then come back to MaxBot's **Settings → Computer** tab and
+fill in:
+
+- **Server host** — the IP or hostname (e.g. `192.168.0.49`)
+- **Server SSH user** — your non-root user on the server
+- **Server SSH key id** — leave blank for now (uses your Mac's
+  default `~/.ssh/id_ed25519`)
+- **VNC local port range** — the range MaxBot uses for `ssh -L`
+  tunnels (default `5900–5999`)
+- **Default per-Bot RAM** (default 2048 MB) and **disk** (default 10 GB)
+- **Computer passphrase** — used to encrypt per-Bot SSH keypairs.
+  Set once, used for every new Bot.
+
+Click **Test connection** to confirm MaxBot can talk to the server.
+
+#### Provisioning a Bot's computer
+
+When you check **Provision a computer** in the Bot editor and save,
+MaxBot:
+
+1. Generates a new Ed25519 keypair for the Bot (encrypted at rest)
+2. SSHes to the server and runs `virt-install` with a cloud-init
+   seed ISO that injects XFCE, x11vnc, qemu-guest-agent, and your
+   per-Bot SSH public key
+3. Polls the libvirt DHCP lease to find the VM's IP
+4. Marks the Bot's `computers.state = running` (or `error` on failure)
+
+Provisioning takes 30–60 seconds for the VM to boot and get an IP.
+The first-boot `apt-get install` of XFCE + x11vnc takes 3–5 minutes
+in the background — the VM is usable (SSH-able, qemu-guest-agent
+responding) long before the desktop is fully ready.
+
+#### Three access levels (Status / Preview / Takeover)
+
+Once a Bot has a running computer, three ways to see what it's doing:
+
+- **Status** — a small chip in the title bar that turns purple
+  while the VM is active. Always on.
+- **Preview** — a pinned side panel (~30% width) showing the live
+  noVNC view of the Bot's desktop. The Bot can keep driving while
+  you watch.
+- **Takeover** — full-window noVNC with mouse + keyboard control.
+  The Bot continues running; you take over the desktop. Click
+  **Hand back to Bot** when you're done; the Bot resumes control.
+
+All three modes connect to the same `ws://localhost:<port>/` URL —
+MaxBot's Rust side handles the SSH tunnel + WebSocket↔RFB bridging.
+The URL never contains the server's IP/hostname.
+
+#### Tool routing
+
+When a Bot has a computer, these tools route through SSH to the VM
+instead of running locally on the Mac:
+
+- `shell_run` — runs the command in the Bot's VM via SSH exec
+- `file_read` / `file_write` — SFTP into the Bot's VM
+- (Other tools — `ego_browser`, `apple_script_*`, etc. — still run
+  on the Mac. v2.0 only routes the Unix-y tools; future slices will
+  expand this.)
+
+If a Bot does **not** have a provisioned computer, all tools run
+locally on the Mac (the v1.0 behavior).
 
 ### Edit / delete
 
-Click a bot's <kbd>Edit</kbd> action in the sidebar to reopen the
-editor. Delete is a destructive action that wipes the bot's folder
-on disk.
+Click a bot in the roster to reopen the editor. Delete is a
+destructive action that wipes the bot's folder on disk **and
+destroys its VM** (if any).
 
 ### Schedule a bot
 

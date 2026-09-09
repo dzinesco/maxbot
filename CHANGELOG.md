@@ -1,14 +1,87 @@
 # Changelog
 
-<!-- Tyler: confirm dates — all v0.5–v0.7.x entries are dated
-     2026-09-08 because the project was bootstrapped in a single
-     session. The v1.0.0 date is the release date you'll fill in. -->
-
 All notable changes to MaxBot are documented in this file. The format
 follows [Keep a Changelog](https://keepachangelog.com/) and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
-## v1.0.0 — <!-- Tyler: confirm date -->
+## v2.0.0 — 2026-09-09
+
+### Added — Per-Bot Linux computers
+- **Each Bot can have its own QEMU/KVM VM** on a Linux server you
+  control. Spawned via libvirt, cloud-init bootstrapped with XFCE +
+  x11vnc + qemu-guest-agent, accessible via the local noVNC viewer
+  in MaxBot's ComputerPanel (Status / Preview / Takeover modes).
+- **`ComputerManager`** — Rust module that drives libvirt over SSH,
+  generates per-Bot Ed25519 keypairs (encrypted with Argon2id +
+  ChaCha20-Poly1305), and tunnels the VNC RFB stream via `ssh -L` +
+  a local WebSocket↔RFB proxy. The Tauri side reuses the existing
+  macOS-side `~/.ssh/id_ed25519` for the server connection; per-Bot
+  keys live in a new `ssh_keys` table.
+- **Three access levels** per Grok Bot's design (Status / Preview /
+  Takeover): the title-bar chip turns purple while a Bot's VM is
+  active; Preview opens a pinned side panel with the live noVNC
+  viewer; Takeover goes full-window with mouse + keyboard.
+- **Settings → Computer** tab: server host, SSH user, VNC port range,
+  default per-Bot RAM / disk, computer passphrase, "Test connection"
+  button. Gated on the host being set; an empty-state links to
+  `docs/server-setup.md`.
+- **`docs/server-setup.md`** — the one-time server runbook. Covers
+  QEMU/KVM install, libvirt setup, cloud image caching, the
+  `provision-vm.sh` script deployment, and an end-to-end smoke test
+  via `virsh net-dhcp-leases default`.
+
+### Added — Bot roster + 6-state presence
+- **Sidebar refactored to a Bot roster** as the primary surface
+  (conversations move behind per-Bot views). Each roster row shows
+  the Bot's avatar, name, last-active timestamp, and a computer
+  sub-icon (delegated to the ComputerPanel).
+- **`BotAvatar` 6-state presence system**: `idle` / `thinking` /
+  `working` / `waiting` / `blocked` / `done`. Priority order:
+  `blocked > waiting > working > thinking > done > idle`. Each state
+  has a distinct visual marker and animation; CSS-only (no Lottie).
+- **Specialist-Bot templates**: one-click starters for Figma
+  Specialist (Figma Bro), Code Reviewer (Devbot), Researcher
+  (Detective), and Inbox Triage (Mailroom) — name + system prompt
+  pre-filled, user can edit before saving.
+- **`bots.state` column** on the SQLite `bots` table for the avatar
+  state, plus `bot_set_state` Tauri command called by the bot
+  executor at run start / run end / blocked.
+
+### Added — Plumbing
+- New SQLite tables: `computers` (per-Bot VM state, libvirt domain
+  name, IP, VNC port, SSH key id, provisioning state) and
+  `ssh_keys` (encrypted per-Bot keypairs).
+- New Settings fields: `computer_server_host`, `computer_server_ssh_user`,
+  `computer_server_ssh_key_id`, `computer_vnc_local_port_range`,
+  `computer_passphrase`, `computer_default_disk_gb` (10),
+  `computer_default_ram_mb` (2048).
+- Tauri commands: `computer_get`, `computer_provision`,
+  `computer_start`, `computer_stop`, `computer_destroy`,
+  `computer_console_url`, `computer_test_connection`,
+  `computer_file_list`, `computer_file_read`, `computer_file_write`,
+  `bot_set_state`.
+- `shell_run`, `file_read`, `file_write` tools now route through
+  SSH into the Bot's VM when the Bot has a provisioned computer;
+  local AppleScript path remains the fallback.
+
+### Dependencies added
+- `@novnc/novnc` (vendored) for the WebSocket RFB viewer.
+
+### Tests
+- 126 Rust tests pass (was 88 at v1.0.0). New: cloud-init user-data
+  generation, Argon2id round-trip, keypair generation, tool routing
+  (local vs SSH), VNC port allocator + wraparound, localhost-URL
+  guard for `computer_console_url` (security test), SshKeyRow
+  round-trip, Settings fields round-trip, shell_run tool routing
+  logic, parse_sftp_ls parsing.
+- 18 vitest tests pass (was 5). New: ComputerPanel status/preview
+  rendering, specialist template chips, "Provision a computer"
+  checkbox + disk/RAM inputs, BotAvatar state machine priority,
+  BotAvatar blocked state visual, BotRoster filter by search,
+  BotRoster row click → `onSelectBot`, BotRoster empty state, BotRoster
+  new-Bot button.
+
+## v1.0.0 — 2026-09-08
 ### Added
 - First-run onboarding wizard (lands via the onboarding slice — see
   the Settings → General → Reset onboarding placeholder)
