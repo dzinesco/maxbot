@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { Message, PersistedToolCall } from "../lib/api";
 import { ttsSpeak, ttsStop } from "../lib/tauri";
 
@@ -108,14 +108,132 @@ function renderInline(text: string): React.ReactNode {
 function ToolCalls({ calls }: { calls: PersistedToolCall[] }) {
   if (calls.length === 0) return null;
   return (
-    <details className="tool-calls">
-      <summary>Tool calls ({calls.length})</summary>
+    <div className="tool-calls">
+      <div className="tool-calls-header">
+        {calls.length} tool call{calls.length === 1 ? "" : "s"}
+      </div>
       {calls.map((tc) => (
-        <pre key={tc.id}>
-          {tc.name}({tc.arguments || "{}"})
-        </pre>
+        <ToolCallCard key={tc.id} call={tc} />
       ))}
+    </div>
+  );
+}
+
+/** A single tool call, rendered as a card with a one-line preview
+ * that expands to the full argument JSON. Designed so the chat
+ * stays scannable when an agent makes several calls in a row. */
+function ToolCallCard({ call }: { call: PersistedToolCall }) {
+  const parsed = useMemo(() => {
+    const raw = call.arguments || "{}";
+    try {
+      return { ok: true as const, value: JSON.parse(raw) as unknown };
+    } catch {
+      return { ok: false as const, value: raw };
+    }
+  }, [call.arguments]);
+
+  const preview = useMemo(() => {
+    const trim = (s: string, n: number) =>
+      s.length > n ? s.slice(0, n) + "…" : s;
+    if (!parsed.ok) return trim(String(parsed.value), 80);
+    const v = parsed.value;
+    if (v === null || typeof v !== "object" || Array.isArray(v)) {
+      return trim(JSON.stringify(v), 80);
+    }
+    const entries = Object.entries(v as Record<string, unknown>).slice(0, 2);
+    return entries
+      .map(([k, val]) => {
+        const s = typeof val === "string" ? val : JSON.stringify(val);
+        return `${k}: ${trim(s, 40)}`;
+      })
+      .join("  ·  ");
+  }, [parsed]);
+
+  return (
+    <details className="tool-call-card">
+      <summary>
+        <span className="tool-call-icon" aria-hidden>
+          ⚡
+        </span>
+        <span className="tool-call-name">{call.name}</span>
+        {preview && <span className="tool-call-preview">{preview}</span>}
+      </summary>
+      <pre className="tool-call-args">
+        {parsed.ok ? JSON.stringify(parsed.value, null, 2) : parsed.value}
+      </pre>
     </details>
+  );
+}
+
+/** Animated three-dot indicator, shown in place of a streaming
+ * bubble's content while we're waiting for the first token. The
+ * streaming caret (▍) only shows once content has arrived. */
+function TypingDots() {
+  return (
+    <div className="typing-dots" aria-label="Assistant is typing">
+      <span />
+      <span />
+      <span />
+    </div>
+  );
+}
+
+/** Collapsible wrapper for long tool result messages. Tool
+ * results can be 20+ KB of JSON; showing that wall of text by
+ * default buries the rest of the chat. Default-collapsed shows a
+ * short preview + an "Expand" button. */
+function CollapsibleToolResult({ content }: { content: string }) {
+  const [open, setOpen] = useState(false);
+  // Preview: first ~200 chars on the first non-empty line,
+  // trimmed. If the content is JSON-ish, prefer to show a single
+  // short string instead of dumping the raw object.
+  const preview = useMemo(() => {
+    const trimmed = content.trim();
+    if (trimmed.length === 0) return "(empty result)";
+    // Try to extract a one-line summary from common result shapes.
+    try {
+      const j = JSON.parse(trimmed) as unknown;
+      if (typeof j === "string") return j.slice(0, 200);
+      if (j && typeof j === "object") {
+        const obj = j as Record<string, unknown>;
+        for (const key of ["result", "reply", "text", "message", "output", "data"]) {
+          if (typeof obj[key] === "string") {
+            return String(obj[key]).slice(0, 200);
+          }
+        }
+      }
+    } catch {
+      // not JSON; fall through
+    }
+    return trimmed.split("\n").find((l) => l.trim().length > 0)?.slice(0, 200) ?? trimmed.slice(0, 200);
+  }, [content]);
+
+  return (
+    <div className="tool-result">
+      {open ? (
+        <>
+          <pre className="tool-result-body">{content}</pre>
+          <button
+            className="link"
+            onClick={() => setOpen(false)}
+            title="Show less"
+          >
+            Show less
+          </button>
+        </>
+      ) : (
+        <button
+          className="tool-result-preview"
+          onClick={() => setOpen(true)}
+          title="Expand full result"
+        >
+          <span className="tool-result-snippet">{preview}</span>
+          <span className="tool-result-meta">
+            {content.length.toLocaleString()} chars · click to expand
+          </span>
+        </button>
+      )}
+    </div>
   );
 }
 
@@ -207,6 +325,22 @@ export function MessageBubble({ message, streaming }: MessageBubbleProps) {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [message.id]);
+  // Friendly "10:42 AM" formatting for the meta line. Show on
+  // every non-streaming message; cheap to render and useful when
+  // scrolling back through a long conversation.
+  const metaTime = useMemo(() => {
+    const d = new Date(message.created_at);
+    if (Number.isNaN(d.getTime())) return "";
+    return d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  }, [message.created_at]);
+
+  // Threshold above which a tool result is collapsed by default.
+  // ~500 chars is roughly a paragraph — short enough to inline
+  // a one-liner like "search took 0.3s" or "file written to
+  // /tmp/x", long enough that we shouldn't dump 20 KB of JSON
+  // into the chat scroll.
+  const TOOL_RESULT_COLLAPSE_THRESHOLD = 500;
+
   return (
     <div
       className={`message ${message.role}${streaming ? " streaming" : ""}`}
@@ -216,9 +350,12 @@ export function MessageBubble({ message, streaming }: MessageBubbleProps) {
       </div>
       <div className="body">
         <div className="meta">
-          {isUser ? "You" : isTool ? "Tool" : "MaxBot"}
+          <span className="meta-name">
+            {isUser ? "You" : isTool ? "Tool" : "MaxBot"}
+          </span>
+          {metaTime && <span className="meta-time">{metaTime}</span>}
           {!streaming && message.content && (
-            <>
+            <span className="meta-actions">
               {isAssistant && (
                 <button
                   className={`copy-btn tts-btn${speaking ? " speaking" : ""}`}
@@ -239,10 +376,16 @@ export function MessageBubble({ message, streaming }: MessageBubbleProps) {
               >
                 {copied ? "Copied" : "Copy"}
               </button>
-            </>
+            </span>
           )}
         </div>
-        <div className="content">{renderMarkdown(message.content)}</div>
+        {streaming && !message.content ? (
+          <TypingDots />
+        ) : isTool && message.content.length > TOOL_RESULT_COLLAPSE_THRESHOLD ? (
+          <CollapsibleToolResult content={message.content} />
+        ) : (
+          <div className="content">{renderMarkdown(message.content)}</div>
+        )}
         <ToolCalls calls={message.tool_calls} />
       </div>
     </div>

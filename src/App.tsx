@@ -944,17 +944,24 @@ export default function App() {
         )}
         {messages.length === 0 ? (
           <div className="main-empty">
+            <div className="main-empty-mark">M</div>
             <h1>MaxBot</h1>
-            <p>
-              A multi-provider AI desktop client. Type a message below to start.
+            <p className="main-empty-tagline">
+              A multi-provider AI desktop client with sub-agents, browser
+              automation, and the Grok Build CLI in your toolbelt.
               {status === "missing"
                 ? " Set your LLM provider API key in Settings to begin."
-                : ""}
+                : " Type a message below to start."}
             </p>
-            <p className="muted small" style={{ marginTop: 16 }}>
-              💡 Press <kbd>⌘</kbd>+<kbd>⇧</kbd>+<kbd>S</kbd> after the
-              first response to hear it read aloud.
-            </p>
+            <div className="main-empty-hints">
+              <span className="main-empty-hint">
+                <kbd>⌘</kbd>+<kbd>⇧</kbd>+<kbd>S</kbd> reads the last
+                response aloud
+              </span>
+              <span className="main-empty-hint">
+                <kbd>⌘</kbd>+<kbd>F</kbd> searches across conversations
+              </span>
+            </div>
             {bootError && (
               <p style={{ color: "var(--danger)" }}>{bootError}</p>
             )}
