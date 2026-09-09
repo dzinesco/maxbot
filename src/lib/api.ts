@@ -48,6 +48,8 @@ export interface Settings {
   anthropic_base_url: string;
   /** Base URL override for xAI. Empty = api.x.ai/v1. */
   xai_base_url: string;
+  /** Voice name for the `say` command. Empty = Samantha default. */
+  tts_voice: string;
 }
 
 export interface ProviderPreset {
@@ -159,7 +161,14 @@ export const DEFAULT_SETTINGS: Settings = {
   openai_base_url: "",
   anthropic_base_url: "",
   xai_base_url: "",
+  tts_voice: "",
 };
+
+export interface TtsSpeakResponse {
+  chars: number;
+  voice: string;
+  truncated_chars: number;
+}
 
 export type StreamChunk =
   | { kind: "text"; delta: string }

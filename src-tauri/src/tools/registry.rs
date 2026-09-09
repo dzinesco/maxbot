@@ -28,6 +28,7 @@ use super::system::{
     SystemVolumeGetTool, SystemVolumeSetTool,
 };
 use super::tool::{Tool, ToolContext, ToolError, ToolInvocation, ToolResult};
+use super::tts::{TtsSpeakTool, TtsStopTool};
 use super::web_fetch::WebFetchTool;
 use super::web_search::WebSearchTool;
 use super::window::{WindowFocusTool, WindowListTool};
@@ -89,6 +90,9 @@ impl ToolRegistry {
             Arc::new(ChromeTabsTool),
             Arc::new(WindowListTool),
             Arc::new(WindowFocusTool),
+            // v0.6.1 — Text-to-Speech via macOS `say`
+            Arc::new(TtsSpeakTool),
+            Arc::new(TtsStopTool),
         ];
         tools.extend(extra);
         let mut by_name: HashMap<String, Arc<dyn Tool>> = HashMap::new();

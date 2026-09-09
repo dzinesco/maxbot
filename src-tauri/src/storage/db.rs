@@ -112,6 +112,13 @@ pub struct Settings {
     /// `base_url` deserialize into this field via the `alias`.
     #[serde(default, alias = "base_url")]
     pub minimax_base_url: String,
+
+    // ---- TTS ----
+    /// Voice name passed to `say -v` when the model invokes `tts_speak`
+    /// without an explicit voice. Empty string falls back to the
+    /// built-in default (Samantha, ships with every macOS install).
+    #[serde(default)]
+    pub tts_voice: String,
     /// Base URL override for OpenAI. Empty = `https://api.openai.com/v1`.
     #[serde(default)]
     pub openai_base_url: String,

@@ -39,6 +39,7 @@ export function Settings({ initial, onClose, onSave }: SettingsProps) {
     anthropic: base.anthropic_base_url ?? "",
     xai: base.xai_base_url ?? "",
   }));
+  const [ttsVoice, setTtsVoice] = useState(base.tts_voice ?? "");
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -96,6 +97,7 @@ export function Settings({ initial, onClose, onSave }: SettingsProps) {
           providerKind === "anthropic" ? baseUrl.trim() : extraBaseUrls.anthropic.trim(),
         xai_base_url:
           providerKind === "xai" ? baseUrl.trim() : extraBaseUrls.xai.trim(),
+        tts_voice: ttsVoice.trim(),
       };
       await onSave(merged);
       onClose();
@@ -221,6 +223,31 @@ export function Settings({ initial, onClose, onSave }: SettingsProps) {
         />
 
         <ComputerUseSettings />
+
+        <hr
+          style={{
+            border: 0,
+            borderTop: "1px solid var(--border)",
+            margin: "6px 0",
+          }}
+        />
+
+        <div className="field">
+          <label>Text-to-Speech voice</label>
+          <input
+            type="text"
+            value={ttsVoice}
+            onChange={(e) => setTtsVoice(e.target.value)}
+            placeholder="Samantha"
+          />
+          <div className="hint">
+            Voice name passed to <code>say -v</code> when you click the
+            🔊 Speak button on an assistant message. Leave blank for{" "}
+            <code>Samantha</code> (high-quality en-US, ships with every
+            macOS install). Run <code>say -v ?</code> in Terminal to
+            list installed voices.
+          </div>
+        </div>
 
         <hr
           style={{

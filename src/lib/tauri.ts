@@ -24,6 +24,7 @@ import type {
   Settings,
   TccProbeResult,
   ToolSummary,
+  TtsSpeakResponse,
 } from "./api";
 
 export async function listConversations(): Promise<Conversation[]> {
@@ -236,4 +237,28 @@ export async function stopBotRun(runId: string): Promise<boolean> {
 
 export async function listActiveBotRuns(): Promise<string[]> {
   return invoke<string[]>("list_active_bot_runs");
+}
+
+// ---- TTS ----
+
+/**
+ * Speak `text` aloud using the host's `say` command. When `voice` is
+ * omitted, the user's stored `tts_voice` preference is used (falling
+ * back to "Samantha" on a fresh install).
+ */
+export async function ttsSpeak(
+  text: string,
+  voice?: string,
+  rate?: number,
+): Promise<TtsSpeakResponse> {
+  return invoke<TtsSpeakResponse>("tts_speak", {
+    text,
+    voice: voice ?? null,
+    rate: rate ?? null,
+  });
+}
+
+/** Stop any in-flight speech. Returns true if a process was killed. */
+export async function ttsStop(): Promise<boolean> {
+  return invoke<boolean>("tts_stop");
 }

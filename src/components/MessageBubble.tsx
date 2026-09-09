@@ -1,5 +1,6 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { Message, PersistedToolCall } from "../lib/api";
+import { ttsSpeak, ttsStop } from "../lib/tauri";
 
 interface MessageBubbleProps {
   message: Message;
@@ -96,7 +97,13 @@ function ToolCalls({ calls }: { calls: PersistedToolCall[] }) {
 export function MessageBubble({ message, streaming }: MessageBubbleProps) {
   const isUser = message.role === "user";
   const isTool = message.role === "tool";
+  const isAssistant = !isUser && !isTool;
   const [copied, setCopied] = useState(false);
+  const [speaking, setSpeaking] = useState(false);
+  // Tracks whether THIS bubble is the one currently being spoken. We
+  // rely on a local ref + state so a click on a different bubble's
+  // speaker button doesn't tear down our speech in flight.
+  const speechMarker = useRef<string | null>(null);
   const handleCopy = async () => {
     try {
       await navigator.clipboard.writeText(message.content);
@@ -122,6 +129,59 @@ export function MessageBubble({ message, streaming }: MessageBubbleProps) {
       }
     }
   };
+  const handleToggleSpeech = async () => {
+    if (speaking) {
+      try {
+        await ttsStop();
+      } catch {
+        // best-effort — the speech will eventually end on its own
+      }
+      setSpeaking(false);
+      speechMarker.current = null;
+      return;
+    }
+    if (!message.content.trim()) return;
+    setSpeaking(true);
+    // Estimate how long the speech will take. `say` averages ~150
+    // words/minute; we don't know the exact duration, but a rough
+    // chars/12 estimate keeps the button in "Stop" state long enough
+    // for typical messages. The user can always click Stop to
+    // override.
+    const chars = message.content.length;
+    const approxSeconds = Math.max(3, Math.ceil(chars / 12));
+    speechMarker.current = message.id;
+    setTimeout(() => {
+      if (speechMarker.current === message.id) {
+        setSpeaking(false);
+        speechMarker.current = null;
+      }
+    }, approxSeconds * 1000);
+    try {
+      await ttsSpeak(message.content);
+    } catch (e) {
+      // If the Rust side errors, fall out of the speaking state so
+      // the button doesn't get stuck.
+      setSpeaking(false);
+      speechMarker.current = null;
+      // Surface a non-blocking hint in the console; the model can
+      // call tts_speak too if the user wants the error in a tool
+      // result.
+      // eslint-disable-next-line no-console
+      console.warn("tts_speak failed:", e);
+    }
+  };
+  // If the message is replaced (e.g. after a Regenerate), make sure
+  // we don't leave the button in "speaking" state.
+  useEffect(() => {
+    return () => {
+      if (speechMarker.current === message.id) {
+        // Best-effort: stop any speech that was triggered by this
+        // bubble. We don't await — the bubble is going away.
+        ttsStop().catch(() => {});
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [message.id]);
   return (
     <div
       className={`message ${message.role}${streaming ? " streaming" : ""}`}
@@ -133,13 +193,24 @@ export function MessageBubble({ message, streaming }: MessageBubbleProps) {
         <div className="meta">
           {isUser ? "You" : isTool ? "Tool" : "MaxBot"}
           {!streaming && message.content && (
-            <button
-              className="copy-btn"
-              onClick={handleCopy}
-              title="Copy message text"
-            >
-              {copied ? "Copied" : "Copy"}
-            </button>
+            <>
+              {isAssistant && (
+                <button
+                  className="copy-btn tts-btn"
+                  onClick={handleToggleSpeech}
+                  title={speaking ? "Stop speaking" : "Speak this message aloud"}
+                >
+                  {speaking ? "⏹ Stop" : "🔊 Speak"}
+                </button>
+              )}
+              <button
+                className="copy-btn"
+                onClick={handleCopy}
+                title="Copy message text"
+              >
+                {copied ? "Copied" : "Copy"}
+              </button>
+            </>
           )}
         </div>
         <div className="content">{renderMarkdown(message.content)}</div>

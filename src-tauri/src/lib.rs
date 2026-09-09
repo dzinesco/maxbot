@@ -116,6 +116,8 @@ pub fn run() {
             commands::tcc::list_controllable_apps,
             commands::tcc::request_tcc_for,
             commands::tcc::open_automation_settings,
+            commands::tts::tts_speak,
+            commands::tts::tts_stop,
         ])
         .run(tauri::generate_context!())
         .expect("error while running MaxBot");
@@ -131,6 +133,7 @@ pub fn run() {
 /// - `SAND_MINIMAX_BASE_URL` → `Settings::minimax_base_url`
 /// - `SAND_MINIMAX_MODEL` → `Settings::default_model`
 /// - `MAXBOT_PROVIDER` → `Settings::provider_kind`
+/// - `MAXBOT_TTS_VOICE` → `Settings::tts_voice`
 ///
 /// We deliberately do *not* overwrite an existing SQLite value with the
 /// env value: once the user has set a key via the Settings UI, that
@@ -186,6 +189,7 @@ fn seed_settings_from_env(db: &Database) {
     changed |= seed_string(&mut settings.minimax_base_url, "SAND_MINIMAX_BASE_URL", "SAND_MINIMAX_BASE_URL");
     changed |= seed_string(&mut settings.default_model, "SAND_MINIMAX_MODEL", "SAND_MINIMAX_MODEL");
     changed |= seed_string(&mut settings.provider_kind, "MAXBOT_PROVIDER", "MAXBOT_PROVIDER");
+    changed |= seed_string(&mut settings.tts_voice, "MAXBOT_TTS_VOICE", "MAXBOT_TTS_VOICE");
 
     if changed {
         if let Err(e) = db.save_settings(&settings) {

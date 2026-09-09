@@ -6,3 +6,4 @@ pub mod chat;
 pub mod conversations;
 pub mod settings;
 pub mod tcc;
+pub mod tts;
