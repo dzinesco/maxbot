@@ -7,6 +7,7 @@
 
 mod bots;
 mod commands;
+mod env_loader;
 mod llm;
 mod storage;
 mod tools;
@@ -43,6 +44,12 @@ pub fn run() {
                 .expect("create MaxBot data dir");
             let db_path = data_dir.join("maxbot.sqlite");
             let db = Database::open(&db_path).expect("open MaxBot sqlite database");
+            // Seed the SQLite settings from the .env file on first launch.
+            // Once the user has used the Settings UI, those values win
+            // (we only seed when the SQLite field is empty). Recognized
+            // keys: MINIMAX_API_KEY, SAND_MINIMAX_BASE_URL,
+            // SAND_MINIMAX_MODEL.
+            seed_settings_from_env(&db);
             app.manage(AppState { db: Arc::new(db) });
             app.manage(Arc::new(AsyncMutex::new(StreamRegistry::default())));
             // Start the bot scheduler. It runs in a background tokio task
@@ -78,4 +85,66 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running MaxBot");
+}
+
+/// Populate the SQLite settings row with values from the .env file, but
+/// only for fields the user hasn't already set. Recognized keys:
+///
+/// - `MINIMAX_API_KEY` → `Settings::minimax_api_key`
+/// - `SAND_MINIMAX_BASE_URL` → `Settings::base_url`
+/// - `SAND_MINIMAX_MODEL` → `Settings::default_model`
+///
+/// We deliberately do *not* overwrite an existing SQLite value with the
+/// env value: once the user has set a key via the Settings UI, that
+/// key is theirs. The .env is a developer-friendly seed, not a runtime
+/// override.
+fn seed_settings_from_env(db: &Database) {
+    let env = env_loader::load_dotenv();
+    if env.is_empty() {
+        return;
+    }
+    let mut settings = match db.load_settings() {
+        Ok(s) => s,
+        Err(e) => {
+            log::warn!("env_loader: could not load settings: {e}");
+            return;
+        }
+    };
+    let mut changed = false;
+    if settings
+        .minimax_api_key
+        .as_deref()
+        .map_or(true, str::is_empty)
+    {
+        if let Some(v) = env.get("MINIMAX_API_KEY") {
+            if !v.is_empty() {
+                log::info!("env_loader: seeded MINIMAX_API_KEY from .env");
+                settings.minimax_api_key = Some(v.clone());
+                changed = true;
+            }
+        }
+    }
+    if settings.base_url.is_empty() {
+        if let Some(v) = env.get("SAND_MINIMAX_BASE_URL") {
+            if !v.is_empty() {
+                log::info!("env_loader: seeded SAND_MINIMAX_BASE_URL from .env");
+                settings.base_url = v.clone();
+                changed = true;
+            }
+        }
+    }
+    if settings.default_model.is_empty() {
+        if let Some(v) = env.get("SAND_MINIMAX_MODEL") {
+            if !v.is_empty() {
+                log::info!("env_loader: seeded SAND_MINIMAX_MODEL from .env");
+                settings.default_model = v.clone();
+                changed = true;
+            }
+        }
+    }
+    if changed {
+        if let Err(e) = db.save_settings(&settings) {
+            log::warn!("env_loader: could not save seeded settings: {e}");
+        }
+    }
 }
