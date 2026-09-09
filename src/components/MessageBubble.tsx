@@ -196,9 +196,11 @@ function ToolCallCard({ call }: { call: PersistedToolCall }) {
         <span className="tool-call-name">{call.name}</span>
         {preview && <span className="tool-call-preview">{preview}</span>}
       </summary>
-      <pre className="tool-call-args">
-        {parsed.ok ? JSON.stringify(parsed.value, null, 2) : parsed.value}
-      </pre>
+      <div className="tool-call-body">
+        <pre className="tool-call-args">
+          {parsed.ok ? JSON.stringify(parsed.value, null, 2) : parsed.value}
+        </pre>
+      </div>
     </details>
   );
 }

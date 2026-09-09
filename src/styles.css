@@ -461,6 +461,27 @@ textarea:focus {
   margin: 0 auto;
   padding: 2px 0;
   border-radius: var(--radius-md);
+  /* A subtle slide-in on first appearance. Plays once per
+   * element as it mounts; the 0.001s delay avoids layout
+   * thrash when React batches several messages in a row. */
+  animation: message-in 220ms ease-out 0.001s both;
+}
+
+@keyframes message-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .message {
+    animation: none;
+  }
 }
 
 /* The assistant message body gets a faint violet wash so it
@@ -621,7 +642,20 @@ textarea:focus {
   border-radius: var(--radius-md);
   background: var(--bg-1);
   overflow: hidden;
-  transition: border-color 80ms ease;
+  transition: border-color 120ms ease, transform 120ms ease;
+}
+
+.message .tool-call-card:hover {
+  transform: translateX(1px);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .message .tool-call-card {
+    transition: border-color 0ms;
+  }
+  .message .tool-call-card:hover {
+    transform: none;
+  }
 }
 
 .message .tool-call-card[data-category="browser"] {
@@ -695,6 +729,20 @@ textarea:focus {
   text-overflow: clip;
 }
 
+.message .tool-call-body {
+  /* CSS-only smooth height transition for the <details> body.
+   * grid-template-rows: 0fr → 1fr animates the row from 0 to
+   * its natural height, and the inner <pre> has overflow:
+   * hidden so the content is clipped during the transition. */
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 180ms ease;
+}
+
+.message .tool-call-card[open] .tool-call-body {
+  grid-template-rows: 1fr;
+}
+
 .message .tool-call-args {
   margin: 0;
   padding: 8px 10px;
@@ -706,7 +754,18 @@ textarea:focus {
   white-space: pre-wrap;
   word-wrap: break-word;
   max-height: 360px;
+  overflow: hidden;
+  min-height: 0;
+}
+
+.message .tool-call-card[open] .tool-call-args {
   overflow-y: auto;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .message .tool-call-body {
+    transition: none;
+  }
 }
 
 /* Long tool result message — collapsed by default. The wrapper
@@ -849,8 +908,19 @@ textarea:focus {
   transition: border-color 80ms ease;
 }
 
+.composer {
+  transition: border-color 140ms ease, box-shadow 140ms ease;
+}
+
 .composer:focus-within {
   border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .composer {
+    transition: none;
+  }
 }
 
 .composer textarea {
