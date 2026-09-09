@@ -109,7 +109,7 @@ function BotRow({
   onOpenInbox,
 }: BotRowProps) {
   const [menuOpen, setMenuOpen] = useState(false);
-  const intervalLabel = formatInterval(schedule?.interval_seconds ?? 0);
+  const intervalLabel = formatSchedule(schedule);
   return (
     <div
       className={`bot-row${running ? " running" : ""}`}
@@ -207,7 +207,12 @@ function BotRow({
   );
 }
 
-function formatInterval(seconds: number): string {
+function formatSchedule(schedule: BotSchedule | undefined): string {
+  if (!schedule) return "no schedule";
+  if (schedule.cron_expression && schedule.cron_expression.trim()) {
+    return `cron: ${schedule.cron_expression}`;
+  }
+  const seconds = schedule.interval_seconds;
   if (!seconds || seconds <= 0) return "no schedule";
   if (seconds < 60) return `every ${seconds}s`;
   if (seconds < 3600) return `every ${Math.round(seconds / 60)}m`;

@@ -148,6 +148,7 @@ impl Database {
              CREATE TABLE IF NOT EXISTS bot_schedules (
                 bot_id              TEXT PRIMARY KEY REFERENCES bots(id) ON DELETE CASCADE,
                 interval_seconds    INTEGER NOT NULL DEFAULT 0,
+                cron_expression     TEXT NOT NULL DEFAULT '',
                 last_run_at         TEXT,
                 last_conversation_id TEXT
              );
@@ -173,6 +174,15 @@ impl Database {
              );
              CREATE INDEX IF NOT EXISTS bot_messages_inbox
                  ON bot_messages(to_bot_id, read, created_at);",
+        )?;
+        // Idempotent column additions for older databases. SQLite
+        // doesn't have IF NOT EXISTS for columns, so we probe
+        // pragma_table_info to decide whether to ALTER.
+        add_column_if_missing(
+            &conn,
+            "bot_schedules",
+            "cron_expression",
+            "TEXT NOT NULL DEFAULT ''",
         )?;
         Ok(())
     }
@@ -470,7 +480,7 @@ impl Database {
     pub fn get_schedule(&self, bot_id: &str) -> rusqlite::Result<Option<crate::bots::BotSchedule>> {
         let conn = self.conn.lock().expect("db lock poisoned");
         let mut stmt = conn.prepare(
-            "SELECT bot_id, interval_seconds, last_run_at, last_conversation_id
+            "SELECT bot_id, interval_seconds, cron_expression, last_run_at, last_conversation_id
              FROM bot_schedules WHERE bot_id = ?",
         )?;
         let mut rows = stmt.query(params![bot_id])?;
@@ -478,12 +488,13 @@ impl Database {
             Some(r) => r,
             None => return Ok(None),
         };
-        let last_run_str: Option<String> = row.get(2)?;
+        let last_run_str: Option<String> = row.get(3)?;
         Ok(Some(crate::bots::BotSchedule {
             bot_id: row.get(0)?,
             interval_seconds: row.get::<_, i64>(1)? as u32,
+            cron_expression: row.get(2)?,
             last_run_at: last_run_str.map(parse_dt),
-            last_conversation_id: row.get(3)?,
+            last_conversation_id: row.get(4)?,
         }))
     }
 
@@ -494,15 +505,17 @@ impl Database {
             .as_ref()
             .map(|d| d.to_rfc3339());
         conn.execute(
-            "INSERT INTO bot_schedules (bot_id, interval_seconds, last_run_at, last_conversation_id)
-             VALUES (?, ?, ?, ?)
+            "INSERT INTO bot_schedules (bot_id, interval_seconds, cron_expression, last_run_at, last_conversation_id)
+             VALUES (?, ?, ?, ?, ?)
              ON CONFLICT(bot_id) DO UPDATE SET
                 interval_seconds = excluded.interval_seconds,
+                cron_expression = excluded.cron_expression,
                 last_run_at = excluded.last_run_at,
                 last_conversation_id = excluded.last_conversation_id",
             params![
                 schedule.bot_id,
                 schedule.interval_seconds as i64,
+                schedule.cron_expression,
                 last_run_at,
                 schedule.last_conversation_id,
             ],
@@ -513,19 +526,20 @@ impl Database {
     pub fn list_due_schedules(&self, now: DateTime<Utc>) -> rusqlite::Result<Vec<crate::bots::BotSchedule>> {
         let conn = self.conn.lock().expect("db lock poisoned");
         let mut stmt = conn.prepare(
-            "SELECT bot_id, interval_seconds, last_run_at, last_conversation_id
+            "SELECT bot_id, interval_seconds, cron_expression, last_run_at, last_conversation_id
              FROM bot_schedules
-             WHERE interval_seconds > 0
+             WHERE (interval_seconds > 0 OR cron_expression != '')
                AND (last_run_at IS NULL OR
                     (julianday(?) - julianday(last_run_at)) * 86400.0 >= interval_seconds)",
         )?;
         let rows = stmt.query_map(params![now.to_rfc3339()], |row| {
-            let last_run_str: Option<String> = row.get(2)?;
+            let last_run_str: Option<String> = row.get(3)?;
             Ok(crate::bots::BotSchedule {
                 bot_id: row.get(0)?,
                 interval_seconds: row.get::<_, i64>(1)? as u32,
+                cron_expression: row.get(2)?,
                 last_run_at: last_run_str.map(parse_dt),
-                last_conversation_id: row.get(3)?,
+                last_conversation_id: row.get(4)?,
             })
         })?;
         let mut out = Vec::new();
@@ -538,15 +552,17 @@ impl Database {
     pub fn list_all_schedules(&self) -> rusqlite::Result<Vec<crate::bots::BotSchedule>> {
         let conn = self.conn.lock().expect("db lock poisoned");
         let mut stmt = conn.prepare(
-            "SELECT bot_id, interval_seconds, last_run_at, last_conversation_id FROM bot_schedules",
+            "SELECT bot_id, interval_seconds, cron_expression, last_run_at, last_conversation_id
+             FROM bot_schedules",
         )?;
         let rows = stmt.query_map([], |row| {
-            let last_run_str: Option<String> = row.get(2)?;
+            let last_run_str: Option<String> = row.get(3)?;
             Ok(crate::bots::BotSchedule {
                 bot_id: row.get(0)?,
                 interval_seconds: row.get::<_, i64>(1)? as u32,
+                cron_expression: row.get(2)?,
                 last_run_at: last_run_str.map(parse_dt),
-                last_conversation_id: row.get(3)?,
+                last_conversation_id: row.get(4)?,
             })
         })?;
         let mut out = Vec::new();
@@ -759,4 +775,36 @@ fn parse_dt(value: String) -> DateTime<Utc> {
 #[allow(dead_code)]
 fn io_err<E: ToString>(e: E) -> std::io::Error {
     std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())
+}
+
+/// SQLite has no `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`, so we
+/// probe `pragma_table_info` and add the column if it's missing. Used
+/// for backwards-compatible migrations on tables that may already
+/// exist from an older schema version.
+fn add_column_if_missing(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+    column_def: &str,
+) -> rusqlite::Result<()> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({})", table))?;
+    let mut rows = stmt.query([])?;
+    let mut has_column = false;
+    while let Some(row) = rows.next()? {
+        let name: String = row.get(1)?;
+        if name == column {
+            has_column = true;
+            break;
+        }
+    }
+    if !has_column {
+        conn.execute(
+            &format!(
+                "ALTER TABLE {} ADD COLUMN {} {}",
+                table, column, column_def
+            ),
+            [],
+        )?;
+    }
+    Ok(())
 }

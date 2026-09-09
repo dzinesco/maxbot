@@ -39,19 +39,32 @@ impl Bot {
     }
 }
 
-/// A bot's optional run schedule. Intervals are stored as seconds; we
-/// avoid a cron dependency in v0.3 by just doing "every N seconds". A
-/// future v0.4 can add full cron by swapping the parser.
+/// A bot's optional run schedule. Two ways to express a schedule:
+/// (1) `interval_seconds` — "every N seconds" (simple, low-precision).
+/// (2) `cron_expression` — a 5-field crontab string in the bot's local
+///     timezone, e.g. "0 9 * * 1-5" for "Weekdays at 9:00 AM".
+///     Evaluated by the v0.4.4 scheduler tick.
+///
+/// Both can be set; the scheduler prefers cron when non-empty. Set both
+/// to 0 / "" to disable. (interval_seconds is kept for backwards
+/// compat with v0.3 schedules.)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BotSchedule {
     pub bot_id: String,
-    /// Run interval in seconds. 0 = disabled.
+    /// Run interval in seconds. 0 = disabled when cron is empty.
+    #[serde(default)]
     pub interval_seconds: u32,
+    /// Optional 5-field crontab expression. Empty = no cron schedule.
+    /// When set, takes precedence over `interval_seconds`.
+    #[serde(default)]
+    pub cron_expression: String,
     /// Last time the scheduler fired this bot. Null = never.
+    #[serde(default)]
     pub last_run_at: Option<chrono::DateTime<chrono::Utc>>,
     /// Last conversation the scheduled run wrote into. Lets the next
     /// run continue in the same thread, so a recurring bot has one
     /// persistent log.
+    #[serde(default)]
     pub last_conversation_id: Option<String>,
 }
 

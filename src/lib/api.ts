@@ -101,6 +101,7 @@ export interface BotRun {
 export interface BotSchedule {
   bot_id: string;
   interval_seconds: number;
+  cron_expression: string;
   last_run_at: string | null;
   last_conversation_id: string | null;
 }

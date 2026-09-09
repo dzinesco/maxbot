@@ -37,6 +37,46 @@ const SCHEDULE_PRESETS: { label: string; seconds: number }[] = [
 ];
 
 /**
+ * Cron presets expressed in the standard 5-field crontab format
+ * (minute hour day-of-month month day-of-week). Evaluated in the
+ * user's local timezone by the scheduler.
+ */
+const CRON_PRESETS: { label: string; expr: string; hint: string }[] = [
+  { label: "Off (cron)", expr: "", hint: "no cron schedule" },
+  { label: "Every minute", expr: "* * * * *", hint: "* * * * *" },
+  {
+    label: "Weekdays at 9 AM",
+    expr: "0 9 * * 1-5",
+    hint: "Mon–Fri 09:00",
+  },
+  {
+    label: "Weekdays at 8:54 AM",
+    expr: "54 8 * * 1-5",
+    hint: "Mon–Fri 08:54",
+  },
+  {
+    label: "Daily at midnight",
+    expr: "0 0 * * *",
+    hint: "00:00 every day",
+  },
+  {
+    label: "Daily at 6 AM",
+    expr: "0 6 * * *",
+    hint: "06:00 every day",
+  },
+  {
+    label: "Hourly on the hour",
+    expr: "0 * * * *",
+    hint: "00:00 of every hour",
+  },
+  {
+    label: "Mondays only",
+    expr: "0 9 * * 1",
+    hint: "Mon 09:00",
+  },
+];
+
+/**
  * Modal for creating or editing a bot. The form is single-page with
  * sections: identity (name/icon/color/description), brain (default
  * model + system prompt), capabilities (allowed tools), and schedule.
@@ -54,6 +94,9 @@ export function BotEditor({
   const [bot, setBot] = useState<Bot>(initial);
   const [intervalSeconds, setIntervalSeconds] = useState<number>(
     schedule?.interval_seconds ?? 0,
+  );
+  const [cronExpression, setCronExpression] = useState<string>(
+    schedule?.cron_expression ?? "",
   );
   const [showTools, setShowTools] = useState(false);
 
@@ -94,6 +137,7 @@ export function BotEditor({
     const finalSchedule: BotSchedule = {
       bot_id: finalBot.id,
       interval_seconds: intervalSeconds,
+      cron_expression: cronExpression.trim(),
       last_run_at: schedule?.last_run_at ?? null,
       last_conversation_id: schedule?.last_conversation_id ?? null,
     };
@@ -273,7 +317,47 @@ export function BotEditor({
           <section className="form-section">
             <h3>Schedule</h3>
             <div className="form-row">
-              <label>Run interval</label>
+              <label>
+                Cron expression{" "}
+                <span className="hint">
+                  — 5-field crontab in local time, e.g. "0 9 * * 1-5" for
+                  "Weekdays at 9:00 AM". Wins over the simple interval
+                  when set.
+                </span>
+              </label>
+              <div className="preset-row">
+                {CRON_PRESETS.map((p) => (
+                  <button
+                    key={p.label}
+                    type="button"
+                    className={`interval-preset${
+                      cronExpression === p.expr ? " active" : ""
+                    }`}
+                    onClick={() => setCronExpression(p.expr)}
+                    title={p.hint}
+                  >
+                    {p.label}
+                  </button>
+                ))}
+                <input
+                  type="text"
+                  value={cronExpression}
+                  onChange={(e) => setCronExpression(e.target.value)}
+                  placeholder="0 9 * * 1-5"
+                  style={{ width: 140, marginLeft: 4, fontFamily: "var(--font-mono)" }}
+                />
+              </div>
+              {cronExpression && (
+                <div className="muted small">
+                  Preview: <code>{describeCron(cronExpression)}</code>
+                </div>
+              )}
+            </div>
+            <div className="form-row">
+              <label>
+                Simple interval{" "}
+                <span className="hint">— fallback when cron is empty</span>
+              </label>
               <div className="preset-row">
                 {SCHEDULE_PRESETS.map((p) => (
                   <button
@@ -344,4 +428,22 @@ function formatRelative(iso: string): string {
   if (s < 3600) return `${Math.floor(s / 60)}m ago`;
   if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
   return `${Math.floor(s / 86400)}d ago`;
+}
+
+/// Tiny human-readable description of a 5-field cron expression. Not
+/// a full English converter — just enough to give the user a hint that
+/// their expression is well-formed.
+function describeCron(expr: string): string {
+  const parts = expr.trim().split(/\s+/);
+  if (parts.length !== 5) {
+    return `expected 5 fields, got ${parts.length}`;
+  }
+  const [m, h, dom, mon, dow] = parts;
+  const time = `${h.padStart(2, "0") || "*"}:${m.padStart(2, "0") || "*"}`;
+  if (dow === "1-5" || dow === "MON-FRI") return `weekdays at ${time}`;
+  if (dow === "0,6" || dow === "SAT,SUN") return `weekends at ${time}`;
+  if (dow === "1" || dow === "MON") return `Mondays at ${time}`;
+  if (dow === "*" && dom === "*") return `daily at ${time}`;
+  if (dow === "*") return `${dom} of every month at ${time}`;
+  return expr;
 }

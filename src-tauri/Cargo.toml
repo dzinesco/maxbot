@@ -27,6 +27,7 @@ anyhow = "1.0"
 thiserror = "1.0"
 chrono = { version = "0.4", features = ["serde"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
+cron = "0.12"
 uuid = { version = "1.10", features = ["v4", "serde"] }
 eventsource-stream = "0.2"
 url = "2.5"
