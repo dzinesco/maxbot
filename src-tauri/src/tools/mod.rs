@@ -22,6 +22,7 @@ pub mod registry;
 pub mod reminders;
 pub mod shell_run;
 pub mod system;
+pub mod things;
 pub mod tool;
 pub mod tts;
 pub mod web_fetch;
