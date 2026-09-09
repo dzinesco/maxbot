@@ -209,10 +209,19 @@ pub async fn run_bot_once(
         let bodies: Vec<String> = inbox
             .iter()
             .map(|m| {
+                // `__user__` is the sentinel for messages that the
+                // human user sent from the chat composer. Show them as
+                // "user" in the prompt so the model knows to address
+                // the human by name.
+                let sender = if m.from_bot_id == "__user__" {
+                    "user"
+                } else {
+                    m.from_bot_id.as_str()
+                };
                 format!(
                     "[{}] {}: {}",
                     m.created_at.format("%Y-%m-%dT%H:%M:%SZ"),
-                    m.from_bot_id,
+                    sender,
                     m.body
                 )
             })

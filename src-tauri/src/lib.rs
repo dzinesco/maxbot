@@ -83,6 +83,7 @@ pub fn run() {
             commands::bots::mark_inbox_read,
             commands::bots::list_available_tools,
             commands::bots::run_bot_now,
+            commands::bots::send_to_bot,
             commands::tcc::list_controllable_apps,
             commands::tcc::request_tcc_for,
             commands::tcc::open_automation_settings,

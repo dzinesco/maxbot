@@ -163,6 +163,18 @@ export async function runBotNow(botId: string): Promise<BotRunOutput> {
   return invoke<BotRunOutput>("run_bot_now", { botId });
 }
 
+export async function sendToBot(
+  toBotId: string,
+  body: string,
+  triggerRun: boolean = true,
+): Promise<BotMessage> {
+  return invoke<BotMessage>("send_to_bot", {
+    toBotId,
+    body,
+    triggerRun,
+  });
+}
+
 export async function onBotChunk(
   handler: (event: BotChunkEvent) => void,
 ): Promise<UnlistenFn> {

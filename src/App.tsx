@@ -6,6 +6,7 @@ import { Settings } from "./components/Settings";
 import { BotsPanel } from "./components/BotsPanel";
 import { BotEditor } from "./components/BotEditor";
 import { BotInbox } from "./components/BotInbox";
+import { SendToBotModal } from "./components/SendToBotModal";
 import {
   createConversation,
   deleteBot,
@@ -31,6 +32,7 @@ import {
   runBotNow,
   saveSettings,
   sendMessage,
+  sendToBot,
   stopMessage,
   upsertBot,
   upsertBotSchedule,
@@ -546,6 +548,42 @@ export default function App() {
     [refreshBots],
   );
 
+  // --- send-to-bot (user-to-bot inbox message) ---
+
+  const [sendToBotOpen, setSendToBotOpen] = useState(false);
+
+  const handleSendToBot = useCallback(
+    async (toBotId: string, body: string, triggerRun: boolean) => {
+      await sendToBot(toBotId, body, triggerRun);
+      if (triggerRun) {
+        // Switch the active view to the bot's last conversation so
+        // the user sees the bot's response stream. The bot's
+        // scheduler / executor uses schedule.last_conversation_id as
+        // the persistent thread.
+        const sched = botSchedules[toBotId];
+        if (sched?.last_conversation_id) {
+          await refreshConversations();
+          setActiveId(sched.last_conversation_id);
+        } else {
+          // No prior conversation — bot will create one when it
+          // runs. Refresh the conversation list so it appears.
+          setTimeout(() => {
+            refreshConversations();
+          }, 500);
+        }
+        setLastBotFinish(null);
+        setRunningBotId(toBotId);
+      }
+      // Refresh unread counts in case the user sent to a bot with
+      // existing unread mail (the bot's view of inbox is unchanged,
+      // but for the badge math: the message we just enqueued is
+      // unread from the bot's perspective).
+      const inbox = await listInbox(toBotId, false);
+      setUnreadCounts((prev) => ({ ...prev, [toBotId]: inbox.length }));
+    },
+    [botSchedules, refreshConversations],
+  );
+
   // --- derived ---
 
   const activeConversation = useMemo(
@@ -688,6 +726,8 @@ export default function App() {
         <Composer
           onSend={handleSend}
           onStop={handleStop}
+          onOpenSendToBot={() => setSendToBotOpen(true)}
+          hasBots={bots.length > 0}
           streaming={streamingId !== null}
         />
       </main>
@@ -699,6 +739,13 @@ export default function App() {
         />
       )}
       {editorModal}
+      {sendToBotOpen && (
+        <SendToBotModal
+          bots={bots}
+          onClose={() => setSendToBotOpen(false)}
+          onSend={handleSendToBot}
+        />
+      )}
     </div>
   );
 }

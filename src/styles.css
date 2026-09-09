@@ -1109,6 +1109,25 @@ textarea:focus {
   font-size: 11px;
 }
 
+button.link {
+  background: none;
+  border: none;
+  color: var(--accent);
+  cursor: pointer;
+  font-size: 11px;
+  font-family: inherit;
+  padding: 0;
+  text-decoration: none;
+}
+
+button.link:hover {
+  text-decoration: underline;
+}
+
+.send-to-bot-modal select {
+  width: 100%;
+}
+
 /* ---------- Computer Use settings list ---------- */
 
 .cu-app-list {

@@ -3,10 +3,18 @@ import { useEffect, useRef, useState } from "react";
 interface ComposerProps {
   onSend: (content: string) => void;
   onStop: () => void;
+  onOpenSendToBot: () => void;
+  hasBots: boolean;
   streaming: boolean;
 }
 
-export function Composer({ onSend, onStop, streaming }: ComposerProps) {
+export function Composer({
+  onSend,
+  onStop,
+  onOpenSendToBot,
+  hasBots,
+  streaming,
+}: ComposerProps) {
   const [value, setValue] = useState("");
   const ref = useRef<HTMLTextAreaElement>(null);
 
@@ -44,6 +52,18 @@ export function Composer({ onSend, onStop, streaming }: ComposerProps) {
         <div className="row">
           <div className="hints">
             <span>Enter to send · Shift+Enter for newline</span>
+            {hasBots && (
+              <>
+                {" · "}
+                <button
+                  className="link"
+                  onClick={onOpenSendToBot}
+                  title="Send a message to one of your bots"
+                >
+                  Send to bot →
+                </button>
+              </>
+            )}
           </div>
           {streaming ? (
             <button className="send stop" onClick={onStop}>

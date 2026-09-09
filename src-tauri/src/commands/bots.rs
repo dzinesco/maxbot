@@ -9,6 +9,7 @@ use std::sync::Arc;
 use chrono::Utc;
 use tauri::{AppHandle, State};
 use tokio_util::sync::CancellationToken;
+use uuid::Uuid;
 
 use crate::bots::executor::{run_bot_once, BotRunOutput};
 use crate::bots::{Bot, BotMessage, BotRun, BotRunStatus, BotSchedule};
@@ -224,4 +225,70 @@ pub async fn run_bot_now(
         status: last.status,
         result_summary: last.result_summary,
     })
+}
+
+/// Sentinel from_bot_id used by user-sent messages in the bot inbox.
+/// The executor's inbox-formatting recognizes this and shows "user"
+/// instead of the raw sentinel.
+pub const USER_SENDER: &str = "__user__";
+
+/// Enqueue a message from the human user to a bot. If `trigger_run` is
+/// true (default), the bot is also kicked off immediately so the user
+/// sees the response. The bot reads the inbox on its next run start,
+/// so a "send only" message is also fine — the bot will pick it up on
+/// its next scheduled or manual run.
+#[tauri::command]
+pub async fn send_to_bot(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    to_bot_id: String,
+    body: String,
+    trigger_run: Option<bool>,
+) -> Result<BotMessage, String> {
+    let body = body.trim();
+    if body.is_empty() {
+        return Err("message body is empty".to_string());
+    }
+    let msg = BotMessage {
+        id: Uuid::new_v4().to_string(),
+        from_bot_id: USER_SENDER.to_string(),
+        to_bot_id: to_bot_id.clone(),
+        body: body.to_string(),
+        created_at: Utc::now(),
+        read: false,
+        conversation_id: None,
+    };
+    state
+        .db
+        .enqueue_bot_message(&msg)
+        .map_err(|e| e.to_string())?;
+    if trigger_run.unwrap_or(true) {
+        // Fire the bot. We do this in a background task so the
+        // command returns quickly with the enqueued message; the UI
+        // listens to bot://chunk/done/error and shows the response
+        // stream as it arrives.
+        let state_arc: Arc<AppState> = Arc::new(AppState {
+            db: state.db.clone(),
+        });
+        let db_for_lookup = state.db.clone();
+        let id_for_lookup = to_bot_id.clone();
+        let bot = tokio::task::spawn_blocking(move || {
+            db_for_lookup.get_bot(&id_for_lookup)
+        })
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())?;
+        if let Some(bot) = bot {
+            tauri::async_runtime::spawn(async move {
+                let _ = run_bot_once(
+                    app,
+                    state_arc,
+                    bot,
+                    CancellationToken::new(),
+                )
+                .await;
+            });
+        }
+    }
+    Ok(msg)
 }
