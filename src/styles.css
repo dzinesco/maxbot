@@ -2755,6 +2755,25 @@ button.link:hover {
   color: var(--danger);
 }
 
+/* Overlay shown on top of the noVNC viewer when the RFB or
+ * WebSocket fails. Distinct from .computer-panel__body--error
+ * (which is the whole-body error state for computer.state
+ * === "error") — this one is positioned absolutely on top of
+ * the viewer so the user can see both the empty viewer and
+ * the reason it failed. */
+.computer-panel__viewer-error {
+  position: absolute;
+  top: 12px;
+  left: 12px;
+  right: 12px;
+  background: rgba(14, 14, 16, 0.92);
+  border: 1px solid var(--danger);
+  border-radius: 6px;
+  padding: 12px 16px;
+  z-index: 10;
+  max-width: 480px;
+}
+
 .computer-panel__empty-title {
   font-size: 14px;
   font-weight: 600;

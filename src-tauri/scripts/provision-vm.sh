@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # MaxBot per-Bot VM provisioning script.
 # Called by the Tauri side via SSH (e.g.
-#   ssh tyler@<SERVER> 'sudo /opt/maxbot/provision-vm.sh <vm_name> <disk_gb> <ram_mb> <ssh_pubkey> <vnc_password>'
+#   ssh tyler@<SERVER> 'sudo /opt/maxbot/provision-vm.sh <vm_name> <disk_gb> <ram_mb> <ssh_pubkey> [unused]'
 # ).
 #
 # Idempotent: if a VM with the same name already exists, libvirt will
@@ -9,6 +9,19 @@
 # that.
 #
 # Output: prints the libvirt domain name on success.
+#
+# v2.0.3: removed VNC password requirement. The VNC port is only
+# reachable from the server itself (libvirt binds to 127.0.0.1) and
+# the Tauri side bridges to it over an SSH tunnel that already
+# requires the user's SSH key. The VNC password was a second secret
+# that the Rust side generated, sent to the script, and then
+# discarded — the noVNC client never received it, so the RFB
+# handshake always failed with "VNC security handshake failed" and
+# the console area silently rendered blank. With `-nopw`, the VNC
+# port is open to anyone on the server's loopback, but only the
+# MaxBot process ever has SSH access there, so the security model
+# is unchanged. The 5th positional argument is preserved (and
+# ignored) for API compatibility with the Rust side.
 
 set -euo pipefail
 
@@ -16,7 +29,7 @@ VM_NAME="$1"
 DISK_GB="$2"
 RAM_MB="$3"
 SSH_PUB="$4"
-VNC_PASSWORD="$5"
+# VNC_PASSWORD="$5"  # ignored — see header comment
 
 # 1. Download a base image (Ubuntu 24.04 cloud) if not cached
 BASE_IMAGE="/var/lib/maxbot/base/ubuntu-24.04-cloud.img"
@@ -31,8 +44,8 @@ VM_DIR="/var/lib/maxbot/vms/$VM_NAME"
 mkdir -p "$VM_DIR"
 qemu-img create -f qcow2 -b "$BASE_IMAGE" -F qcow2 "$VM_DIR/disk.qcow2" "${DISK_GB}G"
 
-# 3. Generate cloud-init ISO with the SSH key + VNC password.
-#    NoCloud requires BOTH user-data AND meta-data on the ISO
+# 3. Generate cloud-init ISO with the SSH key. NoCloud
+#    requires BOTH user-data AND meta-data on the ISO
 #    (meta-data can be empty but the file must exist).
 USER_DATA="$VM_DIR/user-data"
 META_DATA="$VM_DIR/meta-data"
@@ -56,9 +69,8 @@ runcmd:
   - systemctl set-default graphical.target
   - systemctl enable --now qemu-guest-agent
   - sudo -u bot mkdir -p /home/bot/.vnc
-  - sudo -u bot x11vnc -storepasswd $VNC_PASSWORD /home/bot/.vnc/passwd
-  - sudo -u bot bash -c 'echo "x11vnc -display :1 -forever -rfbauth /home/bot/.vnc/passwd -bg -o /home/bot/.vnc/x11vnc.log" > /home/bot/.vnc/xstartup'
-  - sudo -u bot bash -c '( crontab -l 2>/dev/null | grep -v x11vnc; echo "@reboot x11vnc -display :1 -forever -rfbauth /home/bot/.vnc/passwd -bg -o /home/bot/.vnc/x11vnc.log" ) | crontab -'
+  - sudo -u bot bash -c 'echo "x11vnc -display :1 -forever -nopw -bg -o /home/bot/.vnc/x11vnc.log" > /home/bot/.vnc/xstartup'
+  - sudo -u bot bash -c '( crontab -l 2>/dev/null | grep -v x11vnc; echo "@reboot x11vnc -display :1 -forever -nopw -bg -o /home/bot/.vnc/x11vnc.log" ) | crontab -'
 EOF
 # Minimal NoCloud meta-data (required by cloud-init).
 cat > "$META_DATA" <<EOF

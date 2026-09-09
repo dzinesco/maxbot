@@ -166,6 +166,13 @@ function FullComputerPanel({
   const [loading, setLoading] = useState(true);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [consoleUrl, setConsoleUrl] = useState<string | null>(null);
+  // `viewerError` is the noVNC RFB/WebSocket error. Distinct
+  // from `errorMsg`, which is reserved for the computer.state
+  // === "error" path. The viewer's failure is the most
+  // common failure mode in practice (VNC password, tunnel
+  // drop, etc.) and previously rendered a silent blank
+  // viewer with no visible feedback.
+  const [viewerError, setViewerError] = useState<string | null>(null);
   const [actionPending, setActionPending] = useState(false);
   const [uptime, setUptime] = useState<number | null>(null);
   // `lastSeenAt` is an ISO string; we tick once a second to
@@ -460,7 +467,8 @@ function FullComputerPanel({
             wsUrl={consoleUrl}
             viewOnly={viewOnly}
             scaleViewport
-            onError={(e) => setErrorMsg(e)}
+            onError={(e) => setViewerError(e)}
+            onConnect={() => setViewerError(null)}
           />
         ) : (
           <div className="computer-panel__body--loading">
@@ -468,6 +476,18 @@ function FullComputerPanel({
             <div>Opening console…</div>
           </div>
         )}
+        {consoleUrl && viewerError ? (
+          <div className="computer-panel__viewer-error" data-testid="viewer-error">
+            <div className="computer-panel__error-title">Console error</div>
+            <div className="computer-panel__error-detail">{viewerError}</div>
+            <div className="computer-panel__error-detail" style={{ opacity: 0.7, marginTop: 8 }}>
+              The WebSocket proxy may have failed to start, the SSH tunnel
+              may have dropped, or the VNC server may have refused the
+              connection. Try Hand back and re-open, or Restart the
+              computer.
+            </div>
+          </div>
+        ) : null}
       </div>
       <ComputerFooter
         mode={mode}

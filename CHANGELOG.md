@@ -4,6 +4,56 @@ All notable changes to MaxBot are documented in this file. The format
 follows [Keep a Changelog](https://keepachangelog.com/) and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## v2.0.3 — 2026-09-09
+
+### Fixed
+- **ComputerPanel VNC console rendered silently blank** when the
+  noVNC RFB handshake failed. There were two related problems:
+
+  1. **VNC password mismatch.** The `provision-vm.sh` script
+     started x11vnc with `-rfbauth /home/bot/.vnc/passwd`,
+     requiring a VNC password. The Rust side generated the
+     password locally, sent it to the script, and then
+     discarded it — the noVNC client never received a
+     `password` option and the RFB handshake always failed
+     with "no supported security types" or "VNC security
+     handshake failed." The viewer area then rendered as
+     a blank `<div>` with no visible feedback.
+  2. **noVNC errors were silently swallowed.** The
+     ComputerPanel's `onError` from the viewer was written
+     into the same `errorMsg` state that's only shown when
+     `computer.state === "error"`. For a running VM with a
+     failed viewer, the error was set but never displayed.
+     The user saw an empty viewer area with no indication
+     of what went wrong.
+
+  - **Fix for #1:** Drop the VNC password requirement.
+    `x11vnc` is started with `-nopw` instead of
+    `-rfbauth`. The VNC port is only reachable from the
+    server's loopback (libvirt binds to 127.0.0.1), and
+    the Tauri side bridges to it over an SSH tunnel that
+    already requires the user's SSH key. The second secret
+    was redundant. The 5th positional argument of the
+    script is preserved (and ignored) for API
+    compatibility.
+  - **Fix for #2:** Add a separate `viewerError` state in
+    the ComputerPanel and render it as a positioned
+    overlay on top of the viewer (`computer-panel__viewer-error`
+    in `styles.css`). The overlay shows the noVNC error
+    message and a hint to "Hand back" or Restart.
+    Successful `onConnect` clears the error so the overlay
+    disappears on a successful reconnect.
+
+### Changed
+- **`src-tauri/scripts/provision-vm.sh`:** x11vnc now runs
+  with `-nopw`; `x11vnc -storepasswd` and the
+  `~/.vnc/passwd` setup are removed. The 5th argument
+  (VNC password) is preserved but ignored. The deployed
+  copy at `/opt/maxbot/provision-vm.sh` on `crispy` is
+  updated. New VMs provision correctly; existing VMs
+  need to be destroyed and re-provisioned (the user's
+  running `maxbot-bot-155ffaaa-…` is one of those).
+
 ## v2.0.2 — 2026-09-09
 
 ### Fixed
