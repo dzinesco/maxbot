@@ -186,7 +186,18 @@ pub async fn provision_vm(
     //    so it's recognizable in `virsh list`. Bot_ids
     //    are uuid4, so the prefix is safe.
     let vm_name = format!("maxbot-bot-{}", sanitize_for_libvirt(bot_id));
-    let hostname = format!("maxbot-{}", sanitize_for_hostname(bot_id));
+    // The DHCP hostname we match against in the lease poll
+    // must mirror what the server-side `provision-vm.sh`
+    // script writes into the cloud-init meta-data. The
+    // script sets `local-hostname: ${VM_NAME//_/-}`, so the
+    // lease will carry the full `maxbot-bot-...` prefix.
+    // v2.0.0 had `maxbot-{sanitize_for_hostname(bot_id)}`
+    // here, which is missing the `bot-` segment and never
+    // matched the real lease — every provision timed out
+    // at the 90s IP poll. The `ComputerPanel` then showed
+    // "Computer error: The VM is in an error state." even
+    // though the VM was up and reachable.
+    let hostname = format!("maxbot-bot-{}", sanitize_for_hostname(bot_id));
 
     // 4. Build the cloud-init payload — but defer
     //    genisoimage to the server-side script. We
@@ -227,10 +238,25 @@ pub async fn provision_vm(
             out.stderr.trim()
         )));
     }
-    // The script's stdout is the libvirt domain name
-    // (it ends in the same value we passed in, but we
-    // trust nothing and parse it).
-    let domain_name = out.stdout.trim().to_string();
+    // The script writes the libvirt domain name on its
+    // FINAL line (`echo "$VM_NAME"` is the last thing in
+    // the script). Earlier in the script, `qemu-img
+    // create` writes its formatting progress to stdout
+    // (one or more lines), and the rest of the script
+    // (`virt-install`, `genisoimage`) is mostly silent on
+    // stdout. v2.0.0 did `out.stdout.trim()` which
+    // returned the entire concatenated output — the
+    // resulting "domain name" was several hundred bytes
+    // long and broke every subsequent virsh call
+    // (`vncdisplay`, `destroy`, etc.). Take the LAST
+    // non-empty line.
+    let domain_name = out
+        .stdout
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .last()
+        .map(|l| l.trim().to_string())
+        .unwrap_or_default();
     if domain_name.is_empty() {
         return Err(ProvisionError::NoDomainName);
     }

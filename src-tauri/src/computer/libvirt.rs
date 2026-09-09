@@ -289,15 +289,43 @@ pub(crate) fn parse_dhcp_leases(raw: &str) -> Vec<DhcpLease> {
         }
         // virsh pads with multiple spaces; collapse to single.
         let parts: Vec<&str> = trimmed.split_whitespace().collect();
-        // Expect at least: timestamp, mac, proto, ip[/mask], hostname[, client-id].
-        if parts.len() < 5 {
+        // Real `virsh net-dhcp-leases` rows (Ubuntu 24.10+)
+        // look like:
+        //
+        //   2026-09-09 11:42:30  52:54:00:d6:7e:ea  ipv4  192.168.122.65/24  maxbot-bot-...  ff:...
+        //
+        // The expiry timestamp is TWO whitespace-separated
+        // tokens (date + time), not one. Some libvirt versions
+        // also emit it as a single ISO-8601 token (`T`-joined);
+        // we accept either shape by locating the protocol
+        // token (`ipv4` / `ipv6`) and using it as an anchor.
+        // That makes us robust to either timestamp format and
+        // any future column reordering.
+        let proto_idx = parts
+            .iter()
+            .position(|p| *p == "ipv4" || *p == "ipv6");
+        let proto_idx = match proto_idx {
+            Some(i) => i,
+            None => continue,
+        };
+        // MAC is the token immediately before the protocol.
+        if proto_idx < 1 {
             continue;
         }
-        let mac = parts[1].to_string();
-        // IP may be 192.168.122.173/24 — strip the /N.
-        let ip_raw = parts[3];
+        let mac = parts[proto_idx - 1].to_string();
+        // IP is the token immediately after the protocol.
+        let ip_idx = proto_idx + 1;
+        if ip_idx >= parts.len() {
+            continue;
+        }
+        let ip_raw = parts[ip_idx];
         let ipaddr = ip_raw.split('/').next().unwrap_or(ip_raw).to_string();
-        let hostname = parts[4].to_string();
+        // Hostname is the token after the IP. Client ID
+        // follows if present; we don't need it.
+        let hostname = parts
+            .get(ip_idx + 1)
+            .map(|s| s.to_string())
+            .unwrap_or_default();
         out.push(DhcpLease {
             ipaddr,
             mac,
@@ -335,6 +363,39 @@ mod tests {
         assert_eq!(leases[0].mac, "52:54:00:3a:c1:ca");
         assert_eq!(leases[0].hostname, "maxbot-foo");
         assert_eq!(leases[1].ipaddr, "192.168.122.50");
+        assert_eq!(leases[1].hostname, "another-bot");
+    }
+
+    // v2.0.2 regression: the old parser used hard-coded
+    // indices (parts[1] for MAC, parts[3] for IP, parts[4]
+    // for hostname) and only worked when the Expiry
+    // timestamp was a single token (ISO-8601 with `T`).
+    // Real `virsh net-dhcp-leases` on Ubuntu 24.10+ emits
+    // the timestamp as TWO tokens (date + time, space-
+    // separated), which shifted every column by one. The
+    // IP-poll matched the IP address against the expected
+    // hostname and never resolved, so every provision
+    // timed out at the 90s lease poll and the ComputerPanel
+    // showed "Computer error". The new parser anchors on
+    // the protocol token (`ipv4` / `ipv6`) so it's robust
+    // to either timestamp shape.
+    #[test]
+    fn parse_dhcp_leases_handles_space_separated_timestamp() {
+        // The exact shape Ubuntu 24.10 virsh emits.
+        let raw = "\
+ Expiry Time           MAC address         Protocol   IP address          Hostname                                          Client ID or DUID
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ 2026-09-09 11:42:30   52:54:00:d6:7e:ea   ipv4       192.168.122.65/24    maxbot-bot-smoke-39a1fede                         ff:56:50:4d:98:00:02:00:00:ab:11:fb:66:01:58:4f:ee:34:72
+ 2026-09-09 11:32:16   52:54:00:f3:4c:e6   ipv4       192.168.122.238/24   maxbot-bot-0a0538fb-f1f4-42f0-83de-eec858cf9288   ff:56:50:4d:98:00:02:00:00:ab:11:12:3b:36:ee:49:ac:4d:ce
+";
+        let leases = parse_dhcp_leases(raw);
+        assert_eq!(leases.len(), 2);
+        assert_eq!(leases[0].ipaddr, "192.168.122.65");
+        assert_eq!(leases[0].mac, "52:54:00:d6:7e:ea");
+        assert_eq!(leases[0].hostname, "maxbot-bot-smoke-39a1fede");
+        assert_eq!(leases[1].ipaddr, "192.168.122.238");
+        assert_eq!(leases[1].mac, "52:54:00:f3:4c:e6");
+        assert_eq!(leases[1].hostname, "maxbot-bot-0a0538fb-f1f4-42f0-83de-eec858cf9288");
     }
 
     #[test]

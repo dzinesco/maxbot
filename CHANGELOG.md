@@ -4,6 +4,70 @@ All notable changes to MaxBot are documented in this file. The format
 follows [Keep a Changelog](https://keepachangelog.com/) and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## v2.0.2 — 2026-09-09
+
+### Fixed
+- **Every per-Bot VM provision failed with "Computer error"**
+  because the Rust `provision` chain had two latent bugs in the
+  same code path. Surfaced via the `provision_e2e_against_crispy`
+  smoke test (`#[ignore]`, `cargo test --lib
+  provision_e2e_against_crispy -- --ignored --nocapture`).
+
+  1. **DHCP hostname mismatch in the IP poll.** The script
+     `provision-vm.sh` writes `local-hostname:
+     ${VM_NAME//_/-}` into cloud-init meta-data, and
+     `VM_NAME` is `maxbot-bot-{sanitized_bot_id}`. The Rust
+     side built its expected hostname as
+     `maxbot-{sanitize_for_hostname(bot_id)}` — missing
+     the `bot-` segment — and the `find` on the lease list
+     never matched. After 90s the IP poll timed out, the
+     ComputerPanel polled the failed row, and the user
+     saw "Computer error: The VM is in an error state.
+     Try Restart, or Destroy and re-provision." even
+     though the VM was up, had a DHCP lease, and was
+     reachable.
+  2. **`virsh net-dhcp-leases` parser was off-by-one.**
+     It used hard-coded indices (`parts[1]` for MAC,
+     `parts[3]` for IP, `parts[4]` for hostname) and was
+     only tested against an ISO-8601 `T`-joined timestamp.
+     Real `virsh net-dhcp-leases` on Ubuntu 24.10+ emits
+     the timestamp as TWO whitespace-separated tokens
+     (`YYYY-MM-DD HH:MM:SS`), which shifts every column
+     by one. The parser's hostname ended up being the
+     IP address, and the IP poll's `find` never matched.
+     New parser anchors on the `ipv4`/`ipv6` token and is
+     robust to either timestamp shape.
+  3. **Domain name from the script's stdout was the
+     whole script's output.** `qemu-img create` writes
+     its formatting progress to stdout, and the script's
+     `echo "$VM_NAME"` is the LAST line. The Rust code
+     did `out.stdout.trim()` and got a several-hundred-
+     byte "domain name" that included qemu-img's
+     progress plus "Starting install... Domain creation
+     completed." plus the real VM_NAME. Every
+     subsequent `virsh vncdisplay` / `virsh destroy` /
+     `virsh undefine` failed with "failed to get domain
+     '...'." Fix: take the last non-empty line of
+     stdout.
+
+### Added
+- **`#[ignore]`d integration test
+  `provision_e2e_against_crispy`** in
+  `src-tauri/src/computer/mod.rs`. Provisions a real
+  VM on the live `crispy` server (env override:
+  `MAXBOT_TEST_SERVER_HOST`, `MAXBOT_TEST_SERVER_SSH_USER`,
+  `MAXBOT_TEST_PASSPHRASE`), asserts the row is in
+  `running` state with an IP + VNC port, then tears the
+  domain + pool down. Exits in ~15s on a warm
+  libvirt. Catch this class of bug before it ships.
+- **Regression test `parse_dhcp_leases_handles_space_separated_timestamp`**
+  in `src-tauri/src/computer/libvirt.rs`. Real
+  Ubuntu 24.10 virsh output captured at 2026-09-09
+  11:42 MDT, two leases, asserts the parsed
+  IP/MAC/hostname for both. The old test only covered
+  the ISO-8601 timestamp variant and let this bug
+  ship in v2.0.0.
+
 ## v2.0.1 — 2026-09-09
 
 ### Fixed

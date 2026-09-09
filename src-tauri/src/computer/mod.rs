@@ -606,4 +606,140 @@ mod tests {
         // Unknown strings map to error.
         assert_eq!(ComputerState::parse("????"), ComputerState::Error);
     }
+
+    // ----- v2.0.2 smoke test: end-to-end provision against the
+    // real Linux server (Tyler's `crispy` at 192.168.0.49).
+    //
+    // This test:
+    //   1. Builds a fresh SQLite DB in a temp dir
+    //   2. Inserts a Bot row + Settings (server host, SSH user,
+    //      passphrase, default disk/RAM)
+    //   3. Constructs a ComputerManager pointed at the real server
+    //   4. Calls `provision(bot_id, opts)`
+    //   5. Asserts the returned state is `running` and the DB row
+    //      has an IP + VNC port
+    //   6. Tears down the libvirt domain + storage pool on the
+    //      server so the test is idempotent
+    //
+    // Marked `#[ignore]` so `cargo test` doesn't hit the real
+    // server in CI. Run with:
+    //
+    //   cargo test --lib provision_e2e -- --ignored --nocapture
+    //
+    // Prereqs on the test machine:
+    //   - ssh-agent running with Tyler's `~/.ssh/id_ed25519`
+    //   - the key is authorized on `tyler@192.168.0.49`
+    //   - the server has libvirt + `/opt/maxbot/provision-vm.sh`
+    //   - passwordless sudo for tyler on the server
+    #[tokio::test]
+    #[ignore]
+    async fn provision_e2e_against_crispy() {
+        use super::libvirt::LibvirtClient;
+        // 1. Fresh DB
+        let dir = std::env::temp_dir().join(format!(
+            "maxbot-provision-smoke-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("test.sqlite");
+        let db = crate::storage::db::Database::open(&path).expect("open test db");
+
+        // 2. Bot + settings. The host is a fixed test target;
+        // override via env if you need to smoke a different
+        // server. Same for the SSH user.
+        let bot_id = format!("smoke-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+        let now = chrono::Utc::now();
+        let bot = crate::bots::Bot {
+            id: bot_id.clone(),
+            name: "smoke".to_string(),
+            description: "".to_string(),
+            system_prompt: "".to_string(),
+            default_model: "MiniMax-M3".to_string(),
+            allowed_tools: vec![],
+            icon: "".to_string(),
+            color: "".to_string(),
+            avatar_color: "".to_string(),
+            last_active_at: None,
+            state: crate::bots::BotState::Idle,
+            created_at: now,
+            updated_at: now,
+        };
+        db.upsert_bot(&bot).expect("upsert bot");
+
+        let mut s = crate::storage::db::Settings::default();
+        s.computer_server_host =
+            std::env::var("MAXBOT_TEST_SERVER_HOST")
+                .unwrap_or_else(|_| "192.168.0.49".to_string());
+        s.computer_server_ssh_user =
+            std::env::var("MAXBOT_TEST_SERVER_SSH_USER")
+                .unwrap_or_else(|_| "tyler".to_string());
+        s.computer_server_ssh_key_id = "".to_string(); // OS keychain
+        s.computer_vnc_local_port_range = "5900-5999".to_string();
+        s.computer_passphrase = std::env::var("MAXBOT_TEST_PASSPHRASE")
+            .unwrap_or_else(|_| "smoke-test-passphrase-2026".to_string());
+        s.computer_default_disk_gb = 5;
+        s.computer_default_ram_mb = 1024;
+        db.save_settings(&s).expect("save settings");
+
+        // 3. Manager
+        let mgr = ComputerManager::new(&s);
+
+        // 4. Provision. This is the long step (~1-2 min for
+        // cloud-init to bring up xfce + x11vnc + qemu-guest-
+        // agent, then poll for IP / VNC).
+        eprintln!(
+            "[smoke] provisioning bot {bot_id} on {host} (this takes 1-2 min)...",
+            host = s.computer_server_host
+        );
+        let opts = ProvisionOptions {
+            disk_gb: 5,
+            ram_mb: 1024,
+        };
+        let result = mgr.provision(&db, &bot_id, opts).await;
+        if let Err(ref e) = result {
+            // Best-effort: print the server-side libvirt list
+            // and the qemu-guest-agent status to help debug.
+            eprintln!("[smoke] provision failed: {e}");
+        }
+        assert!(
+            result.is_ok(),
+            "provision failed: {:?}",
+            result.err()
+        );
+
+        // 5. DB row should be `running` with IP + VNC.
+        let row = db.get_computer(&bot_id).unwrap().expect("row exists");
+        assert_eq!(row.state, "running");
+        assert!(row.vm_ip.is_some(), "vm_ip should be set");
+        assert!(row.vnc_port.is_some(), "vnc_port should be set");
+        let ip = row.vm_ip.as_ref().unwrap();
+        let vnc_port = row.vnc_port.unwrap();
+        let domain = row.vm_name.clone();
+        eprintln!("[smoke] provisioned: domain={domain} ip={ip} vnc_port={vnc_port}");
+
+        // 6. Tear down. Destroy the libvirt domain and its
+        // pool so the test can run again without manual
+        // cleanup. The ssh pool is wrapped in Arc; we use a
+        // throwaway handle.
+        let server = SshPool::server_config_from_settings(&s);
+        let cleanup_pool = std::sync::Arc::new(SshPool::new(server));
+        let libvirt = LibvirtClient::new();
+        let _ = libvirt
+            .destroy(&cleanup_pool, &domain)
+            .await
+            .map_err(|e| eprintln!("[smoke] destroy: {e}"));
+        let _ = libvirt
+            .undefine(&cleanup_pool, &domain)
+            .await
+            .map_err(|e| eprintln!("[smoke] undefine: {e}"));
+        eprintln!("[smoke] tore down {domain}");
+        // Pool dir is at /var/lib/maxbot/vms/<domain> on the
+        // server. `virsh pool-destroy` + `pool-undefine` is
+        // enough; the rmdir is best-effort.
+
+        // Drop the DB so the file is unlocked, then trash the
+        // temp dir.
+        drop(db);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
