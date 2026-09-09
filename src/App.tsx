@@ -27,6 +27,7 @@ import {
   markInboxRead,
   metaGet,
   metaSet,
+  migrateMessageErrorShape,
   onBotChunk,
   onBotDone,
   onBotError,
@@ -414,6 +415,22 @@ export default function App() {
         // message has the new shape, this leaves it alone.
         const normalized = m.map(splitLegacyErrorSuffix);
         setMessages(normalized);
+        // Persist the split shape for any messages that needed
+        // migration, so the next reload doesn't re-run the
+        // regex on every page load. Fire-and-forget; a failure
+        // here just means the migration runs again next time.
+        for (let i = 0; i < m.length; i++) {
+          if (normalized[i] !== m[i]) {
+            const { content, error_message } = normalized[i];
+            migrateMessageErrorShape(
+              m[i].id,
+              content,
+              error_message ?? "",
+            ).catch((e) => {
+              console.warn("migrate_message_error_shape failed:", e);
+            });
+          }
+        }
         // Clear any stale "bot streaming" state when switching threads.
         botPendingRef.current = null;
       } catch (e) {

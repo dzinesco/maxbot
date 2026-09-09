@@ -5,6 +5,11 @@ import { ttsSpeak, ttsStop } from "../lib/tauri";
 interface MessageBubbleProps {
   message: Message;
   streaming?: boolean;
+  /** Called when the user clicks the Retry button on an error
+   * block. Wires the bubble to App.tsx's `handleRegenerate` so
+   * the user can re-run the last turn from the failure point
+   * itself, not just from the bottom bar. */
+  onRetry?: () => void;
 }
 
 /** Strip `<think>...</think>` blocks (and any other reasoning-style
@@ -227,6 +232,48 @@ function TypingDots() {
   );
 }
 
+/**
+ * Error block rendered INSIDE the assistant message bubble when a
+ * stream ends in a wire-protocol / network / auth failure. The
+ * friendly description comes from `StreamError::friendly_message`
+ * on the Rust side; the optional `onRetry` callback fires the same
+ * `handleRegenerate` flow used by the bottom-bar Regenerate button.
+ *
+ * Distinct visual treatment on purpose: danger color, subtle tinted
+ * background, no message-body chrome (no `Copy` button, no avatar
+ * re-emit). It signals "this turn didn't complete" without
+ * contaminating the chat scroll with raw `[error] protocol: …`
+ * strings.
+ */
+export function ErrorMessage({
+  error,
+  onRetry,
+}: {
+  error: string;
+  onRetry?: () => void;
+}) {
+  return (
+    <div className="error-message" role="alert">
+      <span className="error-message-icon" aria-hidden>
+        ⚠
+      </span>
+      <div className="error-message-body">
+        <div className="error-message-title">Couldn't finish the response</div>
+        <pre className="error-message-detail">{error}</pre>
+      </div>
+      {onRetry && (
+        <button
+          className="error-message-retry"
+          onClick={onRetry}
+          title="Re-run the last user message and replace this response"
+        >
+          ↻ Retry
+        </button>
+      )}
+    </div>
+  );
+}
+
 /** Collapsible wrapper for long tool result messages. Tool
  * results can be 20+ KB of JSON; showing that wall of text by
  * default buries the rest of the chat. Default-collapsed shows a
@@ -286,7 +333,7 @@ function CollapsibleToolResult({ content }: { content: string }) {
   );
 }
 
-export function MessageBubble({ message, streaming }: MessageBubbleProps) {
+export function MessageBubble({ message, streaming, onRetry }: MessageBubbleProps) {
   const isUser = message.role === "user";
   const isTool = message.role === "tool";
   const isAssistant = !isUser && !isTool;
@@ -434,6 +481,13 @@ export function MessageBubble({ message, streaming }: MessageBubbleProps) {
           <CollapsibleToolResult content={message.content} />
         ) : (
           <div className="content">{renderMarkdown(message.content)}</div>
+        )}
+        {/* v0.7.6: stream errors are rendered as a dedicated
+         * block instead of being appended to `content`. Only
+         * shows on assistant messages (not user / tool). The
+         * Retry button is wired up by ChatView → App. */}
+        {!streaming && isAssistant && message.error_message && (
+          <ErrorMessage error={message.error_message} onRetry={onRetry} />
         )}
         <ToolCalls calls={message.tool_calls} />
       </div>

@@ -82,6 +82,29 @@ pub async fn search_messages(
     .map_err(|e| e.to_string())?
 }
 
+/// v0.7.6 one-time migration: write the post-split shape of a
+/// legacy "[error] …" assistant message. Sets `content` to the
+/// streamed prefix and `error_message` to the friendly description
+/// in one statement, so the next reload sees the clean shape
+/// without re-running the suffix split. Called by the renderer's
+/// `splitLegacyErrorSuffix` migration when it sees a legacy error
+/// suffix on a message.
+#[tauri::command]
+pub async fn migrate_message_error_shape(
+    state: State<'_, AppState>,
+    message_id: String,
+    content: String,
+    error_message: String,
+) -> Result<(), String> {
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        db.migrate_message_to_error_shape(&message_id, &content, &error_message)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 // `MessageRole` and `PersistedToolCall` are re-exported in case future
 // commands need them. They are kept in this file to colocate all
 // conversation-related commands.

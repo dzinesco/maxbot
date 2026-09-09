@@ -1,3 +1,4 @@
+/// <reference types="vitest" />
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 
@@ -22,5 +23,16 @@ export default defineConfig(async () => ({
     watch: {
       ignored: ["**/src-tauri/**"],
     },
+  },
+  test: {
+    environment: "happy-dom",
+    include: ["src/**/*.test.{ts,tsx}"],
+    setupFiles: ["./src/test-setup.ts"],
+    // The Tauri `@tauri-apps/api/core` `invoke` is a no-op here
+    // (no Tauri runtime), but any import chain that pulls in a
+    // Tauri module still needs to evaluate without throwing —
+    // vitest's module resolver handles that, and the components
+    // we test don't call into the Tauri APIs at all.
+    globals: false,
   },
 }));

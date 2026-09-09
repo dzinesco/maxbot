@@ -410,6 +410,7 @@ async fn run_agent_loop(
                 Ok(Ok(m)) => m,
                 Ok(Err(e)) => {
                     handle_error(
+                        &db,
                         &app,
                         &StreamError::Protocol(format!("DB insert failed: {e}")),
                         &next_assistant_id,
@@ -420,6 +421,7 @@ async fn run_agent_loop(
                 }
                 Err(e) => {
                     handle_error(
+                        &db,
                         &app,
                         &StreamError::Protocol(format!("DB insert join failed: {e}")),
                         &next_assistant_id,
@@ -442,7 +444,7 @@ async fn run_agent_loop(
         let stream = match provider.stream(request).await {
             Ok(s) => s,
             Err(err) => {
-                handle_error(&app, &err, &next_assistant_id, &request_id);
+                handle_error(&db, &app, &err, &next_assistant_id, &request_id);
                 finish_turn(&streams, &user_message_id).await;
                 return;
             }
@@ -546,7 +548,7 @@ async fn run_agent_loop(
         }
 
         if let Some(e) = hit_error {
-            handle_error(&app, &e, &next_assistant_id, &request_id);
+            handle_error(&db, &app, &e, &next_assistant_id, &request_id);
             finish_turn(&streams, &user_message_id).await;
             return;
         }
@@ -694,20 +696,35 @@ async fn finish_turn(streams: &Arc<AsyncMutex<StreamRegistry>>, user_message_id:
 }
 
 fn handle_error(
+    db: &Arc<Database>,
     app: &AppHandle,
     err: &StreamError,
     assistant_message_id: &str,
     request_id: &str,
 ) {
-    let message = err.to_string();
+    // The friendly mapping is the one the user actually sees —
+    // short, actionable, no wire-protocol jargon. We persist it
+    // on the assistant message row (so it survives a reload) and
+    // ship it in the error event for the live UI.
+    let friendly = err.friendly_message();
+    let db_clone = db.clone();
+    let id_clone = assistant_message_id.to_string();
+    let friendly_owned = friendly.to_string();
+    let _ = tokio::task::spawn_blocking(move || {
+        db_clone.set_message_error_message(&id_clone, Some(&friendly_owned))
+    });
     let _ = app.emit(
         "chat://error",
         ErrorEvent {
             request_id: request_id.to_string(),
             assistant_message_id: assistant_message_id.to_string(),
-            message: message.clone(),
+            message: friendly.to_string(),
         },
     );
+    // The native dialog still gets the raw technical detail —
+    // power users / logs benefit from it, and the chat UI hides
+    // it from anyone who doesn't want to see it.
+    let raw = err.to_string();
     let kind = match err {
         StreamError::MissingApiKey => Some(MessageDialogKind::Warning),
         StreamError::Http { status, .. } if *status == 401 || *status == 403 => {
@@ -717,7 +734,7 @@ fn handle_error(
     };
     if let Some(kind) = kind {
         app.dialog()
-            .message(message)
+            .message(raw)
             .title("MaxBot")
             .kind(kind)
             .show(|_| {});

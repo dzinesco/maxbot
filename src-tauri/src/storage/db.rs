@@ -5,7 +5,6 @@
 //! JSON so that we can re-hydrate a full assistant turn on reload.
 
 use std::path::Path;
-use std::str::FromStr;
 use std::sync::Mutex;
 
 use chrono::{DateTime, Utc};
@@ -53,6 +52,16 @@ pub struct Message {
     #[serde(default)]
     pub tool_calls: Vec<PersistedToolCall>,
     pub created_at: DateTime<Utc>,
+    /// Friendly error description when a streamed assistant turn
+    /// ended in a stream error. `None` for normal messages. The
+    /// raw `content` is whatever streamed successfully before the
+    /// error fired. Persisted to the `error_message` column on the
+    /// `messages` table so the error state survives a reload.
+    /// The React side renders this as an `ErrorMessage` block
+    /// inside the assistant bubble (with a Retry button) instead
+    /// of as a raw text suffix on `content`.
+    #[serde(default)]
+    pub error_message: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -189,7 +198,8 @@ impl Database {
                 role            TEXT NOT NULL,
                 content         TEXT NOT NULL,
                 tool_calls_json TEXT NOT NULL DEFAULT '[]',
-                created_at      TEXT NOT NULL
+                created_at      TEXT NOT NULL,
+                error_message   TEXT
              );
              CREATE INDEX IF NOT EXISTS messages_by_conversation
                  ON messages(conversation_id, created_at);
@@ -251,6 +261,19 @@ impl Database {
             "bot_schedules",
             "cron_expression",
             "TEXT NOT NULL DEFAULT ''",
+        )?;
+        // v0.7.6: error_message on `messages` — friendly description
+        // of a stream error, surfaced by the chat command when the
+        // assistant turn ends in a wire-protocol / network / auth
+        // failure. The raw `content` keeps whatever streamed before
+        // the error; `error_message` is rendered as a separate UI
+        // block by the React side (with a Retry button) instead of
+        // being appended to the visible content.
+        add_column_if_missing(
+            &conn,
+            "messages",
+            "error_message",
+            "TEXT",
         )?;
         Ok(())
     }
@@ -368,7 +391,7 @@ impl Database {
     pub fn list_messages(&self, conversation_id: &str) -> rusqlite::Result<Vec<Message>> {
         let conn = self.conn.lock().expect("db lock poisoned");
         let mut stmt = conn.prepare(
-            "SELECT id, conversation_id, role, content, tool_calls_json, created_at
+            "SELECT id, conversation_id, role, content, tool_calls_json, created_at, error_message
              FROM messages
              WHERE conversation_id = ?
              ORDER BY created_at ASC",
@@ -385,6 +408,7 @@ impl Database {
                 content: row.get(3)?,
                 tool_calls,
                 created_at: parse_dt(row.get::<_, String>(5)?),
+                error_message: row.get(6)?,
             })
         })?;
         let mut out = Vec::new();
@@ -419,7 +443,7 @@ impl Database {
         let pattern = format!("%{}%", escaped);
         let conn = self.conn.lock().expect("db lock poisoned");
         let mut stmt = conn.prepare(
-            "SELECT id, conversation_id, role, content, tool_calls_json, created_at
+            "SELECT id, conversation_id, role, content, tool_calls_json, created_at, error_message
              FROM messages
              WHERE content LIKE ? ESCAPE '\\'
              ORDER BY created_at DESC
@@ -437,6 +461,7 @@ impl Database {
                 content: row.get(3)?,
                 tool_calls,
                 created_at: parse_dt(row.get::<_, String>(5)?),
+                error_message: row.get(6)?,
             })
         })?;
         let mut out = Vec::new();
@@ -461,11 +486,12 @@ impl Database {
             content: content.to_string(),
             tool_calls: tool_calls.to_vec(),
             created_at: now,
+            error_message: None,
         };
         let conn = self.conn.lock().expect("db lock poisoned");
         conn.execute(
-            "INSERT INTO messages (id, conversation_id, role, content, tool_calls_json, created_at)
-             VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO messages (id, conversation_id, role, content, tool_calls_json, created_at, error_message)
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
             params![
                 message.id,
                 message.conversation_id,
@@ -473,6 +499,7 @@ impl Database {
                 message.content,
                 serde_json::to_string(&message.tool_calls).unwrap_or_else(|_| "[]".to_string()),
                 message.created_at.to_rfc3339(),
+                message.error_message,
             ],
         )?;
         // Bump the conversation's updated_at so the sidebar re-orders.
@@ -525,7 +552,7 @@ impl Database {
     ) -> rusqlite::Result<Option<Message>> {
         let conn = self.conn.lock().expect("db lock poisoned");
         let mut stmt = conn.prepare(
-            "SELECT id, conversation_id, role, content, tool_calls_json, created_at
+            "SELECT id, conversation_id, role, content, tool_calls_json, created_at, error_message
              FROM messages
              WHERE conversation_id = ? AND role = 'user'
              ORDER BY created_at DESC
@@ -543,6 +570,7 @@ impl Database {
                 content: row.get(3)?,
                 tool_calls,
                 created_at: parse_dt(row.get::<_, String>(5)?),
+                error_message: row.get(6)?,
             })
         })?;
         if let Some(row) = rows.next() {
@@ -564,6 +592,46 @@ impl Database {
         conn.execute(
             "UPDATE messages SET content = content || ? WHERE id = ?",
             params![delta, message_id],
+        )?;
+        Ok(())
+    }
+
+    /// Persist a friendly error description on a streamed assistant
+    /// turn. Called by the chat command when a stream ends in a
+    /// `StreamError` — the `content` column already has whatever
+    /// streamed before the error, and `error_message` is rendered
+    /// by the React side as a separate UI block (with a Retry
+    /// button) instead of being appended to the visible content.
+    pub fn set_message_error_message(
+        &self,
+        message_id: &str,
+        error_message: Option<&str>,
+    ) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().expect("db lock poisoned");
+        conn.execute(
+            "UPDATE messages SET error_message = ? WHERE id = ?",
+            params![error_message, message_id],
+        )?;
+        Ok(())
+    }
+
+    /// One-shot migration: write the post-split shape of a legacy
+    /// "[error] …" message. Sets `content` to the streamed prefix
+    /// and `error_message` to the friendly description in a single
+    /// statement so the next reload sees the clean shape (no need
+    /// to re-split on every page load). Used by the App.tsx
+    /// `splitLegacyErrorSuffix` migration on first load after
+    /// upgrade.
+    pub fn migrate_message_to_error_shape(
+        &self,
+        message_id: &str,
+        content: &str,
+        error_message: &str,
+    ) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().expect("db lock poisoned");
+        conn.execute(
+            "UPDATE messages SET content = ?, error_message = ? WHERE id = ?",
+            params![content, error_message, message_id],
         )?;
         Ok(())
     }
@@ -1111,5 +1179,147 @@ mod tests {
         let all = db.meta_list().unwrap();
         let entry = all.iter().find(|(k, _)| k == "is_onboarded").unwrap();
         assert_eq!(entry.1, "");
+    }
+
+    // ----- v0.7.6 Message JSON shape backwards-compat -----
+    // The wire shape of `Message` gained an `error_message` field.
+    // Old v0.7.5 JSON blobs (no field) must still deserialize, with
+    // `error_message: None`. If they didn't, every pre-v0.7.6
+    // conversation would 500 on load.
+
+    #[test]
+    fn message_without_error_message_deserializes_to_none() {
+        let raw = r#"{
+            "id": "msg-old",
+            "conversation_id": "conv-1",
+            "role": "assistant",
+            "content": "hello there",
+            "tool_calls": [],
+            "created_at": "2026-01-01T00:00:00Z"
+        }"#;
+        let msg: Message = serde_json::from_str(raw)
+            .expect("old message JSON should still deserialize");
+        assert_eq!(msg.id, "msg-old");
+        assert_eq!(msg.content, "hello there");
+        assert!(
+            msg.error_message.is_none(),
+            "old blob must default to error_message: None, got {:?}",
+            msg.error_message
+        );
+    }
+
+    #[test]
+    fn message_with_error_message_round_trips() {
+        let raw = r#"{
+            "id": "msg-new",
+            "conversation_id": "conv-1",
+            "role": "assistant",
+            "content": "partial response",
+            "tool_calls": [],
+            "created_at": "2026-01-01T00:00:00Z",
+            "error_message": "Connection lost — check your network"
+        }"#;
+        let msg: Message = serde_json::from_str(raw).expect("new message JSON should parse");
+        assert_eq!(
+            msg.error_message.as_deref(),
+            Some("Connection lost — check your network")
+        );
+        // Re-serialize and re-parse: ensures the new field is
+        // actually emitted, not silently dropped by serde.
+        let again: Message =
+            serde_json::from_str(&serde_json::to_string(&msg).unwrap()).unwrap();
+        assert_eq!(again.error_message, msg.error_message);
+        assert_eq!(again.content, msg.content);
+    }
+
+    #[test]
+    fn message_with_explicit_null_error_message_stays_null() {
+        let raw = r#"{
+            "id": "msg-null",
+            "conversation_id": "conv-1",
+            "role": "assistant",
+            "content": "ok",
+            "tool_calls": [],
+            "created_at": "2026-01-01T00:00:00Z",
+            "error_message": null
+        }"#;
+        let msg: Message = serde_json::from_str(raw)
+            .expect("explicit null should deserialize");
+        assert!(msg.error_message.is_none());
+    }
+
+    // ----- Settings JSON shape backwards-compat (grok_session_id) -----
+    // `Settings` gained an optional `grok_session_id` field for the
+    // Grok Build CLI session-resume path. Old settings JSON blobs
+    // (no `grok_session_id` key) must still deserialize, with
+    // `grok_session_id: None`. If they didn't, every pre-v0.7.6
+    // user would 500 on launch and lose their saved API keys.
+    //
+    // The smallest possible "old blob" is the empty object — the
+    // Settings struct is built with `#[serde(default)]` on every
+    // field, so `{}` must parse into a `Settings` whose every
+    // field is the type's default (empty strings, None options).
+
+    #[test]
+    fn empty_settings_blob_deserializes() {
+        let s: Settings = serde_json::from_str("{}")
+            .expect("empty settings blob must deserialize (every field is #[serde(default)])");
+        assert_eq!(s.provider_kind, "");
+        assert!(s.minimax_api_key.is_none());
+        assert!(s.openai_api_key.is_none());
+        assert!(s.anthropic_api_key.is_none());
+        assert!(s.xai_api_key.is_none());
+        assert_eq!(s.default_model, "");
+        assert_eq!(s.minimax_base_url, "");
+        assert_eq!(s.tts_voice, "");
+        assert_eq!(s.grok_build_binary, "");
+        assert_eq!(s.grok_build_model, "");
+        assert_eq!(s.grok_cwd, "");
+        assert!(s.grok_session_id.is_none(), "new field must default to None");
+        assert_eq!(s.openai_base_url, "");
+        assert_eq!(s.anthropic_base_url, "");
+        assert_eq!(s.xai_base_url, "");
+    }
+
+    #[test]
+    fn old_settings_blob_round_trips_through_database() {
+        // Write a pre-v0.7.6 settings blob (no `grok_session_id`)
+        // directly into the SQLite settings row, then read it back
+        // through `load_settings`. Every field must default
+        // correctly; the new `grok_session_id` field must be
+        // `None`.
+        let db = fresh_db();
+        let old_blob = r#"{
+            "provider_kind": "openai",
+            "openai_api_key": "sk-old",
+            "default_model": "gpt-4o-mini"
+        }"#;
+        // Persist the blob the same way `save_settings` would,
+        // but without going through `Settings` first (since the
+        // old blob doesn't have the new field, that round-trip
+        // is exactly what we're testing).
+        {
+            let conn = db.conn.lock().expect("db lock poisoned");
+            conn.execute(
+                "INSERT INTO settings (key, value) VALUES ('singleton', ?)",
+                params![old_blob],
+            )
+            .expect("write old settings blob");
+        }
+        let s = db.load_settings().expect("load old settings blob");
+        assert_eq!(s.provider_kind, "openai");
+        assert_eq!(s.openai_api_key.as_deref(), Some("sk-old"));
+        assert_eq!(s.default_model, "gpt-4o-mini");
+        // Every other field must default — most importantly the
+        // new `grok_session_id` field, which the old blob doesn't
+        // carry.
+        assert!(s.grok_session_id.is_none());
+        assert!(s.anthropic_api_key.is_none());
+        assert!(s.xai_api_key.is_none());
+        assert!(s.minimax_api_key.is_none());
+        assert_eq!(s.minimax_base_url, "");
+        assert_eq!(s.grok_build_binary, "");
+        assert_eq!(s.grok_build_model, "");
+        assert_eq!(s.grok_cwd, "");
     }
 }

@@ -69,6 +69,26 @@ export async function searchMessages(
   });
 }
 
+/**
+ * v0.7.6 one-time migration: write the post-split shape of a
+ * legacy "[error] …" assistant message. Persists `content` and
+ * `error_message` so the next reload doesn't have to re-split
+ * the legacy suffix. Called by `splitLegacyErrorSuffix` on the
+ * first load after upgrade when it finds a legacy error
+ * message in the DB.
+ */
+export async function migrateMessageErrorShape(
+  messageId: string,
+  content: string,
+  errorMessage: string,
+): Promise<void> {
+  await invoke("migrate_message_error_shape", {
+    messageId,
+    content,
+    errorMessage,
+  });
+}
+
 export async function getSettings(): Promise<Settings> {
   return invoke<Settings>("get_settings");
 }

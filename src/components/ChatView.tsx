@@ -40,6 +40,7 @@ export function ChatView({
           key={m.id}
           message={m}
           streaming={streamingId === m.id}
+          onRetry={onRegenerate}
         />
       ))}
       {showRegenerate && onRegenerate && (
