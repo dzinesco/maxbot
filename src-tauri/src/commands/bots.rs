@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use tauri::{AppHandle, State};
+use tauri_plugin_opener::OpenerExt;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -335,6 +336,23 @@ pub struct McpServerInfo {
     pub name: String,
     pub tool_count: usize,
     pub tool_names: Vec<String>,
+}
+
+/// Reveal the bot's folder in Finder (or the host file manager).
+/// The folder is created on first access via the filesystem helper,
+/// so the user always sees the directory — even for a brand-new bot
+/// that's never run.
+#[tauri::command]
+pub async fn reveal_bot_folder(
+    app: AppHandle,
+    bot_id: String,
+) -> Result<String, String> {
+    let dir = crate::bots::filesystem::bot_dir(&app, &bot_id)?;
+    let path_str = dir.to_string_lossy().to_string();
+    app.opener()
+        .open_path(path_str.clone(), None::<&str>)
+        .map_err(|e| format!("could not open {}: {e}", path_str))?;
+    Ok(path_str)
 }
 
 /// List the MCP servers currently loaded and the tools they

@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import type { Bot, BotSchedule, ToolSummary } from "../lib/api";
+import { revealBotFolder } from "../lib/tauri";
 
 interface BotEditorProps {
   /** The bot being edited, or a fresh blank bot for create. */
@@ -251,6 +252,44 @@ export function BotEditor({
                   "You are a careful, concise analyst. When asked to act, summarize what you did and why. Use the available tools when they help."
                 }
               />
+            </div>
+          </section>
+
+          {/* Workspace (per-bot filesystem) */}
+          <section className="form-section">
+            <h3>Workspace</h3>
+            <div className="form-row">
+              <label>
+                Bot folder
+                <span className="hint"> — the bot's own working directory</span>
+              </label>
+              <div className="bot-folder-row">
+                <code className="bot-folder-path">
+                  ~/Library/Application Support/com.maxbot.app/bots/{bot.id}/
+                </code>
+                <button
+                  type="button"
+                  className="ghost small"
+                  onClick={async () => {
+                    try {
+                      await revealBotFolder(bot.id);
+                    } catch (e) {
+                      alert(`Could not reveal folder: ${e}`);
+                    }
+                  }}
+                >
+                  Reveal in Finder
+                </button>
+              </div>
+              <div className="muted small hint">
+                Contains <code>agents.md</code> (long-term memory, auto-seeded
+                from the system prompt above and re-read on every run),
+                <code> scratchpad.md</code> (working notes), and
+                <code> outputs/</code> (artifacts the bot produces). The bot
+                can read and write to these via the{" "}
+                <code>memory_*</code>, <code>scratchpad_*</code>, and{" "}
+                <code>outputs_*</code> tools.
+              </div>
             </div>
           </section>
 

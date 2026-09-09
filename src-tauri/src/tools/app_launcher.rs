@@ -215,6 +215,7 @@ mod tests {
                     name: "app_list".to_string(),
                     arguments: json!({ "filter": "finder" }),
                     id: "x".to_string(),
+                    bot_id: None,
                 },
                 ToolContext::default(),
             )
@@ -236,6 +237,7 @@ mod tests {
                     name: "app_open".to_string(),
                     arguments: json!({ "name": "   " }),
                     id: "x".to_string(),
+                    bot_id: None,
                 },
                 ToolContext::default(),
             )
@@ -251,6 +253,7 @@ mod tests {
                     name: "app_open".to_string(),
                     arguments: json!({ "name": "Finder" }),
                     id: "x".to_string(),
+                    bot_id: None,
                 },
                 ToolContext::default(),
             )

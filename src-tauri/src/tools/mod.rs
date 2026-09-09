@@ -12,6 +12,7 @@
 pub mod apple_script;
 pub mod apple_script_exec;
 pub mod app_launcher;
+pub mod bot_fs;
 pub mod browsers;
 pub mod calendar;
 pub mod clipboard;

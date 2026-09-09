@@ -15,6 +15,11 @@ pub struct ToolInvocation {
     /// Stable id assigned by the model, used to thread the result back
     /// into the conversation as a `tool` role message.
     pub id: String,
+    /// Optional bot id when the invocation originates from a bot run.
+    /// Per-bot filesystem tools (memory_*, scratchpad_*, outputs_*)
+    /// use this to scope their operations. Chat runs leave it `None`.
+    /// Existing tools ignore it.
+    pub bot_id: Option<String>,
 }
 
 /// What the executor returns to the model. Plain text is the cheapest
@@ -71,6 +76,11 @@ pub struct ToolContext {
     /// dialog (e.g. "run shell command `rm -rf build`"). Tools set this
     /// internally before asking the chat command to gate them.
     pub consent_prompt: Option<String>,
+    /// Optional Tauri AppHandle. The chat command leaves this `None`;
+    /// the bot executor sets it so per-bot filesystem tools (memory_*,
+    /// scratchpad_*, outputs_*) can resolve `<app_data_dir>/bots/<id>/`.
+    /// Most tools don't need it.
+    pub app: Option<tauri::AppHandle>,
 }
 
 /// Common interface every tool implements. The `definition()` is the

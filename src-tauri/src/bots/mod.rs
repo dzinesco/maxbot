@@ -4,6 +4,7 @@
 //! they can also message other bots via the `message_bot` tool.
 
 pub mod executor;
+pub mod filesystem;
 pub mod registry;
 pub mod scheduler;
 

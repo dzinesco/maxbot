@@ -253,7 +253,29 @@ pub async fn run_bot_once(
             bodies.join("\n")
         )
     };
-    let system_prompt = format!("{}{}", bot.system_prompt, inbox_section);
+    // 4a. Append the bot's persistent memory (agents.md). The file
+    //     lives at <app_data_dir>/bots/<id>/agents.md and is
+    //     auto-seeded from the SQLite system_prompt on first run.
+    //     Soft-warn on read failure so a transient FS error doesn't
+    //     break a bot run.
+    let agents_md_section = match crate::bots::filesystem::bot_dir(&app, &bot.id)
+        .and_then(|dir| crate::bots::filesystem::read_agents_md(&dir, &bot.system_prompt))
+    {
+        Ok(s) if s.trim().is_empty() => String::new(),
+        Ok(s) => format!("\n\n# Long-term memory (agents.md)\n\n{}", s),
+        Err(e) => {
+            log::warn!(
+                "executor: could not read agents.md for bot {}: {e}",
+                bot.id
+            );
+            String::new()
+        }
+    };
+
+    let system_prompt = format!(
+        "{}{}{}",
+        bot.system_prompt, inbox_section, agents_md_section
+    );
 
     // 5. Persist the system message as the first turn in the conversation
     //    (if not already there). Reusing a recurring conversation: the
@@ -465,10 +487,12 @@ pub async fn run_bot_once(
                             name: tc.name.clone(),
                             id: tc.id.clone(),
                             arguments: parse_tool_args(&tc.arguments),
+                            bot_id: Some(bot.id.clone()),
                         },
                         ToolContext {
                             consent_granted: true,
                             consent_prompt: None,
+                            app: Some(app.clone()),
                         },
                     )
                     .await

@@ -239,6 +239,15 @@ export async function listActiveBotRuns(): Promise<string[]> {
   return invoke<string[]>("list_active_bot_runs");
 }
 
+/**
+ * Reveal the bot's folder in Finder. The folder is created on first
+ * access, so the user always sees the directory — even for a brand-new
+ * bot that's never run. Returns the absolute folder path.
+ */
+export async function revealBotFolder(botId: string): Promise<string> {
+  return invoke<string>("reveal_bot_folder", { botId });
+}
+
 // ---- TTS ----
 
 /**

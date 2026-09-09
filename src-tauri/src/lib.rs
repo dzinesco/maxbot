@@ -113,6 +113,7 @@ pub fn run() {
             commands::bots::list_mcp_servers,
             commands::bots::stop_bot_run,
             commands::bots::list_active_bot_runs,
+            commands::bots::reveal_bot_folder,
             commands::tcc::list_controllable_apps,
             commands::tcc::request_tcc_for,
             commands::tcc::open_automation_settings,

@@ -12,6 +12,10 @@ use crate::llm::provider::ToolDefinition;
 
 use super::apple_script::AppleScriptRunTool;
 use super::app_launcher::{AppListTool, AppOpenTool};
+use super::bot_fs::{
+    MemoryAppendTool, MemoryReadTool, MemoryWriteTool, OutputsListTool, OutputsReadTool,
+    OutputsWriteTool, ScratchpadAppendTool, ScratchpadReadTool, ScratchpadWriteTool,
+};
 use super::browsers::{
     ChromeCurrentUrlTool, ChromeExecJsTool, ChromeOpenTool, ChromeTabsTool, SafariCurrentUrlTool,
     SafariExecJsTool, SafariOpenTool, SafariTabsTool,
@@ -97,6 +101,16 @@ impl ToolRegistry {
             // v0.6.7 — App launcher (open any macOS app by name)
             Arc::new(AppOpenTool),
             Arc::new(AppListTool),
+            // v0.6.8 — Per-bot filesystem (memory / scratchpad / outputs)
+            Arc::new(MemoryReadTool),
+            Arc::new(MemoryWriteTool),
+            Arc::new(MemoryAppendTool),
+            Arc::new(ScratchpadReadTool),
+            Arc::new(ScratchpadWriteTool),
+            Arc::new(ScratchpadAppendTool),
+            Arc::new(OutputsListTool),
+            Arc::new(OutputsReadTool),
+            Arc::new(OutputsWriteTool),
         ];
         tools.extend(extra);
         let mut by_name: HashMap<String, Arc<dyn Tool>> = HashMap::new();

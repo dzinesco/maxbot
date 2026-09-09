@@ -583,6 +583,7 @@ async fn run_agent_loop(
                 name: tc.name.clone(),
                 id: tc.id.clone(),
                 arguments: parse_tool_arguments(&tc.arguments),
+                bot_id: None,
             };
             let result = registry
                 .execute(
@@ -590,6 +591,7 @@ async fn run_agent_loop(
                     ToolContext {
                         consent_granted,
                         consent_prompt: None,
+                        app: None,
                     },
                 )
                 .await;
