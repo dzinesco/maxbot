@@ -281,8 +281,24 @@ pub async fn run_bot_once(
     };
 
     let system_prompt = format!(
-        "{}{}{}",
-        bot.system_prompt, inbox_section, agents_md_section
+        "{}{}{}{}",
+        bot.system_prompt,
+        inbox_section,
+        agents_md_section,
+        // v2.5.0 — Persistent memory: inject a small slice of
+        // relevant memories at turn start. Top-5 keyword
+        // matches against the kickoff prompt (or, if a real
+        // user message is present in the history, the most
+        // recent user message). Read failures (no VM, slow
+        // SFTP, parse error) collapse to an empty Vec — the
+        // section becomes "" and the prompt stays clean.
+        build_memory_section(
+            &state.computer.ssh_pool(),
+            &bot.id,
+            &conversation_id,
+            &state,
+        )
+        .await,
     );
 
     // 5. Persist the system message as the first turn in the conversation
@@ -557,6 +573,20 @@ pub async fn run_bot_once(
         run.finished_at = Some(Utc::now());
         run.result_summary = summary.clone();
         let _ = state.db.upsert_bot_run(&run);
+        // v2.5.0 — auto-write a history entry summarizing
+        // the turn. We only do this on success; failed /
+        // cancelled runs are intentionally not recorded.
+        // The kickoff prompt is the user side; the final
+        // assistant text is the bot side. Both are best-
+        // effort — `auto_write_history` is non-fatal.
+        let user_text = most_recent_user_message(&state, &conversation_id);
+        auto_write_history(
+            &state.computer.ssh_pool(),
+            &bot.id,
+            &user_text,
+            &final_text,
+        )
+        .await;
         summary
     };
 
@@ -700,6 +730,134 @@ fn first_line(text: &str, max: usize) -> String {
         let mut out: String = one_line.chars().take(max).collect();
         out.push('…');
         out
+    }
+}
+
+// ---- v2.5.0 — Persistent memory ------------------------------------
+//
+// `build_memory_section` is the system-prompt injection point. It
+// runs at every Bot turn start, takes a short amount of time
+// (~one SFTP round-trip in the worst case), and is intentionally
+// non-fatal: a Bot without a VM (or with a slow one) gets an
+// empty section, not an error. The hard 2-second per-call
+// timeout lives inside `memory::store`.
+//
+// `auto_write_history` runs at the end of a successful run and
+// appends a `history` entry summarizing the turn. No LLM call
+// — we just truncate the user message and assistant reply to
+// 200 chars each. The executor passes a `&str` for the user
+// kickoff and the final assistant text; the helper concatenates
+// them and writes one entry.
+
+/// Truncate on a char boundary, not a byte boundary. Mirrors
+/// `first_line` but keeps a trailing ellipsis.
+fn truncate_chars(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        let mut out: String = s.chars().take(max).collect();
+        out.push('…');
+        out
+    }
+}
+
+/// Pull the most recent user message from the conversation
+/// history. The DB is the source of truth (we may have just
+/// persisted the kickoff user message). Returns an empty string
+/// when the DB lookup fails — the caller falls back to the
+/// kickoff prompt in that case.
+fn most_recent_user_message(state: &AppState, conversation_id: &str) -> String {
+    let Ok(msgs) = state.db.list_messages(conversation_id) else {
+        return String::new();
+    };
+    msgs.into_iter()
+        .rev()
+        .find(|m| matches!(m.role, MessageRole::User))
+        .map(|m| m.content)
+        .unwrap_or_default()
+}
+
+/// Build the "## Relevant memories" block for the system prompt.
+/// Capped at ~200 tokens (we count chars / 4 as a rough proxy) so
+/// the system prompt stays tight. Returns "" on any failure —
+/// memory is best-effort.
+async fn build_memory_section(
+    pool: &std::sync::Arc<crate::computer::ssh::SshPool>,
+    bot_id: &str,
+    conversation_id: &str,
+    state: &AppState,
+) -> String {
+    // Pick the best query we have. Prefer the most recent
+    // real user message; fall back to the kickoff prompt.
+    let query = most_recent_user_message(state, conversation_id);
+    let query = if query.trim().is_empty() {
+        "Run tick — proceed with your task.".to_string()
+    } else {
+        query
+    };
+    let entries = crate::memory::store::search(&**pool, bot_id, &query, 5).await;
+    if entries.is_empty() {
+        return String::new();
+    }
+    // Rough token cap: 4 chars per token → 800 chars max.
+    const CHAR_CAP: usize = 800;
+    let mut section = String::from(
+        "\n\n## Relevant memories\n\n\
+         These are facts, preferences, and recent conversation \
+         summaries you've remembered. They survive app restarts.\n",
+    );
+    let mut used = 0usize;
+    for e in &entries {
+        // One line per entry, in a stable shape. For history
+        // entries the `key` is empty — just render the summary.
+        let line = if e.kind == crate::memory::MemKind::History {
+            format!("- (history) {}", e.content)
+        } else {
+            format!("- [{}] {} = {}", e.kind.as_str(), e.key, e.content)
+        };
+        // +1 for the newline.
+        if used + line.len() + 1 > CHAR_CAP {
+            break;
+        }
+        used += line.len() + 1;
+        section.push_str(&line);
+        section.push('\n');
+    }
+    section
+}
+
+/// Append a `history` entry summarizing a successful turn.
+/// First 200 chars of the user message + first 200 chars of the
+/// assistant reply. Failure is logged + swallowed — the run
+/// already succeeded, so a memory write failure must not flip
+/// the run to "failed".
+async fn auto_write_history(
+    pool: &std::sync::Arc<crate::computer::ssh::SshPool>,
+    bot_id: &str,
+    user_text: &str,
+    assistant_text: &str,
+) {
+    let user_piece = truncate_chars(user_text.trim(), 200);
+    let assistant_piece = truncate_chars(assistant_text.trim(), 200);
+    let summary = if user_piece.is_empty() && assistant_piece.is_empty() {
+        "(empty turn)".to_string()
+    } else if user_piece.is_empty() {
+        format!("bot: {assistant_piece}")
+    } else if assistant_piece.is_empty() {
+        format!("user: {user_piece}")
+    } else {
+        format!("user: {user_piece}  |  bot: {assistant_piece}")
+    };
+    let entry = crate::memory::MemEntry {
+        kind: crate::memory::MemKind::History,
+        key: String::new(),
+        content: summary,
+        created_at: Utc::now().to_rfc3339(),
+    };
+    if let Err(e) = crate::memory::store::append(&**pool, bot_id, crate::memory::MemKind::History, entry).await {
+        log::warn!(
+            "executor: auto-write history failed for bot {bot_id}: {e}"
+        );
     }
 }
 

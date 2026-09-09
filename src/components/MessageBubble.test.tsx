@@ -5,9 +5,14 @@
 // to the surface (icon, layout, copy, button) has to update the
 // tests too.
 
-import { describe, expect, it, vi } from "vitest";
-import { render, screen, fireEvent } from "@testing-library/react";
-import { ErrorMessage } from "./MessageBubble";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { cleanup, render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { ErrorMessage, MessageBubble } from "./MessageBubble";
+
+const invokeMock = vi.fn();
+vi.mock("@tauri-apps/api/core", () => ({
+  invoke: (cmd: string, args?: unknown) => invokeMock(cmd, args),
+}));
 
 describe("ErrorMessage", () => {
   it("renders the error text inside the monospace detail block", () => {
@@ -68,5 +73,79 @@ describe("ErrorMessage", () => {
     // danger class trips a visible test failure.
     const card = document.querySelector(".error-message");
     expect(card).not.toBeNull();
+  });
+});
+
+// ---- v2.5.0 — "📌 Remember this" button ----------------------------
+
+beforeEach(() => {
+  invokeMock.mockReset();
+  invokeMock.mockResolvedValue(null);
+});
+
+afterEach(() => {
+  cleanup();
+});
+
+const baseMessage = {
+  id: "msg-1",
+  conversation_id: "conv-1",
+  role: "assistant" as const,
+  content: "Tyler's favorite color is blue and he lives in Denver.",
+  tool_calls: [],
+  created_at: "2026-01-01T00:00:00Z",
+  error_message: null,
+};
+
+describe("MessageBubble — pin button (v2.5.0)", () => {
+  it("renders a 📌 button on assistant messages when botId is set", () => {
+    render(
+      <MessageBubble
+        message={baseMessage}
+        botId="bot-1"
+      />,
+    );
+    const pin = screen.getByTestId("message-pin-button");
+    expect(pin).toBeInTheDocument();
+    expect(pin.textContent).toContain("📌");
+  });
+
+  it("does not render a 📌 button when botId is missing", () => {
+    render(<MessageBubble message={baseMessage} />);
+    expect(screen.queryByTestId("message-pin-button")).toBeNull();
+  });
+
+  it("calls memory_remember with kind=fact and a key derived from the message", async () => {
+    let capturedArgs: Record<string, unknown> | undefined;
+    invokeMock.mockImplementation(async (cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === "memory_remember") {
+        capturedArgs = args;
+        return {
+          kind: args?.kind,
+          key: args?.key,
+          content: args?.content,
+          created_at: "2026-01-01T00:00:00Z",
+        };
+      }
+      return null;
+    });
+    render(<MessageBubble message={baseMessage} botId="bot-42" />);
+    const pin = screen.getByTestId("message-pin-button");
+    fireEvent.click(pin);
+    await waitFor(() => {
+      expect(capturedArgs).toBeTruthy();
+      expect(capturedArgs?.botId).toBe("bot-42");
+      expect(capturedArgs?.kind).toBe("fact");
+      // Key derived from first 6 words, snake-cased.
+      // Note: the helper drops single-char words, so "s"
+      // (from "Tyler's") and "is" survive only if longer
+      // than 1 char. The exact slice taken is the first
+      // six words of length > 1:
+      //   tyler, favorite, color, is, blue, and → joins to
+      //   "tyler_favorite_color_is_blue_and".
+      expect(capturedArgs?.key).toBe("tyler_favorite_color_is_blue_and");
+      // Content is the full message text.
+      expect(capturedArgs?.content).toBe(baseMessage.content);
+    });
   });
 });

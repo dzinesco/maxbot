@@ -93,8 +93,8 @@ export interface SidebarProps {
    * pane replaces the chat area, and the Bots tab
    * stays the canonical "select a Bot" entry point.
    */
-  mainView: "chat" | "skills" | "routines";
-  onSelectView: (view: "chat" | "skills" | "routines") => void;
+  mainView: "chat" | "skills" | "routines" | "memory";
+  onSelectView: (view: "chat" | "skills" | "routines" | "memory") => void;
 
   /**
    * v2.4.0: open the "Create group" dialog. The
@@ -227,6 +227,14 @@ export function Sidebar({
           aria-selected={mainView === "routines"}
         >
           Routines
+        </button>
+        <button
+          className={`sidebar-tab ${mainView === "memory" ? "sidebar-tab--active" : ""}`}
+          onClick={() => onSelectView("memory")}
+          role="tab"
+          aria-selected={mainView === "memory"}
+        >
+          Memory
         </button>
       </div>
 

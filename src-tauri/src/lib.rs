@@ -15,6 +15,7 @@
 pub mod bots;
 pub mod computer;
 pub mod groups;
+pub mod memory;
 pub mod mcp;
 pub mod skills;
 pub mod storage;
@@ -225,6 +226,13 @@ pub fn run() {
             commands::groups::group_send,
             commands::groups::group_history,
             commands::groups::group_run_turn,
+            // v2.5.0 — Persistent per-Bot memory.
+            // JSONL on the Bot's VM; SFTP via the existing
+            // SshPool. Read failures collapse to empty Vec.
+            commands::memory::memory_search,
+            commands::memory::memory_remember,
+            commands::memory::memory_forget,
+            commands::memory::memory_list,
         ])
         .run(tauri::generate_context!())
         .expect("error while running MaxBot");

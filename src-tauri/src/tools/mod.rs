@@ -21,6 +21,7 @@ pub mod ego_browser;
 pub mod file_read;
 pub mod file_write;
 pub mod mail;
+pub mod memory;
 pub mod notes;
 pub mod registry;
 pub mod reminders;

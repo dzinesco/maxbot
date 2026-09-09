@@ -128,6 +128,7 @@ export function ChatView({
             message={m}
             streaming={streamingId === m.id}
             onRetry={onRegenerate}
+            botId={activeBot?.id ?? null}
           />
         ))}
         {showRegenerate && onRegenerate && (

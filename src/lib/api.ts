@@ -414,6 +414,24 @@ export interface BotRunOutput {
   result_summary: string;
 }
 
+// ---- v2.5.0 Memory ----
+//
+// One line of a per-Bot JSONL memory file. Lives on the Bot's
+// VM and is exposed to the LLM as tools. `kind` is the JSONL
+// line kind — "fact" / "preference" / "history". The Rust side
+// uses an enum (MemKind) with the same lowercase names; a
+// future addition will be visible here as a free-form string
+// so the renderer doesn't break.
+
+export type MemKind = "fact" | "preference" | "history";
+
+export interface MemEntry {
+  kind: MemKind | string;
+  key: string;
+  content: string;
+  created_at: string;
+}
+
 // ---- v2.4.0 Multi-Bot groups ----
 
 /**

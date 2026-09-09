@@ -27,6 +27,7 @@ use super::ego_browser::EgoBrowserTool;
 use super::file_read::FileReadTool;
 use super::file_write::FileWriteTool;
 use super::mail::{MailDraftTool, MailInboxTool, MailSearchTool, MailSendTool};
+use super::memory::{MemoryForgetTool, MemoryRememberTool, MemorySearchTool};
 use super::notes::{NotesCreateTool, NotesReadTool, NotesSearchTool};
 use super::reminders::{RemindersAddTool, RemindersCompleteTool, RemindersListTool};
 use super::run_skill::RunSkillTool;
@@ -136,6 +137,13 @@ impl ToolRegistry {
             // handling. Consent is implicit because the bot's
             // allowlist already gates tool use.
             Arc::new(RunSkillTool),
+            // v2.5.0 — Persistent per-Bot memory.
+            // JSONL on the Bot's VM, SFTP via the existing
+            // SshPool. `history` is auto-written by the
+            // executor and intentionally not exposed here.
+            Arc::new(MemorySearchTool),
+            Arc::new(MemoryRememberTool),
+            Arc::new(MemoryForgetTool),
         ];
         tools.extend(extra);
         let mut by_name: HashMap<String, Arc<dyn Tool>> = HashMap::new();

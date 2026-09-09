@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Message, PersistedToolCall } from "../lib/api";
-import { ttsSpeak, ttsStop } from "../lib/tauri";
+import { memoryRemember, ttsSpeak, ttsStop } from "../lib/tauri";
 
 interface MessageBubbleProps {
   message: Message;
@@ -10,6 +10,27 @@ interface MessageBubbleProps {
    * the user can re-run the last turn from the failure point
    * itself, not just from the bottom bar. */
   onRetry?: () => void;
+  /** v2.5.0 — when set, assistant bubbles get a "📌" button
+   *  that saves the message to the Bot's memory as a fact.
+   *  Chat runs leave this `null` (the user is chatting with the
+   *  default MaxBot, not a specific Bot). */
+  botId?: string | null;
+}
+
+/** Derive a snake_case memory key from the first 6
+ * non-trivial words of a message. Falls back to a timestamp-
+ * based key when the message is empty or only punctuation. */
+function deriveMemoryKey(content: string): string {
+  const words = content
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ")
+    .split(/\s+/)
+    .filter((w) => w.length > 1)
+    .slice(0, 6);
+  if (words.length === 0) {
+    return `note_${Date.now()}`;
+  }
+  return words.join("_");
 }
 
 /** Strip `<think>...</think>` blocks (and any other reasoning-style
@@ -333,16 +354,33 @@ function CollapsibleToolResult({ content }: { content: string }) {
   );
 }
 
-export function MessageBubble({ message, streaming, onRetry }: MessageBubbleProps) {
+export function MessageBubble({ message, streaming, onRetry, botId }: MessageBubbleProps) {
   const isUser = message.role === "user";
   const isTool = message.role === "tool";
   const isAssistant = !isUser && !isTool;
   const [copied, setCopied] = useState(false);
   const [speaking, setSpeaking] = useState(false);
+  // v2.5.0 — the "📌 Remember this" button briefly shows
+  // "Saved" after a successful click. Per-bubble state so a
+  // click on one bubble's pin doesn't tear down another's.
+  const [pinned, setPinned] = useState(false);
   // Tracks whether THIS bubble is the one currently being spoken. We
   // rely on a local ref + state so a click on a different bubble's
   // speaker button doesn't tear down our speech in flight.
   const speechMarker = useRef<string | null>(null);
+
+  const handlePin = useCallback(async () => {
+    if (!botId || !message.content.trim()) return;
+    const key = deriveMemoryKey(message.content);
+    try {
+      await memoryRemember(botId, "fact", key, message.content);
+      setPinned(true);
+      setTimeout(() => setPinned(false), 1500);
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.warn("memory_remember failed:", e);
+    }
+  }, [botId, message.content]);
   const handleCopy = async () => {
     try {
       await navigator.clipboard.writeText(message.content);
@@ -463,6 +501,16 @@ export function MessageBubble({ message, streaming, onRetry }: MessageBubbleProp
                   }
                 >
                   {speaking ? "⏹ Stop" : "🔊 Speak"}
+                </button>
+              )}
+              {isAssistant && botId && (
+                <button
+                  className="copy-btn pin-btn"
+                  onClick={handlePin}
+                  title="Save this message to the Bot's memory as a fact"
+                  data-testid="message-pin-button"
+                >
+                  {pinned ? "Saved" : "📌"}
                 </button>
               )}
               <button

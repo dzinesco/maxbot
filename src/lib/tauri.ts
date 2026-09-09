@@ -24,6 +24,8 @@ import type {
   GroupChat,
   GroupMessage,
   McpServerInfo,
+  MemEntry,
+  MemKind,
   Message,
   SendMessageResponse,
   Settings,
@@ -651,4 +653,50 @@ export async function groupRunTurn(
     botId,
     handoffFromMessageId: handoffFromMessageId ?? null,
   });
+}
+
+// ---- v2.5.0 Memory ----
+//
+// IPC wrappers for `src-tauri/src/commands/memory.rs`. Argument
+// names match the Rust parameter names — Tauri auto-serializes
+// to JSON, JS side passes `{ botId, kind, key, content }`.
+
+/** Top-5 keyword matches across all 3 kinds (fact, preference,
+ *  history). Read failures collapse to an empty array. */
+export async function memorySearch(
+  botId: string,
+  query: string,
+): Promise<MemEntry[]> {
+  return invoke<MemEntry[]>("memory_search", { botId, query });
+}
+
+/** Append a new entry. `kind` is "fact" or "preference"; the
+ *  LLM tool and the MemoryPanel both call this with those
+ *  two kinds. `history` is auto-written by the executor and
+ *  not exposed to the renderer here. */
+export async function memoryRemember(
+  botId: string,
+  kind: MemKind,
+  key: string,
+  content: string,
+): Promise<MemEntry> {
+  return invoke<MemEntry>("memory_remember", { botId, kind, key, content });
+}
+
+/** Delete every entry of `kind` matching `key`. Returns
+ *  whether anything was deleted. */
+export async function memoryForget(
+  botId: string,
+  kind: MemKind,
+  key: string,
+): Promise<boolean> {
+  return invoke<boolean>("memory_forget", { botId, kind, key });
+}
+
+/** List all entries of one kind, oldest first. */
+export async function memoryList(
+  botId: string,
+  kind: MemKind,
+): Promise<MemEntry[]> {
+  return invoke<MemEntry[]>("memory_list", { botId, kind });
 }

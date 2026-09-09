@@ -16,6 +16,7 @@ import { GroupChatView } from "./components/GroupChatView";
 import { CreateGroupDialog } from "./components/CreateGroupDialog";
 import { RecordSkillDialog } from "./components/RecordSkillDialog";
 import { SkillsPanel } from "./components/SkillsPanel";
+import { MemoryPanel } from "./components/MemoryPanel";
 import { RoutinesPanel } from "./components/RoutinesPanel";
 import { SendToBotModal } from "./components/SendToBotModal";
 import { Welcome } from "./components/Welcome";
@@ -161,7 +162,7 @@ export default function App() {
   // "select a Bot" entry point; `group` is set by
   // group-list clicks, not by tab clicks.
   const [mainView, setMainView] = useState<
-    "chat" | "skills" | "routines" | "group"
+    "chat" | "skills" | "routines" | "group" | "memory"
   >("chat");
   // v2.4.0 — the active group's id. Only meaningful
   // when `mainView === "group"`. Set by the
@@ -1402,7 +1403,17 @@ export default function App() {
         status={status}
         onOpenSettings={() => setSettingsOpen(true)}
         mainView={mainView === "group" ? "chat" : mainView}
-        onSelectView={(v) => setMainView(v)}
+        onSelectView={(v) => {
+          // v2.5.0 — accept the new "memory" tab. The
+          // Sidebar's onSelectView is typed as the older
+          // union; we widen it here so adding a new tab on
+          // the Sidebar side is a one-line change.
+          if (v === "memory") {
+            setMainView("memory");
+          } else {
+            setMainView(v);
+          }
+        }}
         onCreateGroup={() => setCreateGroupOpen(true)}
       />
       <main className="main">
@@ -1420,6 +1431,12 @@ export default function App() {
               handleSelectBot(botId);
             }}
           />
+        ) : mainView === "memory" ? (
+          // v2.5.0 — per-Bot persistent memory browser.
+          // Three columns: facts, preferences, history.
+          // Read failures collapse to empty lists so a Bot
+          // without a VM still shows a usable UI.
+          <MemoryPanel botId={selectedBotId} />
         ) : mainView === "group" && activeGroup ? (
           // v2.4.0 — multi-Bot group view. Renders the
           // active group's transcript with a participant
