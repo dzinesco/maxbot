@@ -165,3 +165,18 @@ export function blankBot(): Bot {
     updated_at: now,
   };
 }
+
+// ---- Computer Use / TCC types ----
+
+export interface ControllableApp {
+  key: string;
+  display_name: string;
+  osa_name: string;
+  bundle_id: string;
+  description: string;
+}
+
+export interface TccProbeResult {
+  granted: boolean;
+  message: string;
+}

@@ -14,12 +14,14 @@ import type {
   BotRunOutput,
   BotSchedule,
   ChunkEvent,
+  ControllableApp,
   Conversation,
   DoneEvent,
   ErrorEvent,
   Message,
   SendMessageResponse,
   Settings,
+  TccProbeResult,
   ToolSummary,
 } from "./api";
 
@@ -177,4 +179,18 @@ export async function onBotError(
   handler: (event: BotErrorEvent) => void,
 ): Promise<UnlistenFn> {
   return listen<BotErrorEvent>("bot://error", (e) => handler(e.payload));
+}
+
+// ---- Computer Use / TCC ----
+
+export async function listControllableApps(): Promise<ControllableApp[]> {
+  return invoke<ControllableApp[]>("list_controllable_apps");
+}
+
+export async function requestTccFor(key: string): Promise<TccProbeResult> {
+  return invoke<TccProbeResult>("request_tcc_for", { key });
+}
+
+export async function openAutomationSettings(): Promise<void> {
+  await invoke("open_automation_settings");
 }

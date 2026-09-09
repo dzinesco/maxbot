@@ -1108,3 +1108,87 @@ textarea:focus {
 .muted.small {
   font-size: 11px;
 }
+
+/* ---------- Computer Use settings list ---------- */
+
+.cu-app-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 360px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-2);
+}
+
+.cu-app-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.cu-app-row:last-child {
+  border-bottom: none;
+}
+
+.cu-app-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.cu-app-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+  font-size: 12.5px;
+  color: var(--text-0);
+}
+
+.cu-app-desc {
+  margin-top: 2px;
+  line-height: 1.4;
+}
+
+.cu-app-msg {
+  margin-top: 4px;
+  color: var(--danger);
+  font-style: italic;
+}
+
+.cu-status {
+  font-size: 9.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  padding: 1px 6px;
+  border-radius: 6px;
+  font-weight: 600;
+  line-height: 14px;
+}
+
+.cu-status-granted {
+  color: var(--success);
+  background: rgba(34, 197, 94, 0.12);
+}
+
+.cu-status-denied {
+  color: var(--danger);
+  background: rgba(239, 68, 68, 0.12);
+}
+
+.cu-status-pending {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.cu-status-unknown {
+  color: var(--text-3);
+  background: var(--bg-3);
+}

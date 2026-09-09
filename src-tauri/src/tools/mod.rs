@@ -9,10 +9,14 @@
 //! Tools that touch the filesystem or shell include a confirmation flag so
 //! the chat command can pop a native consent dialog before the action runs.
 
+pub mod apple_script;
+pub mod apple_script_exec;
+pub mod clipboard;
 pub mod file_read;
 pub mod file_write;
 pub mod registry;
 pub mod shell_run;
+pub mod system;
 pub mod tool;
 pub mod web_fetch;
 pub mod web_search;

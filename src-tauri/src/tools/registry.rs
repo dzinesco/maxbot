@@ -10,9 +10,15 @@ use serde_json::Value;
 
 use crate::llm::provider::ToolDefinition;
 
+use super::apple_script::AppleScriptRunTool;
+use super::clipboard::{ClipboardReadTool, ClipboardWriteTool};
 use super::file_read::FileReadTool;
 use super::file_write::FileWriteTool;
 use super::shell_run::ShellRunTool;
+use super::system::{
+    SystemDarkModeGetTool, SystemDarkModeSetTool, SystemFrontAppTool, SystemNotifyTool,
+    SystemVolumeGetTool, SystemVolumeSetTool,
+};
 use super::tool::{Tool, ToolContext, ToolError, ToolInvocation, ToolResult};
 use super::web_fetch::WebFetchTool;
 use super::web_search::WebSearchTool;
@@ -22,16 +28,29 @@ pub struct ToolRegistry {
 }
 
 impl ToolRegistry {
-    /// Build a registry with the default set of tools. Kept small on
-    /// purpose: web fetch, web search, file read/write, shell run. Add
-    /// more by registering them here.
+    /// Build a registry with the default set of tools. v0.4 adds the
+    /// AppleScript Computer Use foundation: the escape hatch
+    /// (`apple_script_run`), clipboard, and the system tools (notify,
+    /// volume, dark mode, frontmost app). Per-app Computer Use tools
+    /// (mail, calendar, safari, etc.) are added in their own slices.
     pub fn default_set() -> Self {
         let tools: Vec<Arc<dyn Tool>> = vec![
+            // v0.2 — web + filesystem + shell
             Arc::new(WebFetchTool),
             Arc::new(WebSearchTool),
             Arc::new(FileReadTool),
             Arc::new(FileWriteTool),
             Arc::new(ShellRunTool),
+            // v0.4.0 — AppleScript Computer Use foundation
+            Arc::new(AppleScriptRunTool),
+            Arc::new(ClipboardReadTool),
+            Arc::new(ClipboardWriteTool),
+            Arc::new(SystemNotifyTool),
+            Arc::new(SystemVolumeGetTool),
+            Arc::new(SystemVolumeSetTool),
+            Arc::new(SystemDarkModeGetTool),
+            Arc::new(SystemDarkModeSetTool),
+            Arc::new(SystemFrontAppTool),
         ];
         let mut by_name: HashMap<&'static str, Arc<dyn Tool>> = HashMap::new();
         for t in tools {

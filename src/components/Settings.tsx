@@ -1,5 +1,6 @@
 import { useState } from "react";
 import type { Settings as SettingsT } from "../lib/api";
+import { ComputerUseSettings } from "./ComputerUseSettings";
 
 interface SettingsProps {
   initial: SettingsT;
@@ -35,7 +36,11 @@ export function Settings({ initial, onClose, onSave }: SettingsProps) {
 
   return (
     <div className="modal-overlay" onClick={onClose}>
-      <div className="modal" onClick={(e) => e.stopPropagation()}>
+      <div
+        className="modal"
+        style={{ width: 620 }}
+        onClick={(e) => e.stopPropagation()}
+      >
         <h2>Settings — MaxBot</h2>
 
         <div className="field">
@@ -81,6 +86,16 @@ export function Settings({ initial, onClose, onSave }: SettingsProps) {
             a self-hosted proxy URL.
           </div>
         </div>
+
+        <hr
+          style={{
+            border: 0,
+            borderTop: "1px solid var(--border)",
+            margin: "6px 0",
+          }}
+        />
+
+        <ComputerUseSettings />
 
         {error && <div className="error">{error}</div>}
 
