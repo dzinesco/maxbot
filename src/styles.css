@@ -1248,6 +1248,21 @@ button.link:hover {
   border-color: var(--border);
 }
 
+/* ---------- Regenerate bar ---------- */
+
+.regenerate-bar {
+  display: flex;
+  justify-content: flex-start;
+  padding: 4px 12px 16px 64px;
+}
+
+.regenerate-bar button {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  font-weight: 600;
+}
+
 /* ---------- Computer Use settings list ---------- */
 
 .cu-app-list {

@@ -30,6 +30,7 @@ import {
   onDone,
   onError,
   renameConversation,
+  regenerateLast,
   runBotNow,
   saveSettings,
   sendMessage,
@@ -461,6 +462,54 @@ export default function App() {
     }
   }, [streamingId]);
 
+  const handleRegenerate = useCallback(async () => {
+    if (!activeId || streamingId) return;
+    try {
+      const out = await regenerateLast(activeId);
+      // Same plumbing as handleSend: optimistic-insert the new
+      // assistant placeholder, then let the existing chunk/done/
+      // error event handlers update it in place.
+      setMessages((prev) => {
+        // Drop any leftover messages (the backend deleted the
+        // previous response) and append the fresh placeholder.
+        const filtered = prev.filter(
+          (m) => !m.tool_calls || true, // keep tool messages, drop later assistant
+        );
+        // Simpler: just keep up through the last user message,
+        // then add the new assistant placeholder.
+        let lastUserIdx = -1;
+        for (let i = filtered.length - 1; i >= 0; i--) {
+          if (filtered[i].role === "user") {
+            lastUserIdx = i;
+            break;
+          }
+        }
+        const kept =
+          lastUserIdx >= 0 ? filtered.slice(0, lastUserIdx + 1) : filtered;
+        return [
+          ...kept,
+          {
+            id: out.assistant_message_id,
+            conversation_id: activeId,
+            role: "assistant",
+            content: "",
+            tool_calls: [],
+            created_at: new Date().toISOString(),
+          },
+        ];
+      });
+      pendingRef.current = {
+        assistantId: out.assistant_message_id,
+        text: "",
+        toolCalls: new Map(),
+      };
+      setStreamingId(out.assistant_message_id);
+    } catch (e) {
+      console.error("regenerate failed:", e);
+      setBootError(`regenerate failed: ${String(e)}`);
+    }
+  }, [activeId, streamingId]);
+
   const handleSaveSettings = useCallback(async (next: SettingsT) => {
     await saveSettings(next);
     setSettings(next);
@@ -806,7 +855,11 @@ export default function App() {
             )}
           </div>
         ) : (
-          <ChatView messages={messages} streamingId={streamingId} />
+          <ChatView
+            messages={messages}
+            streamingId={streamingId}
+            onRegenerate={handleRegenerate}
+          />
         )}
         <Composer
           onSend={handleSend}

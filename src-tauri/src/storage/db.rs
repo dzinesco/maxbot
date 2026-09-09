@@ -415,6 +415,75 @@ impl Database {
         Ok(message)
     }
 
+    /// Delete all messages in `conversation_id` strictly after
+    /// `after_message_id`. Used by "Regenerate" to wipe the previous
+    /// assistant response (and any tool messages between the user
+    /// message and the response) before re-running the chat loop.
+    /// Returns the number of rows deleted.
+    pub fn delete_messages_after(
+        &self,
+        conversation_id: &str,
+        after_message_id: &str,
+    ) -> rusqlite::Result<usize> {
+        let conn = self.conn.lock().expect("db lock poisoned");
+        // Look up the created_at of the anchor message, then delete
+        // every other message in the same conversation with a
+        // strictly later timestamp.
+        let anchor_ts: Option<String> = conn
+            .query_row(
+                "SELECT created_at FROM messages WHERE id = ?",
+                params![after_message_id],
+                |row| row.get(0),
+            )
+            .ok();
+        let Some(anchor_ts) = anchor_ts else {
+            return Ok(0);
+        };
+        let n = conn.execute(
+            "DELETE FROM messages
+             WHERE conversation_id = ?
+               AND id != ?
+               AND created_at > ?",
+            params![conversation_id, after_message_id, anchor_ts],
+        )?;
+        Ok(n)
+    }
+
+    /// Find the most recent user message in a conversation. Returns
+    /// None if the conversation has no user messages.
+    pub fn last_user_message(
+        &self,
+        conversation_id: &str,
+    ) -> rusqlite::Result<Option<Message>> {
+        let conn = self.conn.lock().expect("db lock poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT id, conversation_id, role, content, tool_calls_json, created_at
+             FROM messages
+             WHERE conversation_id = ? AND role = 'user'
+             ORDER BY created_at DESC
+             LIMIT 1",
+        )?;
+        let mut rows = stmt.query_map(params![conversation_id], |row| {
+            let role_str: String = row.get(2)?;
+            let tool_calls_json: String = row.get(4)?;
+            let tool_calls: Vec<PersistedToolCall> =
+                serde_json::from_str(&tool_calls_json).unwrap_or_default();
+            Ok(Message {
+                id: row.get(0)?,
+                conversation_id: row.get(1)?,
+                role: MessageRole::parse(&role_str).unwrap_or(MessageRole::User),
+                content: row.get(3)?,
+                tool_calls,
+                created_at: parse_dt(row.get::<_, String>(5)?),
+            })
+        })?;
+        if let Some(row) = rows.next() {
+            Ok(Some(row?))
+        } else {
+            Ok(None)
+        }
+    }
+
     /// Append to an existing assistant message in place. Used for streaming
     /// turns: the empty assistant message is inserted on send, and each
     /// token appends to its `content` until the stream finishes.

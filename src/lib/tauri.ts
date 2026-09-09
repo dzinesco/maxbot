@@ -52,6 +52,12 @@ export async function getMessages(conversationId: string): Promise<Message[]> {
   return invoke<Message[]>("get_messages", { conversationId });
 }
 
+export async function regenerateLast(
+  conversationId: string,
+): Promise<SendMessageResponse> {
+  return invoke<SendMessageResponse>("regenerate_last", { conversationId });
+}
+
 export async function searchMessages(
   query: string,
   limit?: number,

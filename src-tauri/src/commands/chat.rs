@@ -119,7 +119,127 @@ pub async fn send_message(
     .map_err(|e| e.to_string())?
     .map_err(|e| e.to_string())?;
 
-    // 3. Resolve the settings and pick the model.
+    // 3. Build the initial history and spawn the agent loop. The
+    //    shared helper handles settings, history loading, tool
+    //    registry assembly, and the cancellation token.
+    let user_message_id = user_message.id.clone();
+    let assistant_message_id = assistant_message.id.clone();
+    let request_id_for_helper = request_id.clone();
+    prepare_and_spawn_loop(
+        app,
+        state,
+        streams,
+        conversation_id,
+        user_message_id,
+        assistant_message_id,
+        request_id_for_helper,
+    )
+    .await?;
+
+    Ok(SendMessageResponse {
+        user_message_id: user_message.id,
+        assistant_message_id: assistant_message.id,
+        request_id,
+    })
+}
+
+/// "Regenerate" — wipe the last assistant response (and any tool
+/// messages that came after the last user message) and re-run the
+/// agent loop for the same user message. Used by the UI's Regenerate
+/// button. Returns the new assistant_message_id; the user_message_id
+/// is the existing one (no new user message is created).
+#[tauri::command]
+pub async fn regenerate_last(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    streams: State<'_, Arc<AsyncMutex<StreamRegistry>>>,
+    conversation_id: String,
+) -> Result<SendMessageResponse, String> {
+    // 1. Find the most recent user message in the conversation.
+    let db = state.db.clone();
+    let convo_id_for_lookup = conversation_id.clone();
+    let last_user = tokio::task::spawn_blocking(move || {
+        db.last_user_message(&convo_id_for_lookup)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())?;
+    let last_user = last_user
+        .ok_or_else(|| "no user message in conversation to regenerate".to_string())?;
+
+    // 2. Delete every message strictly after that user message
+    //    (the previous assistant response + any tool messages).
+    let db = state.db.clone();
+    let convo_id_for_delete = conversation_id.clone();
+    let user_id_for_delete = last_user.id.clone();
+    let deleted = tokio::task::spawn_blocking(move || {
+        db.delete_messages_after(&convo_id_for_delete, &user_id_for_delete)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())?;
+    log::info!(
+        "regenerate_last: deleted {} message(s) after user {}",
+        deleted,
+        last_user.id
+    );
+
+    // 3. Insert a fresh assistant placeholder.
+    let db = state.db.clone();
+    let convo_id_for_assistant = conversation_id.clone();
+    let assistant_message = tokio::task::spawn_blocking(move || {
+        db.insert_message(
+            &convo_id_for_assistant,
+            MessageRole::Assistant,
+            "",
+            &[],
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())?;
+
+    // 4. Use a fresh request_id so the chat event listener knows this
+    //    is a new run.
+    let request_id = format!("regen-{}", uuid::Uuid::new_v4());
+
+    // 5. Spawn the agent loop using the same code path as send_message.
+    let user_id_for_helper = last_user.id.clone();
+    let assistant_id_for_helper = assistant_message.id.clone();
+    let request_id_for_helper = request_id.clone();
+    prepare_and_spawn_loop(
+        app,
+        state,
+        streams,
+        conversation_id,
+        user_id_for_helper,
+        assistant_id_for_helper,
+        request_id_for_helper,
+    )
+    .await?;
+
+    Ok(SendMessageResponse {
+        user_message_id: last_user.id,
+        assistant_message_id: assistant_message.id,
+        request_id,
+    })
+}
+
+/// Shared "load settings, build history, build provider/registry,
+/// register cancel, spawn the agent loop" used by both `send_message`
+/// and `regenerate_last`. The user message and assistant placeholder
+/// must already be inserted in the DB before calling this — the
+/// helper only handles the streaming setup.
+async fn prepare_and_spawn_loop(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    streams: State<'_, Arc<AsyncMutex<StreamRegistry>>>,
+    conversation_id: String,
+    user_message_id: String,
+    assistant_message_id: String,
+    request_id: String,
+) -> Result<(), String> {
+    // Load settings and build the provider.
     let db = state.db.clone();
     let settings = tokio::task::spawn_blocking(move || db.load_settings())
         .await
@@ -144,8 +264,8 @@ pub async fn send_message(
         None => Arc::new(MiniMaxProvider::new(api_key)),
     };
 
-    // 4. Build the initial history (everything already in the conversation
-    //    up to and including the assistant placeholder).
+    // Build the initial history (everything already in the conversation
+    // up to and including the assistant placeholder).
     let db = state.db.clone();
     let convo_id_for_history = conversation_id.clone();
     let history = tokio::task::spawn_blocking(move || db.list_messages(&convo_id_for_history))
@@ -154,57 +274,44 @@ pub async fn send_message(
         .map_err(|e| e.to_string())?;
     let initial_messages = history_to_provider(&history);
 
-    // 5. Tool registry stays in the command; we pass it into the loop.
-    //    Includes MCP-backed tools loaded at startup.
+    // Tool registry includes MCP-backed tools loaded at startup.
     let registry = Arc::new(ToolRegistry::default_with_extras(
         state.mcp.tool_adapters(),
     ));
 
-    // 6. Register a cancellation token for the entire agent loop, keyed by
-    //    the user message id so any iteration can be cancelled.
+    // Register a cancellation token keyed by the user message id.
     let cancel = CancellationToken::new();
     {
         let mut registry_lock = streams.lock().await;
         registry_lock
             .active
-            .insert(user_message.id.clone(), cancel.clone());
+            .insert(user_message_id.clone(), cancel.clone());
     }
 
-    // 7. Spawn the agent loop. It runs the LLM, dispatches tool calls, and
-    //    re-issues the request until the model stops emitting tools.
+    // Spawn the agent loop.
     let db_for_stream = state.db.clone();
     let streams_for_stream = streams.inner().clone();
     let app_for_stream = app.clone();
-    let assistant_message_id = assistant_message.id.clone();
-    let user_message_id = user_message.id.clone();
-    let request_id_for_stream = request_id.clone();
-    let conversation_id_for_stream = conversation_id.clone();
-    let provider_for_stream = provider.clone();
-    let registry_for_stream = registry.clone();
     let initial_messages_arc: Arc<Vec<ChatMessage>> = Arc::new(initial_messages);
     tokio::spawn(async move {
         run_agent_loop(
             app_for_stream,
             db_for_stream,
             streams_for_stream,
-            provider_for_stream,
-            registry_for_stream,
+            provider,
+            registry,
             initial_messages_arc,
             user_message_id,
             assistant_message_id,
-            conversation_id_for_stream,
-            request_id_for_stream,
+            conversation_id,
+            request_id,
             model,
             cancel,
         )
         .await;
     });
 
-    Ok(SendMessageResponse {
-        user_message_id: user_message.id,
-        assistant_message_id: assistant_message.id,
-        request_id,
-    })
+    Ok(())
 }
 
 #[tauri::command]

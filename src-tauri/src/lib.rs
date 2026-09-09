@@ -94,6 +94,7 @@ pub fn run() {
             commands::conversations::search_messages,
             commands::chat::send_message,
             commands::chat::stop_message,
+            commands::chat::regenerate_last,
             commands::bots::list_bots,
             commands::bots::get_bot,
             commands::bots::upsert_bot,
