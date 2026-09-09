@@ -171,6 +171,40 @@ textarea:focus {
   font-weight: 800;
 }
 
+/* Version pill next to the brand. Channel-color so a glance tells
+ * you stable vs beta vs alpha without clicking. Default = stable
+ * (green). The data-version-channel attribute is set by the
+ * Sidebar component from the APP_VERSION/VERSION_CHANNEL consts. */
+.brand-version {
+  display: inline-flex;
+  align-items: center;
+  height: 16px;
+  padding: 0 6px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 600;
+  font-family: var(--font-mono);
+  letter-spacing: 0.02em;
+  line-height: 1;
+  margin-left: 2px;
+  background: rgba(34, 197, 94, 0.16);
+  color: rgb(74, 222, 128);
+  border: 1px solid rgba(34, 197, 94, 0.4);
+  user-select: none;
+}
+
+.brand-version[data-version-channel="beta"] {
+  background: rgba(234, 179, 8, 0.16);
+  color: rgb(250, 204, 21);
+  border-color: rgba(234, 179, 8, 0.4);
+}
+
+.brand-version[data-version-channel="alpha"] {
+  background: rgba(239, 68, 68, 0.16);
+  color: rgb(248, 113, 113);
+  border-color: rgba(239, 68, 68, 0.4);
+}
+
 /* A miniature version of the monogram for the sidebar. Same
  * gradient as the main mark but no shadow, no accent dot, no
  * pulse — the full effect is reserved for the empty state. */

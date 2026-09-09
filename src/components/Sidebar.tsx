@@ -24,6 +24,7 @@
 // conversation list behind a toggle in this slice.
 
 import { useEffect, useMemo, useState } from "react";
+import pkg from "../../package.json";
 import { BotRoster, type BotRosterProps } from "./BotRoster";
 import type {
   Bot,
@@ -34,6 +35,14 @@ import type {
   GroupChat,
 } from "../lib/api";
 import { approvalPendingCount, computerGet, groupList } from "../lib/tauri";
+
+// Version pulled from package.json at build time so the sidebar
+// pill always matches the running app. The `data-version-channel`
+// attribute drives the color (see .brand-version CSS); "stable"
+// is the green pill we ship today. Future pre-release channels
+// (beta/alpha) flip the same slot without a layout change.
+const APP_VERSION: string = pkg.version;
+const VERSION_CHANNEL: "stable" | "beta" | "alpha" = "stable";
 
 export interface SidebarProps {
   /**
@@ -193,6 +202,13 @@ export function Sidebar({
             M
           </span>
           <span className="brand-name">MaxBot</span>
+          <span
+            className="brand-version"
+            data-version-channel={VERSION_CHANNEL}
+            title={`MaxBot v${APP_VERSION} (${VERSION_CHANNEL})`}
+          >
+            v{APP_VERSION}
+          </span>
         </div>
         <NewChatButton
           selectedBotId={selectedBotId}
