@@ -1,0 +1,370 @@
+//! Typed wrapper over `virsh` / `virt-install` / `qemu-img` /
+//! `genisoimage` running on the user's Linux server.
+//!
+//! All libvirt operations are driven via the server-side SSH pool
+//! (`SshPool::server_exec`). The Mac itself does not need
+//! libvirt / qemu / virt-install installed — we never shell out
+//! to them locally.
+//!
+//! Every method returns `Result<T, ComputerError>`. The error
+//! variant distinguishes:
+//! - `Ssh*` — connection-level problems (auth, timeout, refused)
+//! - `Command { exit_code, stderr }` — virsh ran but returned
+//!   non-zero (e.g. "domain not found", "already exists")
+//! - `Parse` — the output didn't match the expected shape
+//! - `Timeout` — a polling loop (e.g. DHCP lease wait) gave up
+//! - `NotConfigured` — `Settings.computer_server_host` is empty
+//!
+//! The libvirt commands here are all `sudo -n virsh …`. Slice A
+//! gave `tyler` passwordless sudo specifically so the Tauri side
+//! can run these without a TTY. The `-n` flag fails fast (no
+//! password prompt) if the NOPASSWD rule ever falls off.
+
+use std::time::Duration;
+
+use serde::{Deserialize, Serialize};
+use thiserror::Error;
+
+use super::ssh::{SshExecutor, SshPool};
+
+#[derive(Debug, Error)]
+pub enum LibvirtError {
+    #[error("ssh error: {0}")]
+    Ssh(String),
+    #[error("command exited {exit_code:?}: {stderr}")]
+    Command {
+        exit_code: Option<i32>,
+        stderr: String,
+    },
+    #[error("failed to parse virsh output: {0}")]
+    Parse(String),
+    #[error("timed out after {0:?}")]
+    Timeout(Duration),
+    #[error("linux server is not configured: set Settings.computer_server_host")]
+    NotConfigured,
+}
+
+/// VM lifecycle states we report back to the renderer. libvirt
+/// has a larger set; we collapse to the four that the UI
+/// actually renders.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DomainState {
+    Running,
+    /// `shut off` in libvirt-speak — VM is defined but not
+    /// booted. Distinct from `Crashed` (libvirt's
+    /// `crashed`).
+    Stopped,
+    Paused,
+    Crashed,
+    /// libvirt returned a state we don't model yet (e.g.
+    /// `pmsuspended`, `in shutdown`). Treated as "transitional"
+    /// by the UI — shows a spinner.
+    Other,
+}
+
+impl DomainState {
+    pub fn from_libvirt(s: &str) -> Self {
+        // libvirt `domstate` returns one of: running, blocked,
+        // paused, shutdown, shut off, crashed, pmsuspended,
+        // online (only for net-defined inactive nets), migration.
+        // We collapse to the 4-state machine the UI uses.
+        match s.trim() {
+            "running" => Self::Running,
+            "paused" => Self::Paused,
+            "crashed" => Self::Crashed,
+            "shut off" | "shutdown" => Self::Stopped,
+            _ => Self::Other,
+        }
+    }
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Stopped => "stopped",
+            Self::Paused => "paused",
+            Self::Crashed => "crashed",
+            Self::Other => "other",
+        }
+    }
+}
+
+/// One row from `virsh net-dhcp-leases default`. We only use
+/// `ipaddr` and `mac`, but parsing the full table means we can
+/// disambiguate when a net has multiple VMs.
+#[derive(Debug, Clone)]
+pub struct DhcpLease {
+    pub ipaddr: String,
+    pub mac: String,
+    pub hostname: String,
+}
+
+/// Single-row summary of a libvirt domain, used by `list`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DomainSummary {
+    pub name: String,
+    pub state: DomainState,
+}
+
+/// Public entry-point for libvirt-over-SSH. Constructed once
+/// per process (it holds no per-call state). All methods take
+/// `&SshPool` so they share the long-lived server connection.
+pub struct LibvirtClient;
+
+impl LibvirtClient {
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// `virsh list --all` — one line per domain, tab-separated:
+    /// `Id  Name  State`. We parse the State column. The list
+    /// has a header line; we filter on `name != "Name"` (the
+    /// header) to skip it.
+    pub async fn list_domains(&self, pool: &SshPool) -> Result<Vec<DomainSummary>, LibvirtError> {
+        let out = run_virsh(pool, &["list", "--all"]).await?;
+        let mut out_v = Vec::new();
+        for line in out.lines() {
+            // `virsh list` columns are whitespace-aligned but
+            // not strictly tab-separated. The state is always
+            // the last whitespace-separated token, the name is
+            // the second-to-last. Skip the header row.
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with("Id") || trimmed.starts_with("===") {
+                continue;
+            }
+            let parts: Vec<&str> = trimmed.split_whitespace().collect();
+            // Bare minimum: [id-or-dash, name, state, ...]
+            if parts.len() < 2 {
+                continue;
+            }
+            let name = parts[parts.len() - 2].to_string();
+            let state = DomainState::from_libvirt(parts[parts.len() - 1]);
+            out_v.push(DomainSummary { name, state });
+        }
+        Ok(out_v)
+    }
+
+    /// `virsh domstate <name>` — returns the parsed state.
+    /// Strips the trailing newline virsh always adds.
+    pub async fn domstate(&self, pool: &SshPool, name: &str) -> Result<DomainState, LibvirtError> {
+        let out = run_virsh(pool, &["domstate", name]).await?;
+        Ok(DomainState::from_libvirt(out.trim()))
+    }
+
+    /// `virsh start <name>` — bring a defined domain up.
+    pub async fn start(&self, pool: &SshPool, name: &str) -> Result<(), LibvirtError> {
+        run_virsh(pool, &["start", name]).await.map(|_| ())
+    }
+
+    /// `virsh shutdown <name>` — graceful ACPI shutdown. The VM
+    /// may take a few seconds to actually power off; the caller
+    /// polls `domstate` to confirm.
+    pub async fn shutdown(&self, pool: &SshPool, name: &str) -> Result<(), LibvirtError> {
+        run_virsh(pool, &["shutdown", name]).await.map(|_| ())
+    }
+
+    /// `virsh destroy <name>` — hard power-off. Equivalent to
+    /// pulling the plug. Use for `computer_destroy`.
+    pub async fn destroy(&self, pool: &SshPool, name: &str) -> Result<(), LibvirtError> {
+        run_virsh(pool, &["destroy", name]).await.map(|_| ())
+    }
+
+    /// `virsh undefine <name> --remove-all-storage` — wipe the
+    /// domain XML + the qcow2 disk + the seed ISO. Used by
+    /// `computer_destroy` after a successful `virsh destroy`.
+    pub async fn undefine(
+        &self,
+        pool: &SshPool,
+        name: &str,
+    ) -> Result<(), LibvirtError> {
+        run_virsh(pool, &["undefine", name, "--remove-all-storage"])
+            .await
+            .map(|_| ())
+    }
+
+    /// `virsh vncdisplay <name>` — returns the VNC display
+    /// number, e.g. `:0` or `:5`. We add 5900 to get the TCP
+    /// port the VNC server is bound on (libvirt's VNC is
+    /// always at 5900 + display). The `provision-vm.sh` script
+    /// uses `--graphics vnc,listen=127.0.0.1,port=-1` which
+    /// asks libvirt to auto-assign the next free port, so this
+    /// number is the live port for this VM.
+    pub async fn vncdisplay(&self, pool: &SshPool, name: &str) -> Result<u16, LibvirtError> {
+        let out = run_virsh(pool, &["vncdisplay", name]).await?;
+        // Format: "127.0.0.1:0" or ":5". We only care about
+        // the number after the last `:`.
+        let s = out.trim();
+        let after = s.rsplit(':').next().unwrap_or("0");
+        let display: i64 = after
+            .parse()
+            .map_err(|e| LibvirtError::Parse(format!("vncdisplay '{s}': {e}")))?;
+        let port = 5900 + display;
+        if !(5900..=5999).contains(&port) {
+            return Err(LibvirtError::Parse(format!(
+                "vncdisplay {display} maps to port {port} outside 5900-5999"
+            )));
+        }
+        Ok(port as u16)
+    }
+
+    /// `virsh net-dhcp-leases default` — return the parsed
+    /// list. Used by `provision_vm` to discover the VM's IP
+    /// fast (within ~30s of NIC up) without waiting for
+    /// qemu-guest-agent.
+    pub async fn net_dhcp_leases(
+        &self,
+        pool: &SshPool,
+        network: &str,
+    ) -> Result<Vec<DhcpLease>, LibvirtError> {
+        let out = run_virsh(pool, &["net-dhcp-leases", network]).await?;
+        Ok(parse_dhcp_leases(&out))
+    }
+
+    /// Run an arbitrary virsh command and return its stdout.
+    /// Used as a fallback for commands the typed methods above
+    /// don't cover (e.g. ad-hoc debugging).
+    pub async fn raw(&self, pool: &SshPool, args: &[&str]) -> Result<String, LibvirtError> {
+        run_virsh(pool, args).await
+    }
+}
+
+impl Default for LibvirtClient {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Invoke `sudo -n virsh <args>…` on the server. `-n` prevents a
+/// password prompt — if NOPASSWD is missing, virsh returns
+/// non-zero immediately and the user sees a clear error.
+async fn run_virsh(pool: &SshPool, args: &[&str]) -> Result<String, LibvirtError> {
+    let mut cmd = String::with_capacity(16 + args.iter().map(|a| a.len() + 1).sum::<usize>());
+    cmd.push_str("sudo -n virsh");
+    for a in args {
+        cmd.push(' ');
+        // Defensive: virsh's parser doesn't need quoting, but
+        // if a future caller passes an arg with whitespace
+        // (unlikely; virsh args are well-known), single-quote
+        // it. The current call sites pass fixed strings.
+        if a.chars().any(char::is_whitespace) {
+            cmd.push('\'');
+            cmd.push_str(&a.replace('\'', "'\\''"));
+            cmd.push('\'');
+        } else {
+            cmd.push_str(a);
+        }
+    }
+    let result = SshExecutor::server_exec(pool, &cmd)
+        .await
+        .map_err(|e| LibvirtError::Ssh(e.to_string()))?;
+    if !result.success {
+        return Err(LibvirtError::Command {
+            exit_code: result.exit_code,
+            stderr: result.stderr.trim().to_string(),
+        });
+    }
+    Ok(result.stdout)
+}
+
+/// Parse `virsh net-dhcp-leases default` output. The table has
+/// a header line, a separator line, then one row per lease:
+///
+/// ```text
+///  Expiry Time           MAC address         Protocol   IP address          Hostname   Client ID or DUID
+///  2026-09-09T13:45:00   52:54:00:3a:c1:ca   ipv4       192.168.122.173/24  maxbot-…   -
+/// ```
+///
+/// We don't bother with `Expiry Time` or `Client ID`; we only
+/// need `IP address`, `MAC`, and `Hostname`. The IP is
+/// `192.168.122.173/24` — we strip the `/24` suffix to get the
+/// bare address.
+pub(crate) fn parse_dhcp_leases(raw: &str) -> Vec<DhcpLease> {
+    let mut out = Vec::new();
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty()
+            || trimmed.starts_with("Expiry")
+            || trimmed.starts_with("---")
+        {
+            continue;
+        }
+        // virsh pads with multiple spaces; collapse to single.
+        let parts: Vec<&str> = trimmed.split_whitespace().collect();
+        // Expect at least: timestamp, mac, proto, ip[/mask], hostname[, client-id].
+        if parts.len() < 5 {
+            continue;
+        }
+        let mac = parts[1].to_string();
+        // IP may be 192.168.122.173/24 — strip the /N.
+        let ip_raw = parts[3];
+        let ipaddr = ip_raw.split('/').next().unwrap_or(ip_raw).to_string();
+        let hostname = parts[4].to_string();
+        out.push(DhcpLease {
+            ipaddr,
+            mac,
+            hostname,
+        });
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn domstate_maps_known_libvirt_strings() {
+        assert_eq!(DomainState::from_libvirt("running"), DomainState::Running);
+        assert_eq!(DomainState::from_libvirt("shut off"), DomainState::Stopped);
+        assert_eq!(DomainState::from_libvirt("shutdown"), DomainState::Stopped);
+        assert_eq!(DomainState::from_libvirt("paused"), DomainState::Paused);
+        assert_eq!(DomainState::from_libvirt("crashed"), DomainState::Crashed);
+        assert_eq!(DomainState::from_libvirt("pmsuspended"), DomainState::Other);
+    }
+
+    #[test]
+    fn parse_dhcp_leases_extracts_ip_and_mac() {
+        let raw = "\
+ Expiry Time           MAC address         Protocol   IP address                Hostname       Client ID or DUID
+---------------------------------------------------------------------------------------------------------------------
+ 2026-09-09T13:45:00   52:54:00:3a:c1:ca   ipv4       192.168.122.173/24        maxbot-foo     -
+ 2026-09-09T13:46:00   52:54:00:de:ad:be   ipv4       192.168.122.50/24         another-bot    ff:...
+";
+        let leases = parse_dhcp_leases(raw);
+        assert_eq!(leases.len(), 2);
+        assert_eq!(leases[0].ipaddr, "192.168.122.173");
+        assert_eq!(leases[0].mac, "52:54:00:3a:c1:ca");
+        assert_eq!(leases[0].hostname, "maxbot-foo");
+        assert_eq!(leases[1].ipaddr, "192.168.122.50");
+    }
+
+    #[test]
+    fn parse_dhcp_leases_returns_empty_for_garbage() {
+        // Empty input and pure-header input both produce zero
+        // leases. This is the "no leases yet" case we expect
+        // while a VM is still booting.
+        assert!(parse_dhcp_leases("").is_empty());
+        assert!(parse_dhcp_leases(
+            "Expiry Time   MAC   Proto   IP   Hostname\n--- --- --- --- ---"
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn domain_state_serializes_to_snake_case() {
+        // JSON shape is part of the public Tauri API. The
+        // frontend's `ComputerPanel` reads it as
+        // `state === 'running' | 'stopped' | 'paused' | 'crashed'`.
+        assert_eq!(
+            serde_json::to_string(&DomainState::Running).unwrap(),
+            "\"running\""
+        );
+        assert_eq!(
+            serde_json::to_string(&DomainState::Stopped).unwrap(),
+            "\"stopped\""
+        );
+        assert_eq!(
+            serde_json::to_string(&DomainState::Other).unwrap(),
+            "\"other\""
+        );
+    }
+}

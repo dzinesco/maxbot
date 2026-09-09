@@ -207,6 +207,7 @@ pub async fn run_bot_now(
         db: state.db.clone(),
         mcp: crate::mcp::McpRegistry::default(),
         bot_runs: state.bot_runs.clone(),
+        computer: state.computer.clone(),
     });
     // The bot runs to completion here; cancel is a no-op for now (UI
     // doesn't yet expose a per-run Stop button).
@@ -305,6 +306,7 @@ pub async fn send_to_bot(
             db: state.db.clone(),
             mcp: crate::mcp::McpRegistry::default(),
             bot_runs: state.bot_runs.clone(),
+            computer: state.computer.clone(),
         });
         let db_for_lookup = state.db.clone();
         let id_for_lookup = to_bot_id.clone();

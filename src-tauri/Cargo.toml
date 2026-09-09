@@ -34,6 +34,30 @@ url = "2.5"
 log = "0.4"
 env_logger = "0.11"
 async-trait = "0.1"
+sha2 = "0.10"
+base64 = "0.22"
+
+# v2.0 — ComputerManager: SSH into the per-Bot Linux VM, drive libvirt
+# over SSH on the user's Ubuntu server, encrypt per-Bot SSH keypairs
+# with chacha20poly1305 keyed by Argon2id from a user passphrase, and
+# proxy noVNC's WebSocket into the VM's RFB over a local SSH -L
+# tunnel. The SshPool keeps one entry per Bot.
+#
+# NOTE: plan called for `russh` + `russh-sftp` for in-process SSH.
+# In practice, spawning the OpenSSH `ssh` / `sftp` binaries via
+# tokio::process::Command is simpler, uses the OS keychain / ssh-agent
+# for server-side auth, and works on macOS out of the box. The per-Bot
+# key is written to a 0600 tempfile in $TMPDIR for the duration of an
+# SSH call and unlinked on drop; this trades a small on-disk window
+# for a ~1500-crate lighter dep tree and a simpler SFTP path. See
+# `computer::ssh` for the trait surface and `computer::keys` for the
+# keypair generation/encryption.
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+ed25519-dalek = { version = "2", features = ["pkcs8", "rand_core"] }
+argon2 = "0.5"
+chacha20poly1305 = "0.10"
+rand = "0.8"
+zeroize = "1"
 
 [features]
 default = ["custom-protocol"]

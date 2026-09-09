@@ -7,6 +7,7 @@
 
 mod bots;
 mod commands;
+mod computer;
 mod env_loader;
 mod grok_build;
 mod llm;
@@ -17,6 +18,7 @@ mod tools;
 use std::sync::Arc;
 
 use commands::chat::StreamRegistry;
+use computer::ComputerManager;
 use storage::Database;
 use tauri::Manager;
 use tauri::async_runtime::Mutex as AsyncMutex;
@@ -28,6 +30,10 @@ pub struct AppState {
     pub db: Arc<Database>,
     pub mcp: mcp::McpRegistry,
     pub bot_runs: bots::registry::SharedBotRunRegistry,
+    /// v2.0 Slice B: the per-Bot ComputerManager. Built
+    /// once from `Settings` on first use so a missing
+    /// passphrase / host doesn't block startup.
+    pub computer: Arc<ComputerManager>,
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -55,6 +61,10 @@ pub fn run() {
             // keys: MINIMAX_API_KEY, SAND_MINIMAX_BASE_URL,
             // SAND_MINIMAX_MODEL.
             seed_settings_from_env(&db);
+            // Read Settings once before `db` is moved into
+            // the Arc so we can pass them to the
+            // ComputerManager constructor.
+            let initial_settings = db.load_settings().unwrap_or_default();
             // Load MCP servers from mcp_servers.json. We block on the
             // async load here so the registry is populated by the time
             // the first chat message arrives. Servers are local
@@ -76,6 +86,17 @@ pub fn run() {
                 db: Arc::new(db),
                 mcp: mcp_registry,
                 bot_runs: std::sync::Arc::new(bots::registry::BotRunRegistry::new()),
+                // v2.0 Slice B: build the ComputerManager
+                // from the current Settings. The
+                // manager is cheap to construct (it
+                // holds Arc<SshPool> + a LibvirtClient
+                // + a HashMap for active VNC proxies)
+                // and lazy on first use, so this doesn't
+                // block startup on the server being
+                // reachable.
+                computer: std::sync::Arc::new(ComputerManager::new(
+                    &initial_settings,
+                )),
             });
             app.manage(Arc::new(AsyncMutex::new(StreamRegistry::default())));
             // Start the bot scheduler. It runs in a background tokio task
@@ -124,6 +145,20 @@ pub fn run() {
             commands::meta::meta_get,
             commands::meta::meta_set,
             commands::meta::meta_list,
+            // v2.0 Slice B — per-Bot Computer Tauri
+            // surface. The frontend (Slices C/D) calls
+            // these; the actual VM work is in the
+            // ComputerManager.
+            commands::computer::computer_get,
+            commands::computer::computer_provision,
+            commands::computer::computer_start,
+            commands::computer::computer_stop,
+            commands::computer::computer_destroy,
+            commands::computer::computer_console_url,
+            commands::computer::computer_test_connection,
+            commands::computer::computer_file_list,
+            commands::computer::computer_file_read,
+            commands::computer::computer_file_write,
         ])
         .run(tauri::generate_context!())
         .expect("error while running MaxBot");

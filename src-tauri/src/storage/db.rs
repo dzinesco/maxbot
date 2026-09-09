@@ -163,6 +163,69 @@ pub struct Settings {
     /// Base URL override for xAI. Empty = `https://api.x.ai/v1`.
     #[serde(default)]
     pub xai_base_url: String,
+
+    // ---- v2.0: per-Bot Computer (Slice B) ----
+    /// Hostname or IP of the Linux server that hosts per-Bot
+    /// libvirt VMs. Empty = the Computer feature is disabled
+    /// and all `computer_*` Tauri commands return
+    /// `ServerNotConfigured`. The Settings → Computer tab
+    /// surfaces this field; Slice A's runbook walks the user
+    /// through picking the host.
+    #[serde(default)]
+    pub computer_server_host: String,
+    /// SSH user on the Linux server. Default `tyler`. Only
+    /// used when `computer_server_host` is set.
+    #[serde(default)]
+    pub computer_server_ssh_user: String,
+    /// Optional path to a specific SSH key for the server
+    /// connection. Empty = rely on the OS keychain /
+    /// ssh-agent. Most Tyler-style installs have the Mac key
+    /// at `~/.ssh/id_ed25519` already and leave this empty.
+    #[serde(default)]
+    pub computer_server_ssh_key_id: String,
+    /// Local TCP port range the VNC proxy binds to, in
+    /// `"lo-hi"` form. Default `5900-5999`. The plan calls
+    /// for 100 ports of headroom; the renderer gets one port
+    /// per active VNC console.
+    #[serde(default)]
+    pub computer_vnc_local_port_range: String,
+    /// User-set passphrase. Used to derive the Argon2id key
+    /// that encrypts per-Bot SSH keypairs. If empty, the
+    /// user hasn't completed Slice A's "Set up your Linux
+    /// server" flow yet and per-Bot provisioning fails with
+    /// `PassphraseMissing`.
+    #[serde(default)]
+    pub computer_passphrase: String,
+    /// Default disk size (GiB) for a newly-provisioned Bot
+    /// VM. The Bot editor lets the user override this. Plan
+    /// default is 10 GB; we use 10 here for parity.
+    #[serde(default = "default_computer_disk")]
+    pub computer_default_disk_gb: u32,
+    /// Default RAM (MiB) for a newly-provisioned Bot VM.
+    /// Plan default is 2048 MiB; the Slice A runbook
+    /// recommends 3072 MiB to silence virt-install's
+    /// warning, but we keep 2048 here because the user
+    /// config is the public default.
+    #[serde(default = "default_computer_ram")]
+    pub computer_default_ram_mb: u32,
+}
+
+fn default_computer_disk() -> u32 {
+    10
+}
+fn default_computer_ram() -> u32 {
+    2048
+}
+
+/// One row in the `ssh_keys` table. Returned by
+/// `Database::get_ssh_key` so the ComputerManager can
+/// decrypt the private half on demand.
+#[derive(Debug, Clone)]
+pub struct SshKeyRow {
+    pub id: String,
+    pub public_key: String,
+    pub private_key_encrypted: Vec<u8>,
+    pub created_at: DateTime<Utc>,
 }
 
 pub struct Database {
@@ -251,6 +314,32 @@ impl Database {
              CREATE TABLE IF NOT EXISTS meta (
                 key   TEXT PRIMARY KEY,
                 value TEXT NOT NULL
+             );
+             -- v2.0 Slice B: per-Bot Computer. One row per
+             -- Bot that has a provisioned VM. The schema is
+             -- 1:1 with `bots` so a bot is either
+             -- provisioned (row exists) or not (no row).
+             CREATE TABLE IF NOT EXISTS computers (
+                bot_id          TEXT PRIMARY KEY REFERENCES bots(id) ON DELETE CASCADE,
+                vm_name         TEXT NOT NULL DEFAULT '',
+                vm_ip           TEXT,
+                vnc_port        INTEGER,
+                ssh_key_id      TEXT,
+                state           TEXT NOT NULL DEFAULT 'provisioning',
+                last_seen_at    TEXT,
+                created_at      TEXT NOT NULL
+             );
+             -- v2.0 Slice B: per-Bot SSH keypair storage.
+             -- The private key is encrypted with a key
+             -- derived from `Settings.computer_passphrase`
+             -- via Argon2id. The public key is stored in
+             -- plaintext (it's not a secret) and is what
+             -- cloud-init embeds in `ssh_authorized_keys`.
+             CREATE TABLE IF NOT EXISTS ssh_keys (
+                id                    TEXT PRIMARY KEY,
+                public_key            TEXT NOT NULL,
+                private_key_encrypted BLOB NOT NULL,
+                created_at            TEXT NOT NULL
              );",
         )?;
         // Idempotent column additions for older databases. SQLite
@@ -967,6 +1056,163 @@ impl Database {
             "UPDATE bot_messages SET read = 1 WHERE to_bot_id = ? AND read = 0",
             params![bot_id],
         )?;
+        Ok(())
+    }
+
+    // ----- v2.0 Slice B: computers + ssh_keys -----
+    //
+    // Per-Bot libvirt VM state. The ComputerManager owns
+    // these — Tauri commands dispatch into it, but the
+    // table is read by the renderer for Status / Preview
+    // mode badges.
+
+    /// Upsert a computer row. Always writes — the caller
+    /// (ComputerManager::provision) is the source of
+    /// truth for whether the bot has a VM.
+    pub fn upsert_computer(&self, c: &crate::computer::Computer) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().expect("db lock poisoned");
+        let last_seen = c.last_seen_at.as_ref().map(|d| d.to_rfc3339());
+        conn.execute(
+            "INSERT INTO computers (bot_id, vm_name, vm_ip, vnc_port, ssh_key_id, state, last_seen_at, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(bot_id) DO UPDATE SET
+                vm_name = excluded.vm_name,
+                vm_ip = excluded.vm_ip,
+                vnc_port = excluded.vnc_port,
+                ssh_key_id = excluded.ssh_key_id,
+                state = excluded.state,
+                last_seen_at = excluded.last_seen_at",
+            params![
+                c.bot_id,
+                c.vm_name,
+                c.vm_ip,
+                c.vnc_port.map(|p| p as i64),
+                c.ssh_key_id,
+                c.state,
+                last_seen,
+                c.created_at.to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Update only the `state` column. Used by
+    /// `computer_start / stop` after a successful virsh
+    /// call. The other columns (ip, vnc_port, vm_name)
+    /// don't change on a lifecycle action.
+    pub fn set_computer_state(&self, bot_id: &str, state: &str) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().expect("db lock poisoned");
+        conn.execute(
+            "UPDATE computers SET state = ? WHERE bot_id = ?",
+            params![state, bot_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_computer(
+        &self,
+        bot_id: &str,
+    ) -> rusqlite::Result<Option<crate::computer::Computer>> {
+        let conn = self.conn.lock().expect("db lock poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT bot_id, vm_name, vm_ip, vnc_port, ssh_key_id, state, last_seen_at, created_at
+             FROM computers WHERE bot_id = ?",
+        )?;
+        let mut rows = stmt.query(params![bot_id])?;
+        let row = match rows.next()? {
+            Some(r) => r,
+            None => return Ok(None),
+        };
+        let last_seen: Option<String> = row.get(6)?;
+        let vnc_port: Option<i64> = row.get(3)?;
+        Ok(Some(crate::computer::Computer {
+            bot_id: row.get(0)?,
+            vm_name: row.get(1)?,
+            vm_ip: row.get(2)?,
+            vnc_port: vnc_port.map(|p| p as u16),
+            ssh_key_id: row.get(4)?,
+            state: row.get(5)?,
+            last_seen_at: last_seen.map(parse_dt),
+            created_at: parse_dt(row.get::<_, String>(7)?),
+        }))
+    }
+
+    pub fn list_computers(&self) -> rusqlite::Result<Vec<crate::computer::Computer>> {
+        let conn = self.conn.lock().expect("db lock poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT bot_id, vm_name, vm_ip, vnc_port, ssh_key_id, state, last_seen_at, created_at
+             FROM computers",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let last_seen: Option<String> = row.get(6)?;
+            let vnc_port: Option<i64> = row.get(3)?;
+            Ok(crate::computer::Computer {
+                bot_id: row.get(0)?,
+                vm_name: row.get(1)?,
+                vm_ip: row.get(2)?,
+                vnc_port: vnc_port.map(|p| p as u16),
+                ssh_key_id: row.get(4)?,
+                state: row.get(5)?,
+                last_seen_at: last_seen.map(parse_dt),
+                created_at: parse_dt(row.get::<_, String>(7)?),
+            })
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    pub fn delete_computer(&self, bot_id: &str) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().expect("db lock poisoned");
+        conn.execute("DELETE FROM computers WHERE bot_id = ?", params![bot_id])?;
+        Ok(())
+    }
+
+    /// Upsert an SSH key row. The `private_key_encrypted`
+    /// is a chacha20poly1305 blob; stored as BLOB.
+    pub fn upsert_ssh_key(
+        &self,
+        id: &str,
+        public_key: &str,
+        private_key_encrypted: &[u8],
+    ) -> rusqlite::Result<()> {
+        let now = Utc::now().to_rfc3339();
+        let conn = self.conn.lock().expect("db lock poisoned");
+        conn.execute(
+            "INSERT INTO ssh_keys (id, public_key, private_key_encrypted, created_at)
+             VALUES (?, ?, ?, ?)
+             ON CONFLICT(id) DO UPDATE SET
+                public_key = excluded.public_key,
+                private_key_encrypted = excluded.private_key_encrypted",
+            params![id, public_key, private_key_encrypted, now],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_ssh_key(&self, id: &str) -> rusqlite::Result<Option<SshKeyRow>> {
+        let conn = self.conn.lock().expect("db lock poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT id, public_key, private_key_encrypted, created_at
+             FROM ssh_keys WHERE id = ?",
+        )?;
+        let mut rows = stmt.query(params![id])?;
+        let row = match rows.next()? {
+            Some(r) => r,
+            None => return Ok(None),
+        };
+        Ok(Some(SshKeyRow {
+            id: row.get(0)?,
+            public_key: row.get(1)?,
+            private_key_encrypted: row.get(2)?,
+            created_at: parse_dt(row.get::<_, String>(3)?),
+        }))
+    }
+
+    pub fn delete_ssh_key(&self, id: &str) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().expect("db lock poisoned");
+        conn.execute("DELETE FROM ssh_keys WHERE id = ?", params![id])?;
         Ok(())
     }
 

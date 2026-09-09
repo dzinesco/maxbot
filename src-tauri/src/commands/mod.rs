@@ -3,6 +3,7 @@
 
 pub mod bots;
 pub mod chat;
+pub mod computer;
 pub mod conversations;
 pub mod meta;
 pub mod settings;
