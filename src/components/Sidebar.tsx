@@ -195,15 +195,26 @@ export function Sidebar({
       <div className="sidebar-footer">
         <div
           className={`status ${status === "online" ? "online" : status === "missing" ? "missing" : ""}`}
+          title={
+            status === "online"
+              ? "LLM provider is configured and ready"
+              : status === "missing"
+                ? "API key not set — open Settings"
+                : "Checking provider status…"
+          }
         >
           <span className="indicator" />
-          {status === "online"
-            ? "MiniMax ready"
-            : status === "missing"
-              ? "API key not set"
-              : "Checking…"}
+          <span>
+            {status === "online"
+              ? "Ready"
+              : status === "missing"
+                ? "API key not set"
+                : "Checking…"}
+          </span>
         </div>
-        <button onClick={onOpenSettings}>Settings</button>
+        <button onClick={onOpenSettings} className="ghost small">
+          Settings
+        </button>
       </div>
     </aside>
   );
