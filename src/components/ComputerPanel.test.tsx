@@ -119,6 +119,9 @@ const defaultSettings: Settings = {
   computer_use_default_ssh_key: false,
   computer_default_disk_gb: 10,
   computer_default_ram_mb: 2048,
+  // v2.7.0 — voice mode flag. Tests that don't
+  // exercise voice don't care; default to off.
+  voice_mode_enabled: false,
 };
 
 beforeEach(() => {

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { parseMentions, type MentionMember } from "../lib/mentions";
+import { VoiceButton } from "./VoiceButton";
 
 interface ComposerProps {
   onSend: (content: string) => void;
@@ -37,6 +38,14 @@ interface ComposerProps {
    * parsed mentions.
    */
   onGroupSend?: (body: string, mentionedBotIds: string[]) => void;
+  /**
+   * v2.7.0 — error sink for the VoiceButton (e.g.
+   * permission denied, STT failure). When omitted,
+   * errors are silently dropped. The parent usually
+   * wires this to the same toast surface used for
+   * chat errors.
+   */
+  onVoiceError?: (message: string) => void;
 }
 
 export function Composer({
@@ -51,6 +60,7 @@ export function Composer({
   mode = "chat",
   groupMembers,
   onGroupSend,
+  onVoiceError,
 }: ComposerProps) {
   const [value, setValue] = useState("");
   const ref = useRef<HTMLTextAreaElement>(null);
@@ -86,6 +96,21 @@ export function Composer({
     }
     onSend(trimmed);
     setValue("");
+  };
+
+  // v2.7.0 — Voice (bidirectional). When the
+  // VoiceButton returns a transcript, drop it into the
+  // textarea so the user can review / edit before
+  // sending. We intentionally don't auto-send: voice
+  // transcripts are noisy enough that the user almost
+  // always wants a second look. The button itself is
+  // hidden in group mode (the mention-routing logic
+  // below the textarea is too important to compete
+  // with for screen real estate).
+  const handleVoiceTranscript = (text: string) => {
+    const trimmed = text.trim();
+    if (!trimmed) return;
+    setValue((prev) => (prev.trim() ? `${prev} ${trimmed}` : trimmed));
   };
 
   return (
@@ -147,6 +172,13 @@ export function Composer({
             )}
           </div>
           <div className="composer-actions">
+            {!isGroup && (
+              <VoiceButton
+                onTranscript={handleVoiceTranscript}
+                onError={onVoiceError}
+                disabled={streaming}
+              />
+            )}
             {!isGroup && lastAssistantText && (
               <button
                 className={`composer-speak${ttsSpeaking ? " speaking" : ""}`}

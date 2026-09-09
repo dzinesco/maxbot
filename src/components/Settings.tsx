@@ -136,6 +136,14 @@ export function Settings({ initial, onClose, onSave }: SettingsProps) {
   const [computerRamMb, setComputerRamMb] = useState<number>(
     base.computer_default_ram_mb ?? 2048,
   );
+  // v2.7.0 — Voice (bidirectional). When on, the
+  // chat UI auto-plays assistant replies and then
+  // auto-arms the Composer mic for the next turn.
+  // The hold-to-record VoiceButton is always
+  // available regardless of this flag.
+  const [voiceModeEnabled, setVoiceModeEnabled] = useState<boolean>(
+    base.voice_mode_enabled ?? false,
+  );
   // Test-connection state: `null` = idle, `{ kind: "ok", count }` =
   // last call succeeded, `{ kind: "err", message }` = failed. The
   // banner shows up while `kind` is set and is dismissable.
@@ -240,6 +248,10 @@ export function Settings({ initial, onClose, onSave }: SettingsProps) {
           256,
           Math.floor(computerRamMb || 2048),
         ),
+        // v2.7.0 — voice mode toggle. Mirrors the Rust
+        // Settings.voice_mode_enabled field. See
+        // `src-tauri/src/storage/db.rs`.
+        voice_mode_enabled: voiceModeEnabled,
       };
       await onSave(merged);
       onClose();
@@ -316,6 +328,7 @@ export function Settings({ initial, onClose, onSave }: SettingsProps) {
           256,
           Math.floor(computerRamMb || 2048),
         ),
+        voice_mode_enabled: voiceModeEnabled,
       };
       await onSave(merged);
       const count = await computerTestConnection();
@@ -500,6 +513,38 @@ export function Settings({ initial, onClose, onSave }: SettingsProps) {
               />
 
               <ComputerUseSettings />
+
+              <hr
+                style={{
+                  border: 0,
+                  borderTop: "1px solid var(--border)",
+                  margin: "6px 0",
+                }}
+              />
+
+              <div className="field">
+                {/* v2.7.0 — Voice (bidirectional) toggle. When
+                 * on, the chat auto-plays each assistant reply
+                 * and the Composer auto-arms the mic for the
+                 * next turn. The hold-to-record VoiceButton is
+                 * always available regardless of this flag. */}
+                <label>
+                  <input
+                    type="checkbox"
+                    checked={voiceModeEnabled}
+                    onChange={(e) => setVoiceModeEnabled(e.target.checked)}
+                    data-testid="settings-voice-mode-toggle"
+                  />{" "}
+                  Voice mode — auto-play Bot replies and auto-record after
+                </label>
+                <div className="hint">
+                  The hold-to-record mic button in the Composer is always
+                  available, even with this off. When on, MaxBot speaks each
+                  reply out loud and then arms the mic for your next turn
+                  (push-to-talk). Requires a working `say` (TTS) and
+                  `transcribe_audio` (Whisper) — both surface errors as toasts.
+                </div>
+              </div>
 
               <hr
                 style={{

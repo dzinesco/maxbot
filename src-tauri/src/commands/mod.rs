@@ -13,3 +13,4 @@ pub mod settings;
 pub mod skills;
 pub mod tcc;
 pub mod tts;
+pub mod voice;

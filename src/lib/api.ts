@@ -118,6 +118,16 @@ export interface Settings {
   computer_default_disk_gb: number;
   /** Default RAM (MiB) for a newly-provisioned Bot VM. */
   computer_default_ram_mb: number;
+
+  // ---- v2.7.0 — Voice (bidirectional) ----
+  //
+  // When true, the chat UI auto-plays each assistant reply via
+  // `tts_speak` and then auto-arms the Composer mic for a
+  // follow-up voice turn. The Composer still has a hold-to-record
+  // VoiceButton even when this is off — the flag only governs
+  // the auto-play + auto-record loop. Default false so a fresh
+  // install doesn't talk at the user.
+  voice_mode_enabled: boolean;
 }
 
 export interface ProviderPreset {
@@ -252,6 +262,9 @@ export const DEFAULT_SETTINGS: Settings = {
   computer_use_default_ssh_key: true,
   computer_default_disk_gb: 10,
   computer_default_ram_mb: 2048,
+  // v2.7.0 — voice mode off by default. The user opts in
+  // via the new "Voice mode" toggle in Settings → General.
+  voice_mode_enabled: false,
 };
 
 export interface TtsSpeakResponse {

@@ -179,6 +179,10 @@ pub fn run() {
             commands::tcc::open_automation_settings,
             commands::tts::tts_speak,
             commands::tts::tts_stop,
+            // v2.7.0 — Voice (bidirectional). Hold-to-talk
+            // in the Composer; the STT call lands here. The
+            // TTS commands above are the outbound half.
+            commands::voice::transcribe_audio,
             commands::meta::meta_get,
             commands::meta::meta_set,
             commands::meta::meta_list,

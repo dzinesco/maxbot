@@ -797,6 +797,56 @@ export default function App() {
     return null;
   }, [messages]);
 
+  // v2.7.0 — Voice mode auto-play. When
+  // `settings.voice_mode_enabled` is on, each newly
+  // arrived assistant message is spoken automatically.
+  // We track the id of the last message we auto-spoke
+  // in a ref so scrolling back through history doesn't
+  // re-fire TTS — only messages that have not yet been
+  // spoken get the auto-play treatment. Streaming
+  // messages are intentionally skipped: a `say` call
+  // fired mid-stream would lock onto an incomplete
+  // reply and never update. The composer-side 🔊
+  // button still works for streaming-aware manual
+  // playback.
+  const lastAutoSpokenIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!settings.voice_mode_enabled) return;
+    // Find the last *completed* assistant message —
+    // i.e. one that isn't currently streaming. The
+    // streaming flag is on the *parent* `streaming`
+    // state, but the right signal for "this message
+    // just arrived" is "no other assistant message is
+    // newer". The earlier loop already gives us the
+    // text; here we just need the id.
+    let newestId: string | null = null;
+    let newestText: string | null = null;
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const m = messages[i];
+      if (m.role === "assistant" && m.content.trim().length > 0) {
+        newestId = m.id;
+        newestText = m.content;
+        break;
+      }
+    }
+    if (!newestId || !newestText) return;
+    if (newestId === lastAutoSpokenIdRef.current) return;
+    // Skip the auto-play while another assistant turn
+    // is streaming in. Without this guard, every
+    // partial token could re-fire TTS on a re-render.
+    if (streamingId) return;
+    lastAutoSpokenIdRef.current = newestId;
+    setTtsSpeaking(true);
+    const chars = newestText.length;
+    const approxMs = Math.max(3000, Math.ceil(chars / 12) * 1000);
+    setTimeout(() => setTtsSpeaking(false), approxMs);
+    ttsSpeak(newestText).catch((e) => {
+      // eslint-disable-next-line no-console
+      console.error("voice-mode auto tts_speak failed:", e);
+      setTtsSpeaking(false);
+    });
+  }, [messages, settings.voice_mode_enabled, streamingId]);
+
   const handleToggleSpeakLast = useCallback(async () => {
     if (ttsSpeaking) {
       try {

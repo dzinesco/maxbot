@@ -409,6 +409,26 @@ export async function ttsStop(): Promise<boolean> {
   return invoke<boolean>("tts_stop");
 }
 
+/**
+ * v2.7.0 — Speech-to-Text. POSTs a recorded audio blob to
+ * OpenAI Whisper via the Rust `transcribe_audio` command and
+ * returns the transcript string. The MIME type typically comes
+ * from `MediaRecorder.mimeType` and is usually `audio/webm`
+ * (Opus) on modern Chromium.
+ *
+ * Errors are returned as plain strings; the caller (VoiceButton)
+ * surfaces them in a toast.
+ */
+export async function transcribeAudio(
+  audioBytes: Uint8Array,
+  mimeType: string,
+): Promise<string> {
+  return invoke<string>("transcribe_audio", {
+    audioBytes: Array.from(audioBytes),
+    mimeType,
+  });
+}
+
 // ---- Meta key/value (onboarding state, schema version) ----
 
 /**

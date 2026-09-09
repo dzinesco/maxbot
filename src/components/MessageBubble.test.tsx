@@ -149,3 +149,43 @@ describe("MessageBubble — pin button (v2.5.0)", () => {
     });
   });
 });
+
+// ---- v2.7.0 — "🔊 Speak" button ----------------------------------
+//
+// The Speak button was already in the component (v0.7.6 added it
+// for ⌘⇧S); v2.7.0 just makes sure the IPC contract is pinned
+// down by a test. The button calls `tts_speak` with the message
+// text and flips to a "speaking" state until tts_stop fires (or
+// the per-bubble timeout lands).
+
+describe("MessageBubble — Speak button (v2.7.0)", () => {
+  it("renders a Speak button on assistant messages", () => {
+    render(<MessageBubble message={baseMessage} />);
+    const speak = screen.getByRole("button", { name: /speak/i });
+    expect(speak).toBeInTheDocument();
+  });
+
+  it("calls tts_speak with the message content when clicked", async () => {
+    let capturedArgs: Record<string, unknown> | undefined;
+    invokeMock.mockImplementation(async (cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === "tts_speak") {
+        capturedArgs = args;
+        // The Rust side returns a small struct; we only
+        // care that the call fired for the assertion.
+        return {
+          chars: 0,
+          voice: "Samantha",
+          truncated_chars: 0,
+        };
+      }
+      return null;
+    });
+    render(<MessageBubble message={baseMessage} />);
+    const speak = screen.getByRole("button", { name: /speak/i });
+    fireEvent.click(speak);
+    await waitFor(() => {
+      expect(capturedArgs).toBeTruthy();
+    });
+    expect(capturedArgs?.text).toBe(baseMessage.content);
+  });
+});

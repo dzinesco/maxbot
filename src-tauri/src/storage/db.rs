@@ -220,6 +220,17 @@ pub struct Settings {
     /// config is the public default.
     #[serde(default = "default_computer_ram")]
     pub computer_default_ram_mb: u32,
+
+    // ---- v2.7.0 — Voice (bidirectional) ----
+    /// When true, the chat UI auto-plays each assistant
+    /// reply via `tts_speak` and then auto-arms the
+    /// Composer mic for a follow-up voice turn. The
+    /// Composer still has a hold-to-record VoiceButton
+    /// even when this is off — the flag only governs the
+    /// auto-play + auto-record loop. Default false so a
+    /// fresh install doesn't talk at the user.
+    #[serde(default)]
+    pub voice_mode_enabled: bool,
 }
 
 fn default_computer_disk() -> u32 {
