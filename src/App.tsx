@@ -7,6 +7,7 @@ import { BotsPanel } from "./components/BotsPanel";
 import { BotEditor } from "./components/BotEditor";
 import { BotInbox } from "./components/BotInbox";
 import { SendToBotModal } from "./components/SendToBotModal";
+import { Welcome } from "./components/Welcome";
 import {
   createConversation,
   deleteBot,
@@ -24,6 +25,8 @@ import {
   listConversations,
   listInbox,
   markInboxRead,
+  metaGet,
+  metaSet,
   onBotChunk,
   onBotDone,
   onBotError,
@@ -80,6 +83,14 @@ export default function App() {
   const [searchResults, setSearchResults] = useState<Message[]>([]);
   const [settings, setSettings] = useState<SettingsT>(DEFAULT_SETTINGS);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  /**
+   * First-run gate. Read from the `meta` table on bootstrap. `null`
+   * means the bootstrap hasn't finished yet (we're still in the
+   * loading state); `true` means show the chat; `false` means show
+   * the welcome. The user can flip back to `false` from Settings
+   * via the "Reset onboarding" entry.
+   */
+  const [isOnboarded, setIsOnboarded] = useState<boolean | null>(null);
   const [streamingId, setStreamingId] = useState<string | null>(null);
   const [bootError, setBootError] = useState<string | null>(null);
   const [bots, setBots] = useState<Bot[]>([]);
@@ -152,12 +163,13 @@ export default function App() {
   useEffect(() => {
     (async () => {
       try {
-        const [s, c, b, sched, tools] = await Promise.all([
+        const [s, c, b, sched, tools, onboarded] = await Promise.all([
           getSettings(),
           listConversations(),
           listBots(),
           listAllSchedules(),
           listAvailableTools(),
+          metaGet("is_onboarded"),
         ]);
         setSettings(s);
         setConversations(c);
@@ -166,11 +178,15 @@ export default function App() {
         for (const sc of sched) schedMap[sc.bot_id] = sc;
         setBotSchedules(schedMap);
         setAvailableTools(tools);
-        if (c.length > 0) {
+        setIsOnboarded(onboarded === "1");
+        // Only create a default conversation once the user is past
+        // the welcome screen. Otherwise we'd auto-create a chat
+        // row that gets orphaned on the "Skip for now" path.
+        if (onboarded === "1" && c.length > 0) {
           setActiveId(c[0].id);
-        } else {
-          // No conversations yet — create a fresh "New chat" so the user
-          // can start typing immediately.
+        } else if (onboarded === "1") {
+          // No conversations yet — create a fresh "New chat" so the
+          // user can start typing immediately.
           const created = await createConversation(undefined, undefined);
           setConversations([created]);
           setActiveId(created.id);
@@ -254,10 +270,15 @@ export default function App() {
         const pending = pendingRef.current;
         const message = event.message;
         if (pending) {
+          // v0.7.6: the error no longer gets appended to the visible
+          // content. The Rust side already persisted `error_message`
+          // on the message row, but we set it on the in-memory state
+          // too so the UI re-renders the ErrorMessage block
+          // immediately without a DB reload.
           setMessages((prev) =>
             prev.map((m) =>
               m.id === pending.assistantId
-                ? { ...m, content: pending.text + `\n\n[error] ${message}` }
+                ? { ...m, error_message: message }
                 : m,
             ),
           );
@@ -385,7 +406,14 @@ export default function App() {
     (async () => {
       try {
         const m = await getMessages(activeId);
-        setMessages(m);
+        // v0.7.6 migration: messages that pre-date the friendly
+        // error UX still carry the old "[error] …" suffix appended
+        // to their `content`. On first load after upgrade, split
+        // those out: the prefix becomes `content`, the trailing
+        // error text becomes `error_message`. Idempotent — once a
+        // message has the new shape, this leaves it alone.
+        const normalized = m.map(splitLegacyErrorSuffix);
+        setMessages(normalized);
         // Clear any stale "bot streaming" state when switching threads.
         botPendingRef.current = null;
       } catch (e) {
@@ -454,6 +482,7 @@ export default function App() {
           content,
           tool_calls: [],
           created_at: now,
+          error_message: null,
         };
         const assistantMsg: Message = {
           id: result.assistant_message_id,
@@ -462,6 +491,7 @@ export default function App() {
           content: "",
           tool_calls: [],
           created_at: now,
+          error_message: null,
         };
         setMessages((prev) => [...prev, userMsg, assistantMsg]);
         pendingRef.current = {
@@ -542,6 +572,35 @@ export default function App() {
     return () => document.removeEventListener("keydown", handler);
   }, [handleToggleSpeakLast]);
 
+  // ⌘N → start a new chat. Bound at the document level so it works
+  // from anywhere in the app. We suppress the default so the browser
+  // doesn't open a new window. While the Settings or Bot editor
+  // modals are open we let the input handling inside the modal win
+  // — the existing modal escape / cancel paths cover that surface.
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (
+        (e.metaKey || e.ctrlKey) &&
+        !e.shiftKey &&
+        !e.altKey &&
+        (e.key === "N" || e.key === "n")
+      ) {
+        // Don't fire if the user is typing into a text field inside
+        // an open modal — let the input own the keystroke.
+        const target = e.target as HTMLElement | null;
+        if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA")) {
+          // …unless we're inside the search box, where ⌘N is still
+          // a reasonable "new chat" gesture and a no-op otherwise.
+          if (!target.classList.contains("sidebar-search-input")) return;
+        }
+        e.preventDefault();
+        handleNewConversation();
+      }
+    };
+    document.addEventListener("keydown", handler);
+    return () => document.removeEventListener("keydown", handler);
+  }, [handleNewConversation]);
+
   const handleRegenerate = useCallback(async () => {
     if (!activeId || streamingId) return;
     try {
@@ -575,6 +634,7 @@ export default function App() {
             content: "",
             tool_calls: [],
             created_at: new Date().toISOString(),
+            error_message: null,
           },
         ];
       });
@@ -864,6 +924,62 @@ export default function App() {
     return isConfigured(settings) ? "online" : "missing";
   }, [bootError, settings]);
 
+  // Path shown on the welcome surface when the user picks "I have a
+  // .env file". Mirrors the env_loader's first candidate, so a
+  // copy-paste of the shown path is the most likely to actually
+  // take effect on the next launch.
+  const envHintPath = useMemo(() => {
+    const home =
+      (typeof process !== "undefined" && process.env?.HOME) || "~";
+    return `${home}/.maxbot.env`;
+  }, []);
+
+  const handleOnboardingComplete = useCallback(async () => {
+    // Set the meta flag (idempotent — the dialog also writes it, but
+    // the "Skip for now" path doesn't go through the dialog). Then
+    // flip local state and seed a default conversation so the user
+    // lands on a fresh chat.
+    try {
+      await metaSet("is_onboarded", "1");
+    } catch (e) {
+      console.error("metaSet is_onboarded failed:", e);
+    }
+    setIsOnboarded(true);
+    if (conversations.length === 0) {
+      try {
+        const created = await createConversation(undefined, undefined);
+        setConversations([created]);
+        setActiveId(created.id);
+      } catch (e) {
+        console.error("createConversation post-onboard failed:", e);
+      }
+    } else if (!activeId) {
+      setActiveId(conversations[0].id);
+    }
+  }, [conversations, activeId]);
+
+  // Loading state: don't flash the welcome before bootstrap completes.
+  // A blank screen with the brand color is fine here — the bootstrap
+  // typically resolves in <100ms.
+  if (isOnboarded === null) {
+    return <div className="app app-boot" />;
+  }
+
+  // First-run gate. The Welcome is full-bleed (no sidebar) — it's
+  // a focused, single-decision surface. The sidebar is reachable
+  // only after the user dismisses.
+  if (!isOnboarded) {
+    return (
+      <div className="app">
+        <Welcome
+          initialSettings={settings}
+          onComplete={handleOnboardingComplete}
+          envHintPath={envHintPath}
+        />
+      </div>
+    );
+  }
+
   return (
     <div className="app">
       <Sidebar
@@ -1004,6 +1120,62 @@ export default function App() {
 }
 
 /**
+ * v0.7.6 one-time migration: assistant messages written by v0.7.5
+ * (and earlier) carry the error as a "\n\n[error] …" suffix on
+ * `content`. The new error UX wants `content` to be the streamed
+ * text and `error_message` to be the friendly description. This
+ * function splits the suffix out when it sees the legacy shape and
+ * leaves clean messages alone.
+ *
+ * The match is intentionally narrow: only a single trailing
+ * `\n\n[error] ...` block. Anything more elaborate is left as-is
+ * so we never accidentally mangle valid content (e.g. a literal
+ * `[error]` in a code block the user typed in).
+ */
+export function splitLegacyErrorSuffix(message: Message): Message {
+  // Already migrated — error_message is set, content is the clean
+  // streamed text. Don't touch it.
+  if (message.error_message) return message;
+  const marker = "\n\n[error] ";
+  const idx = message.content.lastIndexOf(marker);
+  if (idx < 0) return message;
+  const prefix = message.content.slice(0, idx);
+  const raw = message.content.slice(idx + marker.length).trim();
+  // Map the raw v0.7.5 string to a friendly message the same way
+  // the Rust side does for fresh errors. The matching here is
+  // best-effort — we keep the raw text as a fallback so we never
+  // silently drop information the user might have wanted to see.
+  const friendly = legacyRawErrorToFriendly(raw);
+  return {
+    ...message,
+    content: prefix,
+    error_message: friendly ?? raw,
+  };
+}
+
+/** Best-effort mapping of the v0.7.5 raw error text to a friendly
+ * phrase. `null` means "no specific match" — the caller falls back
+ * to the raw text. Kept in lockstep with `StreamError::friendly_message`
+ * in `src-tauri/src/llm/stream.rs`. */
+function legacyRawErrorToFriendly(raw: string): string | null {
+  const lower = raw.toLowerCase();
+  if (lower.includes("missing api key")) return "API key not set — open Settings";
+  if (lower.startsWith("http 401") || lower.startsWith("http 403"))
+    return "Authentication failed — check your API key";
+  if (lower.startsWith("http 5")) return "The provider is having trouble — try again";
+  if (lower.startsWith("http 4")) return "Authentication failed — check your API key";
+  if (lower.startsWith("network") || lower.includes("connection"))
+    return "Connection lost — check your network";
+  if (lower.startsWith("protocol"))
+    return "The model returned an unexpected response";
+  return null;
+}
+
+/**
+ * Helper used by the bot chunk handler: keeps a single "bot-streaming"
+ * message in the message list. While the bot is streaming, we upsert
+
+/**
  * Helper used by the bot chunk handler: keeps a single "bot-streaming"
  * message in the message list. While the bot is streaming, we upsert
  * one ephemeral message with id `__bot_stream__`; on done/error we
@@ -1036,6 +1208,7 @@ function upsertBotStreamMessage(
         content: text,
         tool_calls: tcs,
         created_at: now,
+        error_message: null,
       },
     ];
   }

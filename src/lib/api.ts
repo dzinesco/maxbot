@@ -15,6 +15,14 @@ export interface Message {
   content: string;
   tool_calls: PersistedToolCall[];
   created_at: string;
+  /**
+   * Friendly description of a stream error that ended this assistant
+   * turn. When set, the UI renders the `ErrorMessage` block (with
+   * Retry) instead of the [error] … text suffix. Null for normal
+   * messages, including pre-v0.7.6 messages that survived the
+   * one-time migration normalization.
+   */
+  error_message: string | null;
 }
 
 export interface Conversation {
@@ -50,6 +58,27 @@ export interface Settings {
   xai_base_url: string;
   /** Voice name for the `say` command. Empty = Samantha default. */
   tts_voice: string;
+  /** Path to the `grok` binary the `grok_prompt` tool spawns. May be a
+   * bare name on PATH or an absolute path. Empty = `grok` (auto-detect
+   * on $PATH, falling back to `~/.grok/bin/grok`). */
+  grok_build_binary: string;
+  /** Model alias passed to `grok --model <alias>`. The alias resolves
+   * to an API model via `~/.grok/config.toml`. Empty = `minimax`. */
+  grok_build_model: string;
+  /** Working directory for the `grok agent stdio` subprocess. Empty =
+   * the per-app data dir's `grok/` subfolder. Set to an absolute path
+   * to point the agent at a specific project. */
+  grok_cwd: string;
+  /** Optional absolute path to the `ego-browser` CLI. Empty = auto-
+   * detect `$HOME/.local/bin/ego-browser`, then `ego-browser` on
+   * $PATH. The Rust side currently auto-resolves; this field is
+   * surfaced in the Browser tab for a future override. */
+  ego_browser_path: string;
+  /** Optional override for the `node` binary that the ego (lite) Node
+   * subcommand uses. Empty = whatever `ego-browser nodejs` resolves
+   * internally. The Rust side currently doesn't read this; surfaced
+   * in the Browser tab for a future override. */
+  nodejs_path: string;
 }
 
 export interface ProviderPreset {
@@ -162,6 +191,11 @@ export const DEFAULT_SETTINGS: Settings = {
   anthropic_base_url: "",
   xai_base_url: "",
   tts_voice: "",
+  grok_build_binary: "",
+  grok_build_model: "",
+  grok_cwd: "",
+  ego_browser_path: "",
+  nodejs_path: "",
 };
 
 export interface TtsSpeakResponse {

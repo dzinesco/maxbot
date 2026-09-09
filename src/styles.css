@@ -1038,6 +1038,14 @@ textarea:focus {
   overflow: hidden;
 }
 
+/* Wider variant used by the v1 5-tab Settings modal — the Providers
+   tab lists four sub-sections, so 660px felt cramped. The tab bar
+   keeps the modal anchored to the viewport edge so the form doesn't
+   drift on resize. */
+.modal-stacked.modal-stacked-wide {
+  width: 720px;
+}
+
 .modal-stacked-header {
   padding: 18px 22px 12px;
   border-bottom: 1px solid var(--border);
@@ -1050,7 +1058,69 @@ textarea:focus {
   font-weight: 600;
 }
 
+/* Tab bar inside the stacked Settings modal. Sticks to the top of
+ * the scrollable body so it stays in reach while the pane scrolls.
+ * Each tab is a button styled as a tab — no border-radius, a 2px
+ * accent underline on the active one. Arrow keys move focus between
+ * tabs (handled in JS); focus-visible gets the same accent ring as
+ * other controls. */
+.modal-tabs {
+  display: flex;
+  flex-shrink: 0;
+  background: var(--bg-1);
+  border-bottom: 1px solid var(--border);
+  padding: 0 12px;
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+
+.modal-tab {
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  color: var(--text-2);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0;
+  text-transform: none;
+  padding: 10px 14px;
+  margin-bottom: -1px;
+  cursor: pointer;
+  transition: color 80ms ease, border-color 80ms ease, background 80ms ease;
+}
+
+.modal-tab:hover:not(.active) {
+  color: var(--text-0);
+  background: var(--bg-2);
+}
+
+.modal-tab.active {
+  color: var(--text-0);
+  border-bottom-color: var(--accent);
+}
+
+.modal-tab:focus-visible {
+  outline: none;
+  border-bottom-color: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--accent-soft);
+}
+
+/* The body becomes a flex column that hosts the tab panes. The
+ * modal itself does NOT scroll — each pane is its own scroll
+ * container (per the v0.6.7a fix and the v1 tab plan). min-height:
+ * 0 is the incantation that lets a flex child actually shrink
+ * below its content height so overflow-y: auto has room to work. */
 .modal-stacked-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.modal-stacked-body > .modal-tab-pane {
   flex: 1 1 auto;
   min-height: 0;
   overflow-y: auto;
@@ -2013,3 +2083,603 @@ button.link:hover {
   border-radius: 3px;
   color: var(--text-2);
 }
+
+/* ---------- Settings tab content (v1) ---------- */
+
+/* The status row in the General tab — reuses the sidebar's
+ * online/missing indicator but as a horizontal row instead of a
+ * pill. Same color tokens so the affordance reads consistently. */
+.status-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text-1);
+  padding: 4px 0;
+}
+
+.status-row .indicator {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--text-3);
+  flex-shrink: 0;
+}
+
+.status-row.online .indicator {
+  background: var(--success);
+  box-shadow: 0 0 8px rgba(34, 197, 94, 0.6);
+}
+
+.status-row.missing .indicator {
+  background: var(--danger);
+}
+
+/* One provider sub-section on the Providers tab. A bordered card
+ * with the provider's display name, the active badge (if it's the
+ * selected provider), the description, and the two inputs (key +
+ * base URL). Card spacing matches the field gap on the rest of
+ * the modal so the tab reads as one form, not four forms. */
+.provider-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 14px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+}
+
+.provider-section-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.provider-section-header h3 {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--text-0);
+}
+
+.provider-section-desc {
+  margin: 0;
+}
+
+.provider-section .field:last-child {
+  margin-bottom: 0;
+}
+
+/* The voice pills under the TTS text input. One-tap selection for
+ * the common macOS voices; the text input above accepts any name
+ * the user has installed. Match the `enabled-tools` pill aesthetic
+ * so the affordance reads as "click to set" rather than "click to
+ * navigate". */
+.voice-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.voice-pill {
+  font-size: 11px;
+  padding: 4px 10px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  color: var(--text-1);
+  font-family: inherit;
+  transition: background 80ms ease, border-color 80ms ease, color 80ms ease;
+}
+
+.voice-pill:hover {
+  background: var(--bg-3);
+  color: var(--text-0);
+}
+
+.voice-pill.active {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--text-0);
+}
+
+/* ---------- First-run Welcome (v1.0) ---------- */
+
+/* Boot scaffold: the blank app container while bootstrap is
+ * resolving. Solid background, no UI — the user sees the brand
+ * color flash for ~50ms before the welcome or chat surface
+ * mounts. Sized to fill the viewport so the sidebar slot stays
+ * reserved. */
+.app-boot {
+  background: var(--bg-0);
+  min-height: 100vh;
+}
+
+/* The welcome surface itself. Mirrors the .main-empty spacing
+ * and rhythm, but full-bleed (no sidebar) and with two clear
+ * decision cards instead of an empty-state tagline. The
+ * fade-in is the same as the empty state so the two read as
+ * the same family. */
+.welcome {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  color: var(--text-2);
+  padding: 60px 24px;
+  animation: empty-fade 320ms ease-out;
+  min-height: 100vh;
+}
+
+/* Scaled-up monogram. Same gradient and signature dot as the
+ * .main-empty-mark — the 1.5x scale gives the welcome a bit
+ * more presence on first launch without being loud. */
+.welcome-mark {
+  width: 78px;
+  height: 78px;
+  border-radius: 20px;
+  background: linear-gradient(135deg, #8b5cf6 0%, #7c3aed 50%, #4c1d95 100%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--font-display);
+  font-size: 36px;
+  font-weight: 800;
+  letter-spacing: -0.04em;
+  color: #fff;
+  margin-bottom: 6px;
+  box-shadow:
+    0 14px 36px rgba(124, 58, 237, 0.32),
+    inset 0 1px 0 rgba(255, 255, 255, 0.18);
+  position: relative;
+  overflow: hidden;
+}
+
+.welcome-mark::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 50%;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.12), transparent);
+  pointer-events: none;
+}
+
+.welcome-mark::after {
+  content: "";
+  position: absolute;
+  bottom: 10px;
+  right: 10px;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: #34d399;
+  box-shadow: 0 0 10px rgba(52, 211, 153, 0.6);
+  animation: mark-pulse 2.4s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .welcome-mark::after {
+    animation: none;
+  }
+}
+
+.welcome-title {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 30px;
+  font-weight: 700;
+  color: var(--text-0);
+  letter-spacing: -0.02em;
+}
+
+.welcome-subtitle {
+  margin: 0;
+  font-size: 14px;
+  max-width: 480px;
+  text-align: center;
+  color: var(--text-2);
+  line-height: 1.5;
+}
+
+/* Two side-by-side decision cards. Same border/hover/selected
+ * treatment as the onboarding provider cards, but a bit larger
+ * to match the welcome's "single big decision" framing. */
+.welcome-paths {
+  margin-top: 16px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(220px, 1fr));
+  gap: 12px;
+  max-width: 560px;
+  width: 100%;
+}
+
+.welcome-path-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 16px 18px;
+  text-align: left;
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  font-family: inherit;
+  color: var(--text-0);
+  transition: background 80ms ease, border-color 80ms ease, transform 80ms ease;
+}
+
+.welcome-path-card:hover {
+  background: var(--bg-2);
+  border-color: var(--accent);
+  transform: translateY(-1px);
+}
+
+.welcome-path-card-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-0);
+}
+
+.welcome-path-card-desc {
+  font-size: 12px;
+  color: var(--text-2);
+  line-height: 1.4;
+}
+
+/* .env file hint: expands under the cards when the user picks
+ * the "I have a .env file" path. Monospace path snippets so the
+ * file locations read like config, not like prose. */
+.welcome-env-hint {
+  margin-top: 4px;
+  padding: 14px 16px;
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  max-width: 560px;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  font-size: 12px;
+  color: var(--text-2);
+}
+
+.welcome-env-hint-label {
+  color: var(--text-1);
+  font-size: 12px;
+}
+
+.welcome-env-hint-label code,
+.welcome-env-hint-list code,
+.welcome-env-hint-path {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 1px 6px;
+  color: var(--text-1);
+}
+
+.welcome-env-hint-list {
+  margin: 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  color: var(--text-2);
+}
+
+.welcome-env-hint-list .muted {
+  color: var(--text-3);
+}
+
+.welcome-env-hint-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.welcome-env-hint-foot {
+  font-size: 11px;
+  color: var(--text-3);
+  margin-top: 2px;
+}
+
+/* Skip link. Smaller and quieter than the path cards — the
+ * "Skip for now" affordance is honest but not first-class. */
+.welcome-skip {
+  margin-top: 6px;
+  background: none;
+  border: none;
+  color: var(--text-3);
+  font-size: 12px;
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: var(--radius-sm);
+  transition: color 80ms ease, background 80ms ease;
+}
+
+.welcome-skip:hover {
+  color: var(--text-1);
+  background: var(--bg-2);
+}
+
+/* ---------- Onboarding dialog ---------- */
+
+/* Wider than the default 660px modal so the provider cards can
+ * sit two-up at first-launch widths. */
+.onboarding-dialog.modal-stacked {
+  width: 720px;
+}
+
+/* Step indicator strip under the dialog title. Inactive steps
+ * are dim; the active step is full-contrast with a colored
+ * dot prefix. The › separators echo the same accent at lower
+ * opacity. */
+.onboarding-steps {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+  font-size: 11px;
+  color: var(--text-3);
+}
+
+.onboarding-step {
+  letter-spacing: 0.01em;
+}
+
+.onboarding-step.active {
+  color: var(--text-1);
+  font-weight: 500;
+}
+
+.onboarding-step-sep {
+  color: var(--border-strong);
+  user-select: none;
+}
+
+.onboarding-body {
+  /* Tighten the gap slightly so the multi-step flow reads as
+   * one continuous form, not a stack of separate fields. */
+  gap: 12px;
+}
+
+.onboarding-step-pane {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.onboarding-step-blurb {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text-2);
+  line-height: 1.5;
+}
+
+.onboarding-step-blurb code {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 1px 5px;
+  color: var(--text-1);
+}
+
+/* Provider cards in the onboarding flow. Two-column grid at
+ * wide widths, single column on narrow dialogs. Match the
+ * welcome path-card aesthetic with a clearer "selected" state. */
+.onboarding-provider-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.onboarding-provider-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  padding: 12px 14px;
+  text-align: left;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  font-family: inherit;
+  color: var(--text-1);
+  transition: background 80ms ease, border-color 80ms ease, color 80ms ease;
+}
+
+.onboarding-provider-card:hover {
+  background: var(--bg-3);
+  border-color: var(--border-strong);
+  color: var(--text-0);
+}
+
+.onboarding-provider-card.selected {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--text-0);
+}
+
+.onboarding-provider-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-0);
+}
+
+.onboarding-provider-desc {
+  font-size: 11px;
+  color: var(--text-2);
+  line-height: 1.4;
+}
+
+/* Collapsible optional section trigger. Same accent link style
+ * the Settings page uses for the "Configure other providers"
+ * toggle — visual consistency for a "show me more" affordance. */
+.onboarding-optional-toggle {
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--accent);
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 12px;
+  text-align: left;
+  align-self: flex-start;
+}
+
+.onboarding-optional-toggle:hover {
+  color: var(--accent-hover);
+}
+
+.onboarding-optional-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.onboarding-optional-summary {
+  padding: 10px 12px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  font-size: 12px;
+  color: var(--text-2);
+  line-height: 1.5;
+}
+
+/* Step 4 "ready" pane: centered check mark + label, no form
+ * controls. The hand-off is the CTA in the footer. */
+.onboarding-step-ready {
+  align-items: center;
+  text-align: center;
+  padding: 16px 0 8px;
+  gap: 8px;
+}
+
+.onboarding-ready-mark {
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  background: var(--accent-soft);
+  color: var(--accent);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 28px;
+  font-weight: 700;
+  margin-bottom: 4px;
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+
+.onboarding-step-ready h3 {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--text-0);
+  letter-spacing: -0.01em;
+}
+
+/* ---------- v0.7.6 error block (assistant message) ----------
+ * Replaces the old "[error] …" suffix appended to the streamed
+ * content. Renders as a self-contained card INSIDE the assistant
+ * bubble: danger-tinted background, no message-body chrome, with
+ * a Retry button that re-runs the last user message via
+ * handleRegenerate. The intent is "this turn didn't complete" —
+ * not "your chat had a fatal error" — so the styling stays quiet
+ * and the Retry CTA is the loudest thing on the card. */
+.error-message {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin-top: 10px;
+  padding: 10px 12px;
+  background: rgba(239, 68, 68, 0.08);
+  border: 1px solid rgba(239, 68, 68, 0.32);
+  border-left: 3px solid var(--danger);
+  border-radius: var(--radius-md);
+  color: var(--text-1);
+}
+
+.error-message-icon {
+  flex-shrink: 0;
+  width: 18px;
+  height: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  line-height: 1;
+  /* The icon sits in its own circle so it reads as a status
+   * badge, not a stray character. */
+  border-radius: 50%;
+  background: rgba(239, 68, 68, 0.16);
+  color: var(--danger);
+  margin-top: 1px;
+}
+
+.error-message-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.error-message-title {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-0);
+  letter-spacing: -0.005em;
+}
+
+.error-message-detail {
+  margin: 0;
+  padding: 0;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--text-2);
+  background: transparent;
+  border: none;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  /* Cap the detail block at a few lines so a chat-breaking
+   * stack trace doesn't push the Retry button off-screen. The
+   * user can still scroll within the bubble to see more. */
+  max-height: 96px;
+  overflow-y: auto;
+}
+
+.error-message-retry {
+  flex-shrink: 0;
+  align-self: center;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  font-weight: 600;
+  padding: 5px 10px;
+  color: var(--danger);
+  border-color: rgba(239, 68, 68, 0.4);
+  background: transparent;
+}
+
+.error-message-retry:hover:not(:disabled) {
+  background: rgba(239, 68, 68, 0.12);
+  border-color: rgba(239, 68, 68, 0.6);
+}
+
