@@ -225,7 +225,14 @@ describe("ComputerPanel — install-default-key button", () => {
     expect(button).toBeInTheDocument();
   });
 
-  it("hides the button when default-key is already ON", async () => {
+  it("renders the button when default-key is already ON (v2.3.6 bootstrap path)", async () => {
+    // v2.3.6: the button is now shown whenever the VM
+    // is running, regardless of the setting value. The
+    // QGA install is idempotent so re-clicking is safe.
+    // This is the bootstrap path for a user with a
+    // pre-v2.3.5 VM (per-Bot key in authorized_keys)
+    // who upgrades: the migration flips the setting to
+    // `true` but the VM still only has the per-Bot key.
     vi.mocked(computerGet).mockResolvedValue(runningComputer);
     vi.mocked(getSettings).mockResolvedValue({
       ...defaultSettings,
@@ -238,14 +245,8 @@ describe("ComputerPanel — install-default-key button", () => {
         pollIntervalMs={60000}
       />,
     );
-    // The button should never render. We give the panel
-    // a tick to settle the effect chain, then assert
-    // absence. `queryByTestId` returns null when not
-    // found (vs. `findBy*` which would time out).
-    await waitFor(() => {
-      expect(getSettings).toHaveBeenCalled();
-    });
-    expect(screen.queryByTestId("computer-install-default-key")).toBeNull();
+    const button = await screen.findByTestId("computer-install-default-key");
+    expect(button).toBeInTheDocument();
   });
 
   it("clicking the button calls install then saveSettings with the flag flipped", async () => {
@@ -276,13 +277,17 @@ describe("ComputerPanel — install-default-key button", () => {
       const last = vi.mocked(saveSettings).mock.calls.at(-1)![0];
       expect(last.computer_use_default_ssh_key).toBe(true);
     });
-    // 3. The button disappears on the next render (the
-    //    setting is now true in local state).
-    await waitFor(() => {
-      expect(screen.queryByTestId("computer-install-default-key")).toBeNull();
-    });
-    // 4. The inline confirmation banner shows up.
+    // 3. v2.3.6: the button STAYS visible after a
+    //    successful install (the install is idempotent,
+    //    and the user might want to re-run to confirm).
+    //    The inline confirmation banner shows up
+    //    instead.
     const confirm = await screen.findByTestId("computer-install-confirm");
     expect(confirm.textContent).toMatch(/Default key installed/i);
+    // The button is still on the toolbar (the user can
+    // re-click; the QGA pipeline is idempotent).
+    expect(
+      screen.queryByTestId("computer-install-default-key"),
+    ).not.toBeNull();
   });
 });

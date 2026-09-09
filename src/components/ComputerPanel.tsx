@@ -550,7 +550,21 @@ function FullComputerPanel({
         // key path. After a successful install the
         // setting flips and the next render hides it.
         onInstallDefaultKey={
-          settings && !settings.computer_use_default_ssh_key
+          // v2.3.6: show the "Use my default key" button
+          // whenever the VM is running, regardless of the
+          // current setting. The QGA install is idempotent
+          // (the `grep -qxF … || echo …` pipeline in
+          // `install_default_key` makes it safe to re-run),
+          // and this is the only UI path for the
+          // chicken-and-egg case: a user with a v2.3.4 VM
+          // (per-Bot key in authorized_keys) who upgrades to
+          // v2.3.5 sees the setting flip to `true` via the
+          // migration, but the per-Bot key is still the
+          // only one in the VM. They need this button to
+          // bootstrap. After a successful install, the
+          // button stays visible (the user can re-run to
+          // confirm) but is no-op.
+          computer.state === "running"
             ? handleInstallDefaultKey
             : undefined
         }
@@ -610,9 +624,20 @@ function FullComputerPanel({
                   className="computer-panel__error-detail"
                   style={{ opacity: 0.7, marginTop: 8 }}
                 >
+                  {/* v2.3.6: hint updated. v2.3.5 hides the
+                    passphrase field when the default-key
+                    flag is on, so the v2.3.4 hint
+                    ("check the passphrase") is no longer
+                    actionable for the common case. Point
+                    users at the install-default-key button
+                    (which is always visible on a running
+                    VM) and the terminal smoke test. */}
                   Most common cause: the SSH tunnel could not
-                  authenticate. Check Settings → Computer →
-                  passphrase, then re-open the panel.
+                  authenticate. Try the terminal smoke test
+                  (<code>ssh crispy</code>) from your shell —
+                  if that works, click "Use my default key"
+                  in the toolbar to bootstrap the VM's
+                  <code>authorized_keys</code> for MaxBot.
                 </div>
               </div>
             ) : (

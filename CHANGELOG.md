@@ -4,6 +4,45 @@ All notable changes to MaxBot are documented in this file. The format
 follows [Keep a Changelog](https://keepachangelog.com/) and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## v2.3.6 — 2026-09-09
+
+### Fixed
+- **"Use my default key" button was hidden for
+  upgraded installs.** v2.3.5's migration defaults
+  `computer_use_default_ssh_key` to `true`, but the
+  toolbar button was gated on the inverse
+  (`!settings.computer_use_default_ssh_key`), so a
+  user with a pre-v2.3.5 VM (per-Bot key in
+  `authorized_keys`) could never see the button that
+  bootstraps the default key. v2.3.6 shows the button
+  whenever the VM is `running` — the QGA install is
+  idempotent, so re-clicking is safe. After a
+  successful install, the button stays visible (the
+  user can re-run to confirm) but is effectively a
+  no-op.
+- **Provision still required a passphrase even when
+  the default-key flag was on.** v2.3.5 hid the
+  passphrase field in the Settings UI when the flag
+  was true, but the provision flow in
+  `ComputerManager::provision` still bailed with
+  `PassphraseMissing` on an empty passphrase — so new
+  installs could provision zero Bots. v2.3.6
+  extracts the passphrase decision into
+  `resolve_provision_passphrase(&Settings)`: when the
+  default-key flag is on, the per-Bot key is still
+  encrypted+stored (so the user can toggle the flag
+  off without re-provisioning), but the passphrase
+  is a deterministic placeholder instead of the
+  user's (empty) value. The placeholder is never
+  used to decrypt on the hot path.
+- **Stale "Check Settings → Computer → passphrase"
+  hint in the Console error banner.** v2.3.5 hides
+  the passphrase field, so the v2.3.4 hint was
+  pointing users at a control that no longer exists.
+  v2.3.6 points users at the install-default-key
+  button (always visible on a running VM) and the
+  `ssh crispy` terminal smoke test.
+
 ## v2.3.5 — 2026-09-09
 
 ### Added

@@ -280,16 +280,29 @@ impl ComputerManager {
         //    computer row.
         match result {
             Ok(r) => {
-                // Encrypt the per-Bot key. We need the
-                // user's passphrase; if they haven't
-                // set one, fail with a clear error.
-                let passphrase = {
-                    let s = db.load_settings()?;
-                    s.computer_passphrase.clone()
-                };
-                if passphrase.is_empty() {
-                    return Err(ComputerError::PassphraseMissing);
-                }
+                // Encrypt the per-Bot key. When the
+                // v2.3.5 default-key flag is on, the
+                // per-Bot key is never read on the hot
+                // path — ssh falls back to the user's
+                // default key. We still want to encrypt
+                // + store it (so the user can toggle
+                // back to the per-Bot path without
+                // re-provisioning), but the "passphrase"
+                // becomes a deterministic placeholder.
+                // This is safe because (a) the data is
+                // never decrypted on the hot path and
+                // (b) the local DB is per-user protected
+                // by macOS file-protection class.
+                //
+                // When the flag is off, fall back to the
+                // user-set passphrase (v2.3.4 behavior).
+                // Empty passphrase + flag off = the user
+                // hasn't configured the per-Bot path
+                // yet, so we error with the same
+                // v2.3.4 `PassphraseMissing`.
+                let settings = db.load_settings()?;
+                let passphrase = resolve_provision_passphrase(&settings)
+                    .ok_or(ComputerError::PassphraseMissing)?;
                 let ciphertext =
                     keys::encrypt_private(&r.pkcs8_private_key, &passphrase)
                         .map_err(ComputerError::from)?;
@@ -676,6 +689,30 @@ fn parse_port_range(s: &str) -> (u16, u16) {
     (5900, 5999)
 }
 
+/// v2.3.5/v2.3.6: pick the passphrase used to encrypt
+/// the per-Bot SSH key during provisioning. Returns
+/// `None` when the user hasn't configured the per-Bot
+/// path and the default-key flag is off — the caller
+/// surfaces `ComputerError::PassphraseMissing`.
+///
+/// The default-key flag is on (v2.3.5 default for new
+/// installs and the post-migration value for upgraded
+/// installs), so the placeholder is the common path.
+/// The per-Bot key is still encrypted+stored for
+/// backwards compat (the user can toggle the flag off
+/// without re-provisioning), but the placeholder
+/// passphrase is reproducible across launches and is
+/// never used to decrypt.
+fn resolve_provision_passphrase(s: &Settings) -> Option<String> {
+    if s.computer_use_default_ssh_key {
+        Some("default-key-path-no-passphrase-needed".to_string())
+    } else if s.computer_passphrase.is_empty() {
+        None
+    } else {
+        Some(s.computer_passphrase.clone())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -702,6 +739,55 @@ mod tests {
         assert_eq!(ComputerState::Running.as_str(), "running");
         assert_eq!(ComputerState::Stopped.as_str(), "stopped");
         assert_eq!(ComputerState::Error.as_str(), "error");
+    }
+
+    // ----- v2.3.6: provision-passphrase resolver -----
+
+    #[test]
+    fn provision_passphrase_uses_placeholder_when_default_key_on() {
+        // The default-key flag is on (the v2.3.5
+        // post-migration default — applied via the
+        // serde default fn, not `Default::default()`)
+        // and the user hasn't set a passphrase. The
+        // provision flow must succeed — we can't gate
+        // creation on a passphrase the user has no UI
+        // to set.
+        let mut s = Settings::default();
+        s.computer_use_default_ssh_key = true;
+        assert!(s.computer_use_default_ssh_key);
+        assert!(s.computer_passphrase.is_empty());
+        let pw = resolve_provision_passphrase(&s);
+        assert_eq!(
+            pw.as_deref(),
+            Some("default-key-path-no-passphrase-needed"),
+            "default-key on must yield a non-empty placeholder, not None"
+        );
+    }
+
+    #[test]
+    fn provision_passphrase_returns_none_when_per_bot_path_unconfigured() {
+        // Legacy per-Bot path: flag off, no passphrase
+        // set. The provision flow must fail with
+        // `PassphraseMissing` so the user gets a clear
+        // error.
+        let mut s = Settings::default();
+        s.computer_use_default_ssh_key = false;
+        s.computer_passphrase = String::new();
+        assert!(resolve_provision_passphrase(&s).is_none());
+    }
+
+    #[test]
+    fn provision_passphrase_uses_user_value_when_per_bot_path_configured() {
+        // Legacy per-Bot path: flag off, passphrase
+        // set. Provision uses the user's passphrase
+        // (v2.3.4 behavior).
+        let mut s = Settings::default();
+        s.computer_use_default_ssh_key = false;
+        s.computer_passphrase = "user-pass-2026".into();
+        assert_eq!(
+            resolve_provision_passphrase(&s).as_deref(),
+            Some("user-pass-2026"),
+        );
     }
 
     // ----- v2.0.2 smoke test: end-to-end provision against the
