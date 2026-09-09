@@ -125,8 +125,12 @@ pub fn run() {
 /// only for fields the user hasn't already set. Recognized keys:
 ///
 /// - `MINIMAX_API_KEY` → `Settings::minimax_api_key`
-/// - `SAND_MINIMAX_BASE_URL` → `Settings::base_url`
+/// - `OPENAI_API_KEY` → `Settings::openai_api_key`
+/// - `ANTHROPIC_API_KEY` → `Settings::anthropic_api_key`
+/// - `XAI_API_KEY` → `Settings::xai_api_key`
+/// - `SAND_MINIMAX_BASE_URL` → `Settings::minimax_base_url`
 /// - `SAND_MINIMAX_MODEL` → `Settings::default_model`
+/// - `MAXBOT_PROVIDER` → `Settings::provider_kind`
 ///
 /// We deliberately do *not* overwrite an existing SQLite value with the
 /// env value: once the user has set a key via the Settings UI, that
@@ -145,37 +149,44 @@ fn seed_settings_from_env(db: &Database) {
         }
     };
     let mut changed = false;
-    if settings
-        .minimax_api_key
-        .as_deref()
-        .map_or(true, str::is_empty)
-    {
-        if let Some(v) = env.get("MINIMAX_API_KEY") {
-            if !v.is_empty() {
-                log::info!("env_loader: seeded MINIMAX_API_KEY from .env");
-                settings.minimax_api_key = Some(v.clone());
-                changed = true;
+
+    // Helper: if the SQLite field is empty, take from .env.
+    let mut seed_optional_string = |field: &mut Option<String>,
+                                    key: &str,
+                                    log_label: &str|
+     -> bool {
+        if field.as_deref().map_or(true, str::is_empty) {
+            if let Some(v) = env.get(key) {
+                if !v.is_empty() {
+                    log::info!("env_loader: seeded {log_label} from .env");
+                    *field = Some(v.clone());
+                    return true;
+                }
             }
         }
-    }
-    if settings.base_url.is_empty() {
-        if let Some(v) = env.get("SAND_MINIMAX_BASE_URL") {
-            if !v.is_empty() {
-                log::info!("env_loader: seeded SAND_MINIMAX_BASE_URL from .env");
-                settings.base_url = v.clone();
-                changed = true;
+        false
+    };
+    let mut seed_string = |field: &mut String, key: &str, log_label: &str| -> bool {
+        if field.is_empty() {
+            if let Some(v) = env.get(key) {
+                if !v.is_empty() {
+                    log::info!("env_loader: seeded {log_label} from .env");
+                    *field = v.clone();
+                    return true;
+                }
             }
         }
-    }
-    if settings.default_model.is_empty() {
-        if let Some(v) = env.get("SAND_MINIMAX_MODEL") {
-            if !v.is_empty() {
-                log::info!("env_loader: seeded SAND_MINIMAX_MODEL from .env");
-                settings.default_model = v.clone();
-                changed = true;
-            }
-        }
-    }
+        false
+    };
+
+    changed |= seed_optional_string(&mut settings.minimax_api_key, "MINIMAX_API_KEY", "MINIMAX_API_KEY");
+    changed |= seed_optional_string(&mut settings.openai_api_key, "OPENAI_API_KEY", "OPENAI_API_KEY");
+    changed |= seed_optional_string(&mut settings.anthropic_api_key, "ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY");
+    changed |= seed_optional_string(&mut settings.xai_api_key, "XAI_API_KEY", "XAI_API_KEY");
+    changed |= seed_string(&mut settings.minimax_base_url, "SAND_MINIMAX_BASE_URL", "SAND_MINIMAX_BASE_URL");
+    changed |= seed_string(&mut settings.default_model, "SAND_MINIMAX_MODEL", "SAND_MINIMAX_MODEL");
+    changed |= seed_string(&mut settings.provider_kind, "MAXBOT_PROVIDER", "MAXBOT_PROVIDER");
+
     if changed {
         if let Err(e) = db.save_settings(&settings) {
             log::warn!("env_loader: could not save seeded settings: {e}");

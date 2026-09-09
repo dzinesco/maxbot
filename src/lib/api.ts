@@ -25,16 +25,140 @@ export interface Conversation {
   bot_id: string | null;
 }
 
+export type ProviderKind = "minimax" | "openai" | "anthropic" | "xai";
+
 export interface Settings {
+  /** Which LLM provider to use by default. */
+  provider_kind: ProviderKind | string;
+  /** MiniMax API key. Null = not configured. */
   minimax_api_key: string | null;
+  /** OpenAI API key (`sk-…`). Null = not configured. */
+  openai_api_key: string | null;
+  /** Anthropic API key (`sk-ant-…`). Null = not configured. */
+  anthropic_api_key: string | null;
+  /** xAI API key (`xai-…`). Null = not configured. */
+  xai_api_key: string | null;
+  /** Default model id for the active provider. Empty = provider default. */
   default_model: string;
-  base_url: string;
+  /** Base URL override for MiniMax. Empty = international endpoint. */
+  minimax_base_url: string;
+  /** Base URL override for OpenAI. Empty = api.openai.com/v1. */
+  openai_base_url: string;
+  /** Base URL override for Anthropic. Empty = api.anthropic.com. */
+  anthropic_base_url: string;
+  /** Base URL override for xAI. Empty = api.x.ai/v1. */
+  xai_base_url: string;
+}
+
+export interface ProviderPreset {
+  /** Stable key, also the Settings.provider_kind value. */
+  kind: ProviderKind;
+  /** Human-friendly name for the dropdown. */
+  display_name: string;
+  /** Default model id when the user hasn't picked one. */
+  default_model: string;
+  /** Built-in default base URL. */
+  default_base_url: string;
+  /** Hint shown next to the API key field. */
+  key_hint: string;
+  /** Placeholder text in the API key input. */
+  key_placeholder: string;
+  /** Short note explaining the provider. */
+  description: string;
+}
+
+export const PROVIDER_PRESETS: ProviderPreset[] = [
+  {
+    kind: "minimax",
+    display_name: "MiniMax (MiniMax-M3)",
+    default_model: "MiniMax-M3",
+    default_base_url: "https://api.minimax.io/v1",
+    key_hint: "Find it at minimax.io → API Keys.",
+    key_placeholder: "eyJ…",
+    description: "MiniMax — 1M context, tool use, vision.",
+  },
+  {
+    kind: "openai",
+    display_name: "OpenAI (gpt-4o, o1, …)",
+    default_model: "gpt-4o",
+    default_base_url: "https://api.openai.com/v1",
+    key_hint: "platform.openai.com → API keys.",
+    key_placeholder: "sk-…",
+    description: "OpenAI — gpt-4o, gpt-4o-mini, o1, o1-mini.",
+  },
+  {
+    kind: "anthropic",
+    display_name: "Anthropic (Claude 3.5 / 3.7)",
+    default_model: "claude-3-5-sonnet-latest",
+    default_base_url: "https://api.anthropic.com",
+    key_hint: "console.anthropic.com → Settings → API Keys.",
+    key_placeholder: "sk-ant-…",
+    description: "Anthropic Claude — separate messages API.",
+  },
+  {
+    kind: "xai",
+    display_name: "xAI (Grok 2 / Grok 2 Vision)",
+    default_model: "grok-2-latest",
+    default_base_url: "https://api.x.ai/v1",
+    key_hint: "console.x.ai → API Keys.",
+    key_placeholder: "xai-…",
+    description: "xAI Grok — OpenAI-compatible, fast.",
+  },
+];
+
+export function presetFor(kind: string): ProviderPreset {
+  return (
+    PROVIDER_PRESETS.find((p) => p.kind === kind) ?? PROVIDER_PRESETS[0]
+  );
+}
+
+/** Returns the API key field for a given provider kind. */
+export function apiKeyFor(settings: Settings, kind: ProviderKind | string): string | null {
+  switch (kind) {
+    case "openai":
+      return settings.openai_api_key;
+    case "anthropic":
+      return settings.anthropic_api_key;
+    case "xai":
+      return settings.xai_api_key;
+    case "minimax":
+    default:
+      return settings.minimax_api_key;
+  }
+}
+
+/** Returns the base URL override field for a given provider kind. */
+export function baseUrlFor(settings: Settings, kind: ProviderKind | string): string {
+  switch (kind) {
+    case "openai":
+      return settings.openai_base_url;
+    case "anthropic":
+      return settings.anthropic_base_url;
+    case "xai":
+      return settings.xai_base_url;
+    case "minimax":
+    default:
+      return settings.minimax_base_url;
+  }
+}
+
+/** True if the active provider has a non-empty API key. */
+export function isConfigured(settings: Settings): boolean {
+  const k = apiKeyFor(settings, settings.provider_kind);
+  return typeof k === "string" && k.length > 0;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
+  provider_kind: "minimax",
   minimax_api_key: null,
+  openai_api_key: null,
+  anthropic_api_key: null,
+  xai_api_key: null,
   default_model: "MiniMax-M3",
-  base_url: "",
+  minimax_base_url: "",
+  openai_base_url: "",
+  anthropic_base_url: "",
+  xai_base_url: "",
 };
 
 export type StreamChunk =

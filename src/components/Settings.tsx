@@ -1,5 +1,13 @@
-import { useEffect, useState } from "react";
-import type { McpServerInfo, Settings as SettingsT } from "../lib/api";
+import { useEffect, useMemo, useState } from "react";
+import type { McpServerInfo, ProviderKind, Settings as SettingsT } from "../lib/api";
+import {
+  apiKeyFor,
+  baseUrlFor,
+  DEFAULT_SETTINGS,
+  isConfigured,
+  presetFor,
+  PROVIDER_PRESETS,
+} from "../lib/api";
 import { ComputerUseSettings } from "./ComputerUseSettings";
 import { listMcpServers } from "../lib/tauri";
 
@@ -10,14 +18,44 @@ interface SettingsProps {
 }
 
 export function Settings({ initial, onClose, onSave }: SettingsProps) {
-  const [apiKey, setApiKey] = useState(initial.minimax_api_key ?? "");
-  const [defaultModel, setDefaultModel] = useState(
-    initial.default_model || "MiniMax-M3",
+  // Merge with defaults so older settings blobs (pre-multi-provider)
+  // render without "undefined" fields.
+  const base: SettingsT = useMemo(() => ({ ...DEFAULT_SETTINGS, ...initial }), [initial]);
+  const [providerKind, setProviderKind] = useState<ProviderKind | string>(
+    base.provider_kind || "minimax",
   );
-  const [baseUrl, setBaseUrl] = useState(initial.base_url ?? "");
+  const [apiKey, setApiKey] = useState(apiKeyFor(base, providerKind) ?? "");
+  const [defaultModel, setDefaultModel] = useState(
+    base.default_model || presetFor(providerKind).default_model,
+  );
+  const [baseUrl, setBaseUrl] = useState(baseUrlFor(base, providerKind));
+  const [extraKeys, setExtraKeys] = useState<Record<string, string>>(() => ({
+    openai: base.openai_api_key ?? "",
+    anthropic: base.anthropic_api_key ?? "",
+    xai: base.xai_api_key ?? "",
+  }));
+  const [extraBaseUrls, setExtraBaseUrls] = useState<Record<string, string>>(() => ({
+    openai: base.openai_base_url ?? "",
+    anthropic: base.anthropic_base_url ?? "",
+    xai: base.xai_base_url ?? "",
+  }));
+  const [showAdvanced, setShowAdvanced] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [mcpServers, setMcpServers] = useState<McpServerInfo[] | null>(null);
+
+  const preset = presetFor(providerKind);
+
+  useEffect(() => {
+    // When the user switches providers, refresh the visible fields
+    // from the saved settings and from the new preset's defaults.
+    setApiKey(apiKeyFor(base, providerKind) ?? "");
+    setBaseUrl(baseUrlFor(base, providerKind));
+    if (!base.default_model) {
+      setDefaultModel(presetFor(providerKind).default_model);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [providerKind]);
 
   useEffect(() => {
     listMcpServers()
@@ -29,11 +67,37 @@ export function Settings({ initial, onClose, onSave }: SettingsProps) {
     setError(null);
     setSaving(true);
     try {
-      await onSave({
-        minimax_api_key: apiKey.trim() ? apiKey.trim() : null,
+      // Build the per-provider payload: the active provider's fields
+      // come from the visible inputs; the inactive providers keep
+      // their stored values.
+      const merged: SettingsT = {
+        ...base,
+        provider_kind: providerKind,
         default_model: defaultModel.trim(),
-        base_url: baseUrl.trim(),
-      });
+        minimax_api_key:
+          providerKind === "minimax"
+            ? apiKey.trim() || null
+            : base.minimax_api_key,
+        openai_api_key:
+          providerKind === "openai"
+            ? apiKey.trim() || null
+            : extraKeys.openai.trim() || null,
+        anthropic_api_key:
+          providerKind === "anthropic"
+            ? apiKey.trim() || null
+            : extraKeys.anthropic.trim() || null,
+        xai_api_key:
+          providerKind === "xai" ? apiKey.trim() || null : extraKeys.xai.trim() || null,
+        minimax_base_url:
+          providerKind === "minimax" ? baseUrl.trim() : base.minimax_base_url,
+        openai_base_url:
+          providerKind === "openai" ? baseUrl.trim() : extraBaseUrls.openai.trim(),
+        anthropic_base_url:
+          providerKind === "anthropic" ? baseUrl.trim() : extraBaseUrls.anthropic.trim(),
+        xai_base_url:
+          providerKind === "xai" ? baseUrl.trim() : extraBaseUrls.xai.trim(),
+      };
+      await onSave(merged);
       onClose();
     } catch (e) {
       setError(String(e));
@@ -42,28 +106,42 @@ export function Settings({ initial, onClose, onSave }: SettingsProps) {
     }
   };
 
+  const canSave = apiKey.trim().length > 0;
+
   return (
     <div className="modal-overlay" onClick={onClose}>
       <div
         className="modal"
-        style={{ width: 620 }}
+        style={{ width: 660 }}
         onClick={(e) => e.stopPropagation()}
       >
         <h2>Settings — MaxBot</h2>
 
         <div className="field">
-          <label>MiniMax API key</label>
+          <label>LLM provider</label>
+          <select
+            value={providerKind}
+            onChange={(e) => setProviderKind(e.target.value)}
+          >
+            {PROVIDER_PRESETS.map((p) => (
+              <option key={p.kind} value={p.kind}>
+                {p.display_name}
+              </option>
+            ))}
+          </select>
+          <div className="hint">{preset.description}</div>
+        </div>
+
+        <div className="field">
+          <label>{preset.display_name} API key</label>
           <input
             type="password"
             value={apiKey}
             onChange={(e) => setApiKey(e.target.value)}
-            placeholder="eyJ…"
+            placeholder={preset.key_placeholder}
             autoFocus
           />
-          <div className="hint">
-            Saved to <code>~/Library/Application Support/com.maxbot.app/maxbot.sqlite</code>.
-            Also picked up from <code>MINIMAX_API_KEY</code> in the app environment.
-          </div>
+          <div className="hint">{preset.key_hint}</div>
         </div>
 
         <div className="field">
@@ -72,11 +150,10 @@ export function Settings({ initial, onClose, onSave }: SettingsProps) {
             type="text"
             value={defaultModel}
             onChange={(e) => setDefaultModel(e.target.value)}
-            placeholder="MiniMax-M3"
+            placeholder={preset.default_model}
           />
           <div className="hint">
-            MiniMax-M3 (1M ctx, tools + vision), MiniMax-M2.7 (204K, tools),
-            or MiniMax-M2.7-highspeed (fastest).
+            Leave blank to use <code>{preset.default_model}</code>.
           </div>
         </div>
 
@@ -86,13 +163,53 @@ export function Settings({ initial, onClose, onSave }: SettingsProps) {
             type="text"
             value={baseUrl}
             onChange={(e) => setBaseUrl(e.target.value)}
-            placeholder="https://api.minimax.io/v1"
+            placeholder={preset.default_base_url}
           />
           <div className="hint">
-            Leave empty for the international endpoint. Set to
-            <code> https://api.minimaxi.com/v1</code> for the China region, or
-            a self-hosted proxy URL.
+            Leave blank for the built-in default. Set to a self-hosted
+            proxy or alternate region endpoint if needed.
           </div>
+        </div>
+
+        <div className="field">
+          <button
+            type="button"
+            className="link-button"
+            onClick={() => setShowAdvanced((v) => !v)}
+            style={{ padding: 0, background: "none", border: "none", color: "var(--accent)", cursor: "pointer" }}
+          >
+            {showAdvanced ? "▾" : "▸"} Configure other providers
+          </button>
+          {showAdvanced && (
+            <div style={{ marginTop: 8, display: "grid", gap: 12 }}>
+              {PROVIDER_PRESETS.filter((p) => p.kind !== providerKind).map((p) => (
+                <div key={p.kind} className="other-provider">
+                  <div className="other-provider-label">{p.display_name}</div>
+                  <input
+                    type="password"
+                    value={extraKeys[p.kind] ?? ""}
+                    onChange={(e) =>
+                      setExtraKeys((prev) => ({ ...prev, [p.kind]: e.target.value }))
+                    }
+                    placeholder={`${p.kind} API key`}
+                  />
+                  <input
+                    type="text"
+                    value={extraBaseUrls[p.kind] ?? ""}
+                    onChange={(e) =>
+                      setExtraBaseUrls((prev) => ({ ...prev, [p.kind]: e.target.value }))
+                    }
+                    placeholder={p.default_base_url}
+                  />
+                </div>
+              ))}
+              <div className="hint">
+                Pre-stash keys here so switching providers is one click
+                in the dropdown. Keys are saved to the same SQLite blob
+                as the active provider's key.
+              </div>
+            </div>
+          )}
         </div>
 
         <hr
@@ -157,7 +274,8 @@ export function Settings({ initial, onClose, onSave }: SettingsProps) {
           <button
             className="primary"
             onClick={submit}
-            disabled={saving || !apiKey.trim()}
+            disabled={saving || !canSave}
+            title={!canSave ? "Enter an API key for the selected provider" : undefined}
           >
             {saving ? "Saving…" : "Save"}
           </button>
@@ -166,3 +284,8 @@ export function Settings({ initial, onClose, onSave }: SettingsProps) {
     </div>
   );
 }
+
+// Re-export the isConfigured helper so App.tsx can use the same
+// "is the active provider keyed" check without importing from api
+// twice. (Pure re-export keeps the existing import surface small.)
+export { isConfigured };

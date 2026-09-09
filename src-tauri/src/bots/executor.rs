@@ -24,8 +24,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::bots::{Bot, BotRun, BotRunStatus, registry_for};
-use crate::llm::minimax::{MiniMaxProvider, DEFAULT_MODEL as DEFAULT_MINIMAX_MODEL};
-use crate::llm::provider::{ChatMessage, ChatRequest, Provider};
+use crate::llm::provider::{provider_for_settings, ChatMessage, ChatRequest, Provider};
 use crate::llm::stream::{StreamChunk, StreamError};
 use crate::storage::{MessageRole, PersistedToolCall};
 use crate::tools::registry::ToolRegistry;
@@ -191,18 +190,28 @@ pub async fn run_bot_once(
             );
         }
     };
-    let model = if bot.default_model.is_empty() {
-        DEFAULT_MINIMAX_MODEL.to_string()
-    } else {
+    // Build the provider from the active settings (`provider_kind` +
+    // per-provider key + base URL). Bots inherit the global provider
+    // config; only the model id is per-bot.
+    let provider: Arc<dyn Provider> = match provider_for_settings(&settings) {
+        Ok(p) => p,
+        Err(e) => {
+            return fail_run(&app, &state, &mut run, e);
+        }
+    };
+    // Model precedence: bot.default_model > settings.default_model >
+    // provider's built-in default.
+    let model = if !bot.default_model.trim().is_empty() {
         bot.default_model.clone()
+    } else if !settings.default_model.trim().is_empty() {
+        settings.default_model.clone()
+    } else {
+        provider.default_model().to_string()
     };
-    let provider: Arc<dyn Provider> = match settings.base_url.is_empty() {
-        true => Arc::new(MiniMaxProvider::new(api_key)),
-        false => Arc::new(MiniMaxProvider::with_base_url(
-            api_key,
-            settings.base_url.clone(),
-        )),
-    };
+    // Keep the api_key binding alive so the compiler doesn't warn about
+    // an unused variable — the per-provider factory now picks the right
+    // key from settings, so we don't reference `api_key` directly.
+    let _ = api_key;
 
     // 3. Build the bot's tool registry (filtered to its allowlist).
     let bot_registry = registry_for(&bot, &full_tool_registry);

@@ -25,8 +25,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use tokio_util::sync::CancellationToken;
 
-use crate::llm::minimax::{MiniMaxProvider, DEFAULT_MODEL as DEFAULT_MINIMAX_MODEL};
-use crate::llm::provider::{ChatMessage, ChatRequest, Provider, ToolDefinition};
+use crate::llm::provider::{provider_for_settings, ChatMessage, ChatRequest, Provider, ToolDefinition};
 use crate::llm::stream::{StreamChunk, StreamError};
 use crate::storage::{Database, MessageRole, PersistedToolCall};
 use crate::tools::tool::{ToolContext, ToolInvocation};
@@ -239,29 +238,29 @@ async fn prepare_and_spawn_loop(
     assistant_message_id: String,
     request_id: String,
 ) -> Result<(), String> {
-    // Load settings and build the provider.
+    // Load settings and build the provider. `provider_for_settings`
+    // honors `Settings::provider_kind` and routes to MiniMax, OpenAI,
+    // Anthropic, or xAI with the matching API key + base URL.
     let db = state.db.clone();
     let settings = tokio::task::spawn_blocking(move || db.load_settings())
         .await
         .map_err(|e| e.to_string())?
         .map_err(|e| e.to_string())?;
-    let api_key = settings
-        .minimax_api_key
-        .clone()
-        .ok_or_else(|| "set your MiniMax API key in Settings first".to_string())?;
-    let base_url = if settings.base_url.is_empty() {
-        None
-    } else {
-        Some(settings.base_url.clone())
+    let provider: Arc<dyn Provider> = match provider_for_settings(&settings) {
+        Ok(p) => p,
+        Err(e) => {
+            log::warn!("chat: provider setup failed: {e}");
+            return Err(e);
+        }
     };
     let model = if settings.default_model.is_empty() {
-        DEFAULT_MINIMAX_MODEL.to_string()
+        // Fall back to the active provider's built-in default if the
+        // user hasn't picked a model explicitly. The provider's
+        // `default_model()` reflects the right namespace (gpt-4o,
+        // claude-3-5-sonnet-latest, …).
+        provider.default_model().to_string()
     } else {
         settings.default_model.clone()
-    };
-    let provider: Arc<dyn Provider> = match base_url {
-        Some(url) => Arc::new(MiniMaxProvider::with_base_url(api_key, url)),
-        None => Arc::new(MiniMaxProvider::new(api_key)),
     };
 
     // Build the initial history (everything already in the conversation

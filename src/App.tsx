@@ -44,6 +44,7 @@ import {
 import {
   blankBot,
   DEFAULT_SETTINGS,
+  isConfigured,
   type Bot,
   type BotChunkEvent,
   type BotDoneEvent,
@@ -435,7 +436,7 @@ export default function App() {
   const handleSend = useCallback(
     async (content: string) => {
       if (!activeId) return;
-      if (!settings.minimax_api_key) {
+      if (!isConfigured(settings)) {
         setSettingsOpen(true);
         return;
       }
@@ -802,7 +803,7 @@ export default function App() {
   const status = useMemo<"online" | "missing" | "checking">(() => {
     if (bootError) return "missing";
     if (!settings) return "checking";
-    return settings.minimax_api_key ? "online" : "missing";
+    return isConfigured(settings) ? "online" : "missing";
   }, [bootError, settings]);
 
   return (
@@ -887,9 +888,9 @@ export default function App() {
           <div className="main-empty">
             <h1>MaxBot</h1>
             <p>
-              A MiniMax-first chat client. Type a message below to start.
+              A multi-provider AI desktop client. Type a message below to start.
               {status === "missing"
-                ? " Set your MiniMax API key in Settings to begin."
+                ? " Set your LLM provider API key in Settings to begin."
                 : ""}
             </p>
             {bootError && (

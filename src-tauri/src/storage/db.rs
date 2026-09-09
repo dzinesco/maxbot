@@ -76,20 +76,52 @@ pub struct Conversation {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Settings {
+    /// Which LLM provider to use by default for new chats and bot runs.
+    /// One of: "minimax" (default), "openai", "anthropic", "xai". Lowercase
+    /// string so adding a new provider doesn't require a DB migration —
+    /// unknown values fall back to MiniMax.
+    #[serde(default)]
+    pub provider_kind: String,
+
+    // ---- Per-provider API keys ----
     /// MiniMax API key. Stored unencrypted at rest in the local SQLite DB
     /// (which lives in the per-user Application Support directory with the
-    /// default macOS file protection class). For higher security, swap this
-    /// for the system Keychain — TODO once we have a settings UI that
-    /// surfaces the tradeoff.
+    /// default macOS file protection class). For higher security, swap
+    /// these for the system Keychain — TODO once the Settings UI surfaces
+    /// the tradeoff.
+    #[serde(default)]
     pub minimax_api_key: Option<String>,
-    /// Default model id (e.g. "MiniMax-M3"). Empty string falls back to the
-    /// provider's `default_model()`.
+    /// OpenAI API key (`sk-…`). None = this provider isn't configured.
+    #[serde(default)]
+    pub openai_api_key: Option<String>,
+    /// Anthropic API key (`sk-ant-…`). None = not configured.
+    #[serde(default)]
+    pub anthropic_api_key: Option<String>,
+    /// xAI API key (`xai-…`). None = not configured.
+    #[serde(default)]
+    pub xai_api_key: Option<String>,
+
+    // ---- Per-provider base URL overrides ----
+    /// Default model id for the active provider (e.g. "MiniMax-M3",
+    /// "gpt-4o", "claude-3-5-sonnet-latest", "grok-2-latest"). Empty
+    /// string falls back to the active provider's `default_model()`.
     #[serde(default)]
     pub default_model: String,
     /// Base URL override for MiniMax. Empty string uses the international
-    /// endpoint at api.minimax.io.
+    /// endpoint at api.minimax.io. Old settings blobs that used
+    /// `base_url` deserialize into this field via the `alias`.
+    #[serde(default, alias = "base_url")]
+    pub minimax_base_url: String,
+    /// Base URL override for OpenAI. Empty = `https://api.openai.com/v1`.
     #[serde(default)]
-    pub base_url: String,
+    pub openai_base_url: String,
+    /// Base URL override for Anthropic. Empty = `https://api.anthropic.com`
+    /// (the path `/v1/messages` is appended automatically).
+    #[serde(default)]
+    pub anthropic_base_url: String,
+    /// Base URL override for xAI. Empty = `https://api.x.ai/v1`.
+    #[serde(default)]
+    pub xai_base_url: String,
 }
 
 pub struct Database {

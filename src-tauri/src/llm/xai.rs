@@ -1,10 +1,9 @@
-//! MiniMax chat-completions provider.
+//! xAI (Grok) chat-completions provider.
 //!
-//! Targets the international endpoint at `https://api.minimax.io/v1` by
-//! default. Override with `SAND_MINIMAX_BASE_URL` (e.g. for the China
-//! region `https://api.minimaxi.com/v1` or a self-hosted proxy). The
-//! protocol is OpenAI-compatible, so all the wire-level translation
-//! lives in `openai_compat.rs`.
+//! Targets `https://api.x.ai/v1` by default. Wire format is OpenAI
+//! chat completions, so all the heavy lifting lives in
+//! `openai_compat.rs`. Models: `grok-2-latest`, `grok-2-vision-latest`,
+//! `grok-beta`.
 
 use std::pin::Pin;
 use std::sync::Arc;
@@ -17,28 +16,19 @@ use super::openai_compat;
 use super::provider::{ChatRequest, Provider, ProviderKind};
 use super::stream::{StreamChunk, StreamError};
 
-/// Default base URL. The MiniMax international endpoint.
-pub const DEFAULT_BASE_URL: &str = "https://api.minimax.io/v1";
-/// Default model. Newest, 1M context, supports tools/vision.
-pub const DEFAULT_MODEL: &str = "MiniMax-M3";
+pub const DEFAULT_BASE_URL: &str = "https://api.x.ai/v1";
+pub const DEFAULT_MODEL: &str = "grok-2-latest";
 
 #[derive(Clone)]
-pub struct MiniMaxProvider {
+pub struct XaiProvider {
     pub api_key: Arc<str>,
     pub base_url: Arc<str>,
+    pub model: Arc<str>,
     pub http: Client,
 }
 
-impl MiniMaxProvider {
-    pub fn new(api_key: String) -> Self {
-        let base_url = std::env::var("SAND_MINIMAX_BASE_URL")
-            .ok()
-            .filter(|v| !v.is_empty())
-            .unwrap_or_else(|| DEFAULT_BASE_URL.to_string());
-        Self::with_base_url(api_key, base_url)
-    }
-
-    pub fn with_base_url(api_key: String, base_url: String) -> Self {
+impl XaiProvider {
+    pub fn with_base_url(api_key: String, base_url: String, model: String) -> Self {
         let http = Client::builder()
             .user_agent("MaxBot/0.1 (https://maxbot.app)")
             .build()
@@ -46,6 +36,7 @@ impl MiniMaxProvider {
         Self {
             api_key: Arc::from(api_key),
             base_url: Arc::from(base_url),
+            model: Arc::from(model),
             http,
         }
     }
@@ -56,13 +47,13 @@ impl MiniMaxProvider {
 }
 
 #[async_trait]
-impl Provider for MiniMaxProvider {
+impl Provider for XaiProvider {
     fn name(&self) -> &'static str {
-        "minimax"
+        "xai"
     }
 
     fn kind(&self) -> ProviderKind {
-        ProviderKind::MiniMax
+        ProviderKind::Xai
     }
 
     fn default_model(&self) -> &'static str {
@@ -71,8 +62,11 @@ impl Provider for MiniMaxProvider {
 
     async fn stream(
         &self,
-        request: ChatRequest,
+        mut request: ChatRequest,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamChunk, StreamError>> + Send>>, StreamError> {
+        if request.model.trim().is_empty() {
+            request.model = self.model.to_string();
+        }
         openai_compat::stream_request(
             self.http.clone(),
             self.endpoint(),
