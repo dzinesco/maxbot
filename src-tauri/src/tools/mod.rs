@@ -11,6 +11,7 @@
 
 pub mod apple_script;
 pub mod apple_script_exec;
+pub mod browsers;
 pub mod calendar;
 pub mod clipboard;
 pub mod file_read;
@@ -24,6 +25,7 @@ pub mod system;
 pub mod tool;
 pub mod web_fetch;
 pub mod web_search;
+pub mod window;
 
 pub use registry::ToolRegistry;
 pub use tool::{Tool, ToolContext, ToolError, ToolResult};

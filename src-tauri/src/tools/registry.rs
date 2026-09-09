@@ -11,6 +11,10 @@ use serde_json::Value;
 use crate::llm::provider::ToolDefinition;
 
 use super::apple_script::AppleScriptRunTool;
+use super::browsers::{
+    ChromeCurrentUrlTool, ChromeExecJsTool, ChromeOpenTool, ChromeTabsTool, SafariCurrentUrlTool,
+    SafariExecJsTool, SafariOpenTool, SafariTabsTool,
+};
 use super::calendar::{CalendarCreateEventTool, CalendarTodayTool, CalendarWeekTool};
 use super::clipboard::{ClipboardReadTool, ClipboardWriteTool};
 use super::file_read::FileReadTool;
@@ -26,6 +30,7 @@ use super::system::{
 use super::tool::{Tool, ToolContext, ToolError, ToolInvocation, ToolResult};
 use super::web_fetch::WebFetchTool;
 use super::web_search::WebSearchTool;
+use super::window::{WindowFocusTool, WindowListTool};
 
 pub struct ToolRegistry {
     by_name: HashMap<&'static str, Arc<dyn Tool>>,
@@ -70,6 +75,17 @@ impl ToolRegistry {
             Arc::new(NotesSearchTool),
             Arc::new(NotesReadTool),
             Arc::new(NotesCreateTool),
+            // v0.4.3 — Browsers + Windows
+            Arc::new(SafariOpenTool),
+            Arc::new(SafariCurrentUrlTool),
+            Arc::new(SafariExecJsTool),
+            Arc::new(SafariTabsTool),
+            Arc::new(ChromeOpenTool),
+            Arc::new(ChromeCurrentUrlTool),
+            Arc::new(ChromeExecJsTool),
+            Arc::new(ChromeTabsTool),
+            Arc::new(WindowListTool),
+            Arc::new(WindowFocusTool),
         ];
         let mut by_name: HashMap<&'static str, Arc<dyn Tool>> = HashMap::new();
         for t in tools {
