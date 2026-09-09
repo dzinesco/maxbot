@@ -17,8 +17,6 @@ use super::openai_compat;
 use super::provider::{ChatRequest, Provider, ProviderKind};
 use super::stream::{StreamChunk, StreamError};
 
-/// Default base URL. The MiniMax international endpoint.
-pub const DEFAULT_BASE_URL: &str = "https://api.minimax.io/v1";
 /// Default model. Newest, 1M context, supports tools/vision.
 pub const DEFAULT_MODEL: &str = "MiniMax-M3";
 
@@ -30,14 +28,6 @@ pub struct MiniMaxProvider {
 }
 
 impl MiniMaxProvider {
-    pub fn new(api_key: String) -> Self {
-        let base_url = std::env::var("SAND_MINIMAX_BASE_URL")
-            .ok()
-            .filter(|v| !v.is_empty())
-            .unwrap_or_else(|| DEFAULT_BASE_URL.to_string());
-        Self::with_base_url(api_key, base_url)
-    }
-
     pub fn with_base_url(api_key: String, base_url: String) -> Self {
         let http = Client::builder()
             .user_agent("MaxBot/0.1 (https://maxbot.app)")

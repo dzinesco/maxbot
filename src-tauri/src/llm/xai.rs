@@ -16,7 +16,6 @@ use super::openai_compat;
 use super::provider::{ChatRequest, Provider, ProviderKind};
 use super::stream::{StreamChunk, StreamError};
 
-pub const DEFAULT_BASE_URL: &str = "https://api.x.ai/v1";
 pub const DEFAULT_MODEL: &str = "grok-2-latest";
 
 #[derive(Clone)]

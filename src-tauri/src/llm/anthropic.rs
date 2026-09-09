@@ -21,7 +21,6 @@ use serde::Deserialize;
 use super::provider::{ChatMessage, ChatRequest, Provider, ProviderKind};
 use super::stream::{StreamChunk, StreamError};
 
-pub const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 pub const DEFAULT_MODEL: &str = "claude-3-5-sonnet-latest";
 pub const ANTHROPIC_VERSION: &str = "2023-06-01";
 /// Anthropic requires `max_tokens` on every request. Pick something
@@ -37,10 +36,6 @@ pub struct AnthropicProvider {
 }
 
 impl AnthropicProvider {
-    pub fn new(api_key: String) -> Self {
-        Self::with_base_url(api_key, DEFAULT_BASE_URL.to_string())
-    }
-
     pub fn with_base_url(api_key: String, base_url: String) -> Self {
         let http = Client::builder()
             .user_agent("MaxBot/0.1 (https://maxbot.app)")
@@ -214,7 +209,15 @@ pub fn translate_event(event: Event) -> Result<StreamChunk, StreamError> {
     // type. Skip events that aren't meaningful to us (ping, etc.).
     let payload = event.data.trim();
     if payload.is_empty() {
-        return Err(StreamError::Protocol("empty SSE data".to_string()));
+        // Anthropic occasionally emits an empty-data event as a
+        // keep-alive or trailing marker. Treat that as a benign
+        // end-of-stream signal (a normal `Done`), not a protocol
+        // violation — the chat loop already breaks on the next
+        // stream EOF, and surfacing an error here would just add
+        // noise to the renderer.
+        return Ok(StreamChunk::Done {
+            finish_reason: "end_turn".to_string(),
+        });
     }
     let parsed: AnthropicEvent = serde_json::from_str(payload).map_err(|e| {
         StreamError::Protocol(format!("anthropic: could not parse SSE: {e}"))
@@ -305,6 +308,14 @@ pub fn translate_event(event: Event) -> Result<StreamChunk, StreamError> {
 
 // ---- Wire types (private) --------------------------------------------------
 
+// Wire types carry the full shape Anthropic sends (including fields
+// we don't read — `index`, `message`, `text`/`input` on a tool_use
+// start, `stop_sequence` on the message_delta). We need them in the
+// struct for serde to parse the JSON cleanly, even though the
+// streaming logic only looks at a subset. `#[allow(dead_code)]`
+// silences the "never read" warnings without changing the wire
+// format.
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum AnthropicEvent {
@@ -338,6 +349,7 @@ enum AnthropicEvent {
     Unknown,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 struct AnthropicErrorBody {
     #[serde(rename = "type", default)]
@@ -346,6 +358,7 @@ struct AnthropicErrorBody {
     message: String,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ContentBlock {
@@ -360,6 +373,7 @@ enum ContentBlock {
     Other,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ContentDelta {
@@ -369,6 +383,7 @@ enum ContentDelta {
     Other,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Default, Deserialize)]
 struct MessageDeltaPayload {
     #[serde(default)]
@@ -388,6 +403,21 @@ mod tests {
             data: data.to_string(),
             id: String::new(),
             retry: None,
+        }
+    }
+
+    #[test]
+    fn empty_data_event_is_done_not_protocol_error() {
+        // Anthropic sometimes emits an empty-data event as a
+        // trailing keep-alive or end-marker. That must be a
+        // benign end-of-stream signal, not a protocol violation
+        // — the chat loop already breaks on the next stream EOF,
+        // and surfacing an error here would just add noise to
+        // the renderer.
+        let ev = text_event("");
+        match translate_event(ev).unwrap() {
+            StreamChunk::Done { finish_reason } => assert_eq!(finish_reason, "end_turn"),
+            other => panic!("empty data event must be Done, got {other:?}"),
         }
     }
 
@@ -554,5 +584,105 @@ mod tests {
             .unwrap()
             .iter()
             .all(|b| b["type"] == "text"));
+    }
+
+    // ---- End-to-end SSE pipeline test (tokio::io::duplex) ----
+    //
+    // Same shape as the openai_compat integration test: drive
+    // raw SSE bytes through the same `eventsource_stream` +
+    // `translate_event` pipeline the HTTP path uses. The chat
+    // loop should see the text deltas, a normal `Done` from the
+    // `message_delta`, and *no* `Protocol` errors — even when
+    // the wire stream ends with an empty-data event.
+
+    use eventsource_stream::EventStream as EsStream;
+    use futures_util::stream::StreamExt;
+    use tokio::io::{duplex, AsyncWriteExt};
+    use tokio_util::io::ReaderStream;
+
+    async fn collect_sse_chunks(sse_bytes: &'static [u8]) -> Vec<StreamChunk> {
+        let (client, mut server) = duplex(64 * 1024);
+        let writer = tokio::spawn(async move {
+            server.write_all(sse_bytes).await.expect("write");
+            server.shutdown().await.expect("shutdown");
+        });
+        let byte_stream = ReaderStream::new(client);
+        let parsed = EsStream::new(byte_stream).map(|item| match item {
+            Ok(event) => translate_event(event),
+            Err(e) => Err(StreamError::Network(e.to_string())),
+        });
+        let mut chunks = Vec::new();
+        let mut stream = Box::pin(parsed);
+        while let Some(result) = stream.next().await {
+            match result {
+                Ok(chunk) => chunks.push(chunk),
+                Err(StreamError::Protocol(msg)) => {
+                    panic!("protocol error during SSE stream: {msg}");
+                }
+                Err(e) => panic!("non-protocol stream error: {e:?}"),
+            }
+        }
+        writer.await.expect("writer task");
+        chunks
+    }
+
+    #[tokio::test]
+    async fn e2e_sse_with_trailing_empty_event() {
+        // A typical Anthropic response: message_start, a text
+        // content_block + delta, message_delta carrying the
+        // stop_reason, message_stop, and (the case the fix
+        // covers) a trailing empty-data event. Pre-fix, that
+        // empty event surfaced as a Protocol error and broke
+        // the chat loop. Post-fix, it's a benign Done.
+        let sse = b"\
+event: message_start
+data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\"}}
+
+event: content_block_start
+data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}
+
+event: content_block_delta
+data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hi there\"}}
+
+event: content_block_stop
+data: {\"type\":\"content_block_stop\",\"index\":0}
+
+event: message_delta
+data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}
+
+event: message_stop
+data: {\"type\":\"message_stop\"}
+
+data:
+
+";
+        let chunks = collect_sse_chunks(sse).await;
+        // We expect: Text("Hi there"), Done("end_turn").
+        // The message_start/content_block_start/content_block_stop/
+        // message_stop/empty-event events are non-text, non-tool
+        // signals — the chat loop ignores them. Empty event must
+        // now translate to a Done rather than a Protocol error.
+        assert!(
+            chunks
+                .iter()
+                .any(|c| matches!(c, StreamChunk::Text { delta } if delta == "Hi there")),
+            "missing text chunk; got {chunks:?}"
+        );
+        assert!(
+            chunks.iter().any(
+                |c| matches!(c, StreamChunk::Done { finish_reason } if finish_reason == "end_turn")
+            ),
+            "missing end_turn done; got {chunks:?}"
+        );
+        // The trailing empty-data event must surface as another
+        // Done(end_turn) — and crucially not as a Protocol error.
+        let done_count = chunks
+            .iter()
+            .filter(|c| matches!(c, StreamChunk::Done { .. }))
+            .count();
+        assert!(
+            done_count >= 2,
+            "expected at least two Done chunks (message_delta + empty), got {done_count}: {chunks:?}"
+        );
     }
 }

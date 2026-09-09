@@ -33,9 +33,18 @@ pub enum ProviderKind {
 }
 
 impl ProviderKind {
+    // `ALL`, `as_str`, and `is_openai_compat` are part of the public
+    // ProviderKind surface for future use (a Settings UI loop, a
+    // provider-picker, a switch-on-kind in the chat command) but
+    // none of the in-tree callers reach for them yet. The
+    // `#[allow(dead_code)]` keeps the warning quiet without
+    // shrinking the public surface — a future caller can pick
+    // them up without re-adding them.
+    #[allow(dead_code)]
     pub const ALL: &'static [ProviderKind] =
         &[ProviderKind::MiniMax, ProviderKind::Openai, ProviderKind::Anthropic, ProviderKind::Xai];
 
+    #[allow(dead_code)]
     pub fn as_str(&self) -> &'static str {
         match self {
             ProviderKind::MiniMax => "minimax",
@@ -79,6 +88,7 @@ impl ProviderKind {
     /// "OpenAI-compat" providers share the chat-completions wire format and
     /// accept the same JSON request body. Anthropic is the odd one out and
     /// has its own translator.
+    #[allow(dead_code)]
     pub fn is_openai_compat(&self) -> bool {
         matches!(self, ProviderKind::MiniMax | ProviderKind::Openai | ProviderKind::Xai)
     }
@@ -166,6 +176,10 @@ fn default_temperature() -> f32 {
 }
 
 /// Final, non-streamed response. Most paths return a stream instead.
+/// `#[allow(dead_code)]` keeps this in the public surface — the
+/// streaming path always wins today, but a future "test echo" or
+/// "non-streaming tool eval" path may want it.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatResponse {
     pub content: String,
@@ -177,7 +191,15 @@ pub struct ChatResponse {
 /// format, and translating provider-specific deltas into `StreamChunk`.
 #[async_trait]
 pub trait Provider: Send + Sync {
+    // `name` and `kind` are part of the trait surface; every impl
+    // fills them in. They aren't called from the in-tree call sites
+    // (we use `ProviderKind::from_settings(&settings)` instead) but
+    // keeping them on the trait means a future caller can switch
+    // on a `dyn Provider` without downcasting. `#[allow(dead_code)]`
+    // silences the warning without removing the trait methods.
+    #[allow(dead_code)]
     fn name(&self) -> &'static str;
+    #[allow(dead_code)]
     fn kind(&self) -> ProviderKind;
     fn default_model(&self) -> &'static str;
     async fn stream(
