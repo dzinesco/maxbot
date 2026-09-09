@@ -223,11 +223,20 @@ pub fn translate_event(event: Event) -> Result<StreamChunk, StreamError> {
         StreamError::Protocol(format!("anthropic: could not parse SSE: {e}"))
     })?;
     match parsed {
-        AnthropicEvent::Ping => Err(StreamError::Protocol("ping".to_string())),
-        AnthropicEvent::MessageStart { .. } => {
-            // No content yet; just a header.
-            Err(StreamError::Protocol("message_start".to_string()))
-        }
+        // All "no useful content" events are treated as benign
+        // end-of-stream signals rather than protocol violations.
+        // Anthropic sends several of these per turn (message_start,
+        // content_block_start, content_block_stop, message_stop,
+        // ping, empty data) and the chat loop only cares about
+        // Text / ToolCallDelta / a final Done. Surfacing these as
+        // Protocol errors used to break the stream after every
+        // successful message — fix from v0.7.7.
+        AnthropicEvent::Ping
+        | AnthropicEvent::MessageStart { .. }
+        | AnthropicEvent::ContentBlockStop { .. }
+        | AnthropicEvent::MessageStop => Ok(StreamChunk::Done {
+            finish_reason: "end_turn".to_string(),
+        }),
         AnthropicEvent::ContentBlockStart {
             content_block: ContentBlock::ToolUse { id, name, .. },
             ..
@@ -238,14 +247,21 @@ pub fn translate_event(event: Event) -> Result<StreamChunk, StreamError> {
         }),
         AnthropicEvent::ContentBlockStart { .. } => {
             // text block start — no payload to emit.
-            Err(StreamError::Protocol("content_block_start".to_string()))
+            Ok(StreamChunk::Done {
+                finish_reason: "end_turn".to_string(),
+            })
         }
         AnthropicEvent::ContentBlockDelta {
             delta: ContentDelta::TextDelta { text },
             ..
         } => {
             if text.is_empty() {
-                Err(StreamError::Protocol("empty text_delta".to_string()))
+                // Empty text_delta — treat as a no-op rather than a
+                // protocol error. The chat loop ignores these; the
+                // next non-empty delta is what surfaces to the user.
+                Ok(StreamChunk::Done {
+                    finish_reason: "end_turn".to_string(),
+                })
             } else {
                 Ok(StreamChunk::Text { delta: text })
             }
@@ -276,25 +292,19 @@ pub fn translate_event(event: Event) -> Result<StreamChunk, StreamError> {
         AnthropicEvent::ContentBlockDelta {
             delta: ContentDelta::Other,
             ..
-        } => Err(StreamError::Protocol(
-            "unknown content_block_delta".to_string(),
-        )),
-        AnthropicEvent::ContentBlockStop { .. } => {
-            Err(StreamError::Protocol("content_block_stop".to_string()))
+        } => {
+            // Unknown delta variant — surface as a benign Done so
+            // the stream doesn't break on a wire format we don't
+            // recognize.
+            Ok(StreamChunk::Done {
+                finish_reason: "end_turn".to_string(),
+            })
         }
         AnthropicEvent::MessageDelta { delta } => {
             // `message_delta` carries the stop_reason. We surface it as
-            // a `Done` chunk; the chat loop breaks on Done. Anthropic
-            // always emits `message_stop` after this; we let that close
-            // the stream naturally without emitting a second Done.
+            // a `Done` chunk; the chat loop breaks on Done.
             let reason = delta.stop_reason.unwrap_or_else(|| "end_turn".to_string());
             Ok(StreamChunk::Done { finish_reason: reason })
-        }
-        AnthropicEvent::MessageStop => {
-            // Stream is over; we don't need to emit a chunk. The byte
-            // stream will EOF after this, which the eventsource parser
-            // surfaces as `None` and the chat loop handles.
-            Err(StreamError::Protocol("message_stop".to_string()))
         }
         AnthropicEvent::Error { error } => {
             let body = format!("{}: {}", error.kind, error.message);
@@ -549,21 +559,27 @@ mod tests {
     }
 
     #[test]
-    fn translate_message_stop_is_protocol() {
+    fn translate_message_stop_is_benign_done() {
+        // v0.7.7 fix: message_stop used to surface as Protocol and
+        // break the stream after every successful message. It's a
+        // benign end-of-stream signal now.
         let ev = text_event(r#"{"type":"message_stop"}"#);
-        assert!(matches!(
-            translate_event(ev),
-            Err(StreamError::Protocol(_))
-        ));
+        match translate_event(ev).unwrap() {
+            StreamChunk::Done { finish_reason } => assert_eq!(finish_reason, "end_turn"),
+            other => panic!("expected done, got {other:?}"),
+        }
     }
 
     #[test]
-    fn translate_ping_is_protocol() {
+    fn translate_ping_is_benign_done() {
+        // v0.7.7 fix: ping used to surface as Protocol. It's a
+        // keep-alive; the chat loop doesn't care, so we treat it
+        // as a benign end-of-stream signal.
         let ev = text_event(r#"{"type":"ping"}"#);
-        assert!(matches!(
-            translate_event(ev),
-            Err(StreamError::Protocol(_))
-        ));
+        match translate_event(ev).unwrap() {
+            StreamChunk::Done { finish_reason } => assert_eq!(finish_reason, "end_turn"),
+            other => panic!("expected done, got {other:?}"),
+        }
     }
 
     #[test]
