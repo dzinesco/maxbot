@@ -89,6 +89,16 @@ export const NoVncViewer = forwardRef<NoVncViewerHandle, NoVncViewerProps>(
     const containerRef = useRef<HTMLDivElement | null>(null);
     const rfbRef = useRef<InstanceType<typeof RFB> | null>(null);
     const [connected, setConnected] = useState(false);
+    // `showOverlay` is a separate signal from `connected` —
+    // we want the centered "Connecting to VM…" message to
+    // stay visible for at least 3 seconds on every fresh
+    // mount, even if the noVNC RFB `connect` event fires
+    // immediately (which it does once the local WS opens,
+    // even when the SSH-tunneled VNC stream behind it is
+    // dead). Otherwise the overlay flashes for ~1 frame
+    // and the user is back to staring at a black canvas
+    // with no indication anything is wrong.
+    const [showOverlay, setShowOverlay] = useState(true);
     // Refs for the latest callbacks so we don't re-create the
     // RFB on every parent re-render.
     const onConnectRef = useRef(onConnect);
@@ -115,6 +125,16 @@ export const NoVncViewer = forwardRef<NoVncViewerHandle, NoVncViewerProps>(
     // Manual cancellation flag — set when the parent switches
     // `wsUrl` or unmounts.
     const cancelledRef = useRef(false);
+    // Minimum-show timer for the overlay. We keep the
+    // "Connecting to VM…" message on screen for at least
+    // MIN_OVERLAY_MS after every fresh mount, even if the
+    // RFB fires `connect` immediately, so the user has a
+    // chance to read it. The timer is reset on every
+    // mount / wsUrl change.
+    const minShowTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
+      null,
+    );
+    const MIN_OVERLAY_MS = 3000;
 
     // Imperative handle: forward sendKey / sendMouse to the
     // active RFB instance.
@@ -151,6 +171,18 @@ export const NoVncViewer = forwardRef<NoVncViewerHandle, NoVncViewerProps>(
       mountedRef.current = true;
       cancelledRef.current = false;
       attemptsRef.current = 0;
+      // Show the overlay on every fresh mount; the
+      // min-show timer will allow it to drop after
+      // MIN_OVERLAY_MS, but no sooner.
+      setShowOverlay(true);
+      if (minShowTimerRef.current !== null) {
+        clearTimeout(minShowTimerRef.current);
+        minShowTimerRef.current = null;
+      }
+      minShowTimerRef.current = setTimeout(() => {
+        minShowTimerRef.current = null;
+        if (mountedRef.current) setShowOverlay(false);
+      }, MIN_OVERLAY_MS);
       connect();
       return () => {
         mountedRef.current = false;
@@ -158,6 +190,10 @@ export const NoVncViewer = forwardRef<NoVncViewerHandle, NoVncViewerProps>(
         if (reconnectTimerRef.current !== null) {
           clearTimeout(reconnectTimerRef.current);
           reconnectTimerRef.current = null;
+        }
+        if (minShowTimerRef.current !== null) {
+          clearTimeout(minShowTimerRef.current);
+          minShowTimerRef.current = null;
         }
         const r = rfbRef.current;
         rfbRef.current = null;
@@ -317,6 +353,7 @@ export const NoVncViewer = forwardRef<NoVncViewerHandle, NoVncViewerProps>(
           background: "var(--bg-0)",
         }}
         data-connected={connected ? "true" : "false"}
+        data-show-overlay={showOverlay ? "true" : "false"}
       />
     );
   },

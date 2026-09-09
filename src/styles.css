@@ -3128,14 +3128,18 @@ button.link:hover {
   overflow: hidden;
 }
 
-.novnc-viewer[data-connected="false"]::after {
+.novnc-viewer[data-show-overlay="true"]::after {
   /* Visible centered "connecting to VM…" overlay while noVNC
    * is between sockets or the WS↔VNC chain isn't flowing.
-   * The previous bottom-left pseudo was easy to miss on a
-   * small preview panel; a centered message with a hint
-   * tells the user the panel is alive but waiting (and
-   * what to check if it stays that way — passphrase,
-   * Settings → Computer, etc.). */
+   * The signal is `data-show-overlay` (separate from
+   * `data-connected`) because the RFB `connect` event
+   * fires on local WS open, which can happen even when the
+   * SSH-tunneled VNC stream behind it is dead — leaving
+   * the canvas black with no overlay. The React side keeps
+   * `data-show-overlay="true"` for a minimum of 3s after
+   * every mount so the user has time to read the message
+   * (and the diagnostic hint about Settings → Computer →
+   * passphrase, the most common cause). */
   content: "Connecting to VM…\A check Settings → Computer → passphrase if this stays";
   white-space: pre-wrap;
   text-align: center;
@@ -3152,6 +3156,7 @@ button.link:hover {
   font-family: var(--font-mono);
   pointer-events: none;
   max-width: 80%;
+  z-index: 2;
 }
 
 /* ---------- v2.0 Slice D: BotEditor Computer section ---------- */
