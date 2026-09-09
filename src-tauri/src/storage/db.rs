@@ -755,6 +755,12 @@ impl Database {
                 serde_json::from_str(&allowed_tools_json).unwrap_or_default();
             let last_active_str: Option<String> = row.get(9)?;
             let state_str: String = row.get(10)?;
+            // v2.0.1 fix: `avatar_color` is nullable (no DEFAULT in
+            // the migration) so v1.0 rows carry NULL. Reading it as
+            // `String` raises `Invalid column type Null at index: 8`.
+            // Pull as `Option<String>` and default to "" so the
+            // presence gradient can fall back to `color`.
+            let avatar_color: Option<String> = row.get(8)?;
             Ok(crate::bots::Bot {
                 id: row.get(0)?,
                 name: row.get(1)?,
@@ -764,7 +770,7 @@ impl Database {
                 allowed_tools,
                 icon: row.get(6)?,
                 color: row.get(7)?,
-                avatar_color: row.get(8)?,
+                avatar_color: avatar_color.unwrap_or_default(),
                 last_active_at: last_active_str.map(parse_dt),
                 state: crate::bots::BotState::parse(&state_str),
                 created_at: parse_dt(row.get::<_, String>(11)?),
@@ -794,6 +800,9 @@ impl Database {
             serde_json::from_str(&allowed_tools_json).unwrap_or_default();
         let last_active_str: Option<String> = row.get(9)?;
         let state_str: String = row.get(10)?;
+        // v2.0.1 fix: same as `list_bots` — `avatar_color` is
+        // nullable so v1.0 rows carry NULL. Default to "".
+        let avatar_color: Option<String> = row.get(8)?;
         Ok(Some(crate::bots::Bot {
             id: row.get(0)?,
             name: row.get(1)?,
@@ -803,7 +812,7 @@ impl Database {
             allowed_tools,
             icon: row.get(6)?,
             color: row.get(7)?,
-            avatar_color: row.get(8)?,
+            avatar_color: avatar_color.unwrap_or_default(),
             last_active_at: last_active_str.map(parse_dt),
             state: crate::bots::BotState::parse(&state_str),
             created_at: parse_dt(row.get::<_, String>(11)?),
@@ -1747,5 +1756,55 @@ mod tests {
         assert_eq!(loaded.avatar_color, "#ff5c7c");
         assert_eq!(loaded.state, crate::bots::BotState::Thinking);
         assert!(loaded.last_active_at.is_some());
+    }
+
+    // v2.0.1 regression: a v1.0 row upgraded to v2.0 has NULL
+    // `avatar_color` and `last_active_at` (no DEFAULT in the
+    // migration). Reading those as non-Option used to fail with
+    // "Invalid column type Null at index: 8, name: avatar_color",
+    // which left the React app stuck on its loading state —
+    // visually a blank black window. The list/get paths now read
+    // the nullable columns as `Option<String>` and default to "" /
+    // None so v1.0 rows load cleanly.
+    #[test]
+    fn v1_bot_with_null_avatar_color_loads_with_empty_string() {
+        let db = fresh_db();
+        // Simulate a v1.0 install by creating the bot through the
+        // upsert path BEFORE the v2.0 columns existed. The easiest
+        // way is to insert a row directly with only the v1.0
+        // columns populated, then call list_bots / get_bot.
+        let conn = db.conn.lock().expect("db lock poisoned");
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO bots (id, name, description, system_prompt,
+                default_model, allowed_tools, icon, color,
+                created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            rusqlite::params![
+                "v1-bot",
+                "Legacy",
+                "from v1.0",
+                "",
+                "MiniMax-M3",
+                "[]",
+                "",
+                "",
+                &now,
+                &now,
+            ],
+        )
+        .expect("insert v1.0-style row");
+        drop(conn);
+
+        // Both reads must succeed and yield the empty defaults.
+        let loaded = db.get_bot("v1-bot").unwrap().expect("bot exists");
+        assert_eq!(loaded.avatar_color, "");
+        assert!(loaded.last_active_at.is_none());
+        assert_eq!(loaded.state, crate::bots::BotState::Idle);
+
+        let listed = db.list_bots().expect("list");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].avatar_color, "");
+        assert!(listed[0].last_active_at.is_none());
     }
 }

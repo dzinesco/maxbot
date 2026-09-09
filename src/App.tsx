@@ -1138,9 +1138,42 @@ export default function App() {
 
   // Loading state: don't flash the welcome before bootstrap completes.
   // A blank screen with the brand color is fine here — the bootstrap
-  // typically resolves in <100ms.
+  // typically resolves in <100ms. If the bootstrap throws, surface
+  // the error inline so the user is not stuck on a blank black
+  // window with no way to know what went wrong.
   if (isOnboarded === null) {
-    return <div className="app app-boot" />;
+    return (
+      <div className="app app-boot" style={{ padding: 24, color: "#fafafa" }}>
+        {bootError ? (
+          <div data-testid="boot-error" style={{ maxWidth: 720 }}>
+            <h1 style={{ fontSize: 16, color: "#f87171", marginTop: 0 }}>
+              MaxBot couldn't finish starting
+            </h1>
+            <p style={{ color: "#a1a1aa", fontSize: 13 }}>
+              The bootstrap threw before we could decide whether to show
+              onboarding or the chat. Restart MaxBot (Cmd+Q, reopen) — if
+              it keeps happening, paste the error below.
+            </p>
+            <pre
+              style={{
+                background: "#0e0e10",
+                padding: 12,
+                borderRadius: 6,
+                overflow: "auto",
+                whiteSpace: "pre-wrap",
+                margin: 0,
+                fontSize: 12,
+                color: "#fafafa",
+                fontFamily:
+                  "ui-monospace, SFMono-Regular, Menlo, monospace",
+              }}
+            >
+              {bootError}
+            </pre>
+          </div>
+        ) : null}
+      </div>
+    );
   }
 
   // First-run gate. The Welcome is full-bleed (no sidebar) — it's

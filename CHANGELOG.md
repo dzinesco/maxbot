@@ -4,6 +4,29 @@ All notable changes to MaxBot are documented in this file. The format
 follows [Keep a Changelog](https://keepachangelog.com/) and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## v2.0.1 — 2026-09-09
+
+### Fixed
+- **Bootstrap crash on v1.0 → v2.0 upgrade** that produced a blank
+  black window. The `bots.avatar_color` and `bots.last_active_at`
+  columns added in v2.0 Slice E are nullable (no `DEFAULT` in the
+  migration), so any v1.0 row carried `NULL` for them. The Rust
+  reader at `list_bots` and `get_bot` was calling
+  `row.get::<_, String>(8)` on the nullable `avatar_color` column,
+  which raised `Invalid column type Null at index: 8` and failed the
+  whole bootstrap. The renderer was left on the `isOnboarded === null`
+  loading branch (a brand-color div with no children) — visually
+  indistinguishable from a dead window.
+  - **Fix:** read the nullable columns as `Option<String>` /
+    `Option<DateTime>` and default to `""` / `None`. Both
+    `list_bots` and `get_bot` patched.
+  - **Regression test:** `v1_bot_with_null_avatar_color_loads_with_empty_string`
+    inserts a v1.0-shape row (only the original 10 columns populated)
+    and asserts that both reads return the documented defaults.
+  - **Defensive UX:** the React loading state now also surfaces the
+    `bootError` text if any future bootstrap call throws, so the
+    user is never stranded on a silent blank screen again.
+
 ## v2.0.0 — 2026-09-09
 
 ### Added — Per-Bot Linux computers
