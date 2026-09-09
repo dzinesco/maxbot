@@ -6,6 +6,7 @@ import { Settings } from "./components/Settings";
 import { BotsPanel } from "./components/BotsPanel";
 import { BotEditor } from "./components/BotEditor";
 import { BotInbox } from "./components/BotInbox";
+import { ComputerPanel } from "./components/ComputerPanel";
 import { SendToBotModal } from "./components/SendToBotModal";
 import { Welcome } from "./components/Welcome";
 import {
@@ -117,6 +118,13 @@ export default function App() {
   const [botsCollapsed, setBotsCollapsed] = useState(false);
   const [runningBotId, setRunningBotId] = useState<string | null>(null);
   const [ttsSpeaking, setTtsSpeaking] = useState(false);
+  // v2.0 Slice D: when the user clicks "View computer" in the
+  // BotEditor, we open the ComputerPanel in preview mode for
+  // the bot being edited. The BotEditor closes itself; the
+  // panel mounts on top.
+  const [computerPanelBotId, setComputerPanelBotId] = useState<string | null>(
+    null,
+  );
   /** Map of active bot run id → bot id. Populated by runBotNow /
    * sendToBot (which return the run id) and pruned by the bot-done
    * event listener. Polled from the DB every 2s as a fallback in
@@ -792,9 +800,14 @@ export default function App() {
     async (bot: Bot, schedule: BotSchedule) => {
       const saved = await upsertBot(bot);
       await upsertBotSchedule({ ...schedule, bot_id: saved.id });
-      setEditorState({ mode: "closed" });
-      setEditorDraft(null);
+      // The editor stays open after this returns: the BotEditor
+      // uses the returned `saved` Bot to call `computerProvision`
+      // (when the user opted in) and then closes itself. We
+      // deliberately don't `setEditorState({ mode: "closed" })`
+      // here — closing mid-save would unmount the modal before
+      // the provision call has a chance to surface its error.
       await refreshBots();
+      return saved;
     },
     [refreshBots],
   );
@@ -922,6 +935,7 @@ export default function App() {
           setEditorDraft(null);
         }}
         onSave={handleSaveBot}
+        onViewComputer={(botId) => setComputerPanelBotId(botId)}
         onDelete={
           editorState.mode === "edit"
             ? () => {
@@ -1131,6 +1145,23 @@ export default function App() {
           onClose={() => setSendToBotOpen(false)}
           onSend={handleSendToBot}
         />
+      )}
+      {computerPanelBotId && (
+        <div
+          className="modal-overlay"
+          onClick={() => setComputerPanelBotId(null)}
+        >
+          <div
+            className="modal-stacked modal-stacked-wide"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <ComputerPanel
+              botId={computerPanelBotId}
+              mode="preview"
+              onClose={() => setComputerPanelBotId(null)}
+            />
+          </div>
+        </div>
       )}
     </div>
   );

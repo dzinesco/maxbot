@@ -1,6 +1,10 @@
 import { useEffect, useMemo, useState } from "react";
 import type { Bot, BotSchedule, ToolSummary } from "../lib/api";
-import { revealBotFolder } from "../lib/tauri";
+import {
+  computerGet,
+  computerProvision,
+  revealBotFolder,
+} from "../lib/tauri";
 
 interface BotEditorProps {
   /** The bot being edited, or a fresh blank bot for create. */
@@ -10,8 +14,19 @@ interface BotEditorProps {
   /** True if this is a new bot (Save will issue an upsert with a fresh id). */
   isNew: boolean;
   onClose: () => void;
-  onSave: (bot: Bot, schedule: BotSchedule) => void;
+  /**
+   * Save the bot. Returns the persisted Bot (the parent calls
+   * `upsert_bot` and gets back the row with its `id` assigned).
+   * The BotEditor needs the returned id to optionally issue
+   * `computer_provision` right after, since the Bot row must
+   * exist before the per-Bot computer table can reference it.
+   */
+  onSave: (bot: Bot, schedule: BotSchedule) => Promise<Bot> | Bot;
   onDelete?: () => void;
+  /** Open the ComputerPanel in preview mode for the bot being
+   * edited. Only invoked when the bot has a computer row.
+   * Slice E is expected to wire this through `App.tsx`. */
+  onViewComputer?: (botId: string) => void;
 }
 
 const ICON_PRESETS = ["🤖", "📋", "📧", "📅", "🔍", "🛠️", "🎨", "💼", "🐕", "🐱", "🚀", "🧠"];
@@ -24,6 +39,67 @@ const COLOR_PRESETS = [
   "#ff5cd6",
   "#ffd35c",
   "#5cffd3",
+];
+
+/**
+ * Specialist-Bot templates (v2.0 Slice D). One-click starters
+ * inspired by the Grok Bot product pages — Bots are named
+ * specialists with a single responsibility ("Figma Bro", "Devbot",
+ * "Detective", "Mailroom"). Clicking a chip fills the Name and
+ * System Prompt in the editor; the user can still edit before
+ * saving. The `name` field is the placeholder shown in the Name
+ * input when empty.
+ */
+interface SpecialistTemplate {
+  key: string;
+  name: string;
+  /** Visible chip label (shorter than the system prompt's first line). */
+  label: string;
+  /** Tooltip / accessible name. */
+  description: string;
+  /** The placeholder shown in the Name input. */
+  namePlaceholder: string;
+  /** The system-prompt body that overwrites `bot.system_prompt`. */
+  systemPrompt: string;
+}
+
+const SPECIALIST_TEMPLATES: SpecialistTemplate[] = [
+  {
+    key: "figma",
+    name: "Figma Bro",
+    label: "Figma Specialist",
+    description: "Designs screens, components, and prototypes in Figma.",
+    namePlaceholder: "Figma Bro",
+    systemPrompt:
+      "You are a specialist in Figma. Use the Figma desktop app and plugins to design screens, components, and prototypes. Hand work back to the human when a design is ready for review.",
+  },
+  {
+    key: "code-review",
+    name: "Devbot",
+    label: "Code Reviewer",
+    description: "Reviews diffs, runs tests, and surfaces issues.",
+    namePlaceholder: "Devbot",
+    systemPrompt:
+      "You are a specialist in code review. Use git, ripgrep, and the editor to read diffs, run tests, and surface issues. Hand work back to the human when the review is ready.",
+  },
+  {
+    key: "researcher",
+    name: "Detective",
+    label: "Researcher",
+    description: "Browses the web, gathers, and synthesizes information.",
+    namePlaceholder: "Detective",
+    systemPrompt:
+      "You are a specialist in research. Use the browser, web search, and your file tools to gather and synthesize information. Hand work back to the human when the research is ready.",
+  },
+  {
+    key: "inbox",
+    name: "Mailroom",
+    label: "Inbox Triage",
+    description: "Sorts, schedules, and follows up on messages.",
+    namePlaceholder: "Mailroom",
+    systemPrompt:
+      "You are a specialist in inbox triage. Use mail.app, calendar.app, and reminders.app to sort, schedule, and follow up on messages. Hand work back to the human when the queue is processed.",
+  },
 ];
 
 const SCHEDULE_PRESETS: { label: string; seconds: number }[] = [
@@ -79,8 +155,10 @@ const CRON_PRESETS: { label: string; expr: string; hint: string }[] = [
 
 /**
  * Modal for creating or editing a bot. The form is single-page with
- * sections: identity (name/icon/color/description), brain (default
- * model + system prompt), capabilities (allowed tools), and schedule.
+ * sections: identity (name/icon/color/description + specialist
+ * template chips), brain (default model + system prompt),
+ * capabilities (allowed tools), computer (provision VM + disk/RAM),
+ * workspace (per-bot filesystem), and schedule.
  * Save is a single upsert; cancel discards.
  */
 export function BotEditor({
@@ -91,6 +169,7 @@ export function BotEditor({
   onClose,
   onSave,
   onDelete,
+  onViewComputer,
 }: BotEditorProps) {
   const [bot, setBot] = useState<Bot>(initial);
   const [intervalSeconds, setIntervalSeconds] = useState<number>(
@@ -100,6 +179,19 @@ export function BotEditor({
     schedule?.cron_expression ?? "",
   );
   const [showTools, setShowTools] = useState(false);
+  // ---- Computer section (v2.0 Slice D) ----
+  // The provision intent is local to the editor: a fresh blank
+  // bot has the checkbox off, the disk defaults to 10 and the
+  // RAM to 2048 (the Rust defaults). On an edit we read the
+  // existing computer row to surface its state in the panel.
+  const [provisionComputer, setProvisionComputer] = useState(false);
+  const [provisionDiskGb, setProvisionDiskGb] = useState<number>(10);
+  const [provisionRamMb, setProvisionRamMb] = useState<number>(2048);
+  const [existingComputer, setExistingComputer] = useState<
+    { state: string; vm_ip: string | null; vnc_port: number | null } | null
+  >(null);
+  const [provisionError, setProvisionError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
 
   // Esc closes
   useEffect(() => {
@@ -109,6 +201,30 @@ export function BotEditor({
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
+
+  // On mount, look up the existing computer row (only meaningful
+  // when editing a Bot that may already have one). Best-effort:
+  // the Rust side may not be running, in which case the panel
+  // just shows the "no computer" state.
+  useEffect(() => {
+    if (isNew || !initial.id) return;
+    let cancelled = false;
+    computerGet(initial.id)
+      .then((c) => {
+        if (cancelled || !c) return;
+        setExistingComputer({
+          state: c.state as string,
+          vm_ip: c.vm_ip,
+          vnc_port: c.vnc_port,
+        });
+      })
+      .catch(() => {
+        // silent — ComputerPanel already handles Tauri errors
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [initial.id, isNew]);
 
   const toolByName = useMemo(() => {
     const m = new Map<string, ToolSummary>();
@@ -128,12 +244,29 @@ export function BotEditor({
     });
   }
 
-  function handleSave() {
+  /** Apply a specialist template: set the Name (only if empty or
+   * already a template name) and the System Prompt. We overwrite
+   * the prompt unconditionally so the user can re-apply a
+   * template; if they want to keep their custom prompt they just
+   * don't click the chip. */
+  function applyTemplate(t: SpecialistTemplate) {
+    setBot((b) => ({
+      ...b,
+      // Replace the name wholesale — the templates are designed
+      // around the placeholder names (Figma Bro, Devbot, etc.).
+      name: t.name,
+      system_prompt: t.systemPrompt,
+    }));
+  }
+
+  async function handleSave() {
     const trimmedName = bot.name.trim();
     if (!trimmedName) {
       alert("Bot name is required.");
       return;
     }
+    setProvisionError(null);
+    setSaving(true);
     const finalBot: Bot = { ...bot, name: trimmedName };
     const finalSchedule: BotSchedule = {
       bot_id: finalBot.id,
@@ -142,7 +275,39 @@ export function BotEditor({
       last_run_at: schedule?.last_run_at ?? null,
       last_conversation_id: schedule?.last_conversation_id ?? null,
     };
-    onSave(finalBot, finalSchedule);
+    try {
+      // Persist the Bot first. The Rust side assigns a fresh id
+      // for new bots; we need that id to optionally provision
+      // the computer right after. The parent's `onSave` returns
+      // the saved row (App.tsx awaits `upsert_bot`).
+      const saved = await onSave(finalBot, finalSchedule);
+      if (provisionComputer && saved?.id) {
+        try {
+          await computerProvision(saved.id, {
+            disk_gb: provisionDiskGb,
+            ram_mb: provisionRamMb,
+          });
+        } catch (e) {
+          // The Bot is already saved; the Rust side writes an
+          // `error` row in the `computers` table. Surface that
+          // here so the user knows the VM didn't come up, but
+          // don't close the modal — they may want to retry.
+          setProvisionError(
+            `Bot saved, but provisioning failed: ${e}. The VM row is in the "error" state — you can retry from the Computer panel or destroy and re-provision.`,
+          );
+          // Don't `onClose()` — let the user read the error.
+          return;
+        }
+      }
+      onClose();
+    } catch (e) {
+      // The Bot upsert itself failed (network, etc.) — surface
+      // the error inline so the user can retry without losing
+      // their input.
+      setProvisionError(`Could not save bot: ${e}`);
+    } finally {
+      setSaving(false);
+    }
   }
 
   return (
@@ -170,8 +335,40 @@ export function BotEditor({
               <input
                 value={bot.name}
                 onChange={(e) => setBot({ ...bot, name: e.target.value })}
-                placeholder="e.g. Elon, Clipboard, Spec"
+                placeholder="e.g. Figma Bro, Devbot, Spec"
               />
+            </div>
+            <div className="form-row">
+              <label>
+                Specialist templates
+                <span className="hint">
+                  {" "}— one click fills the name + system prompt
+                </span>
+              </label>
+              <div
+                className="bot-editor__specialist-chips"
+                role="group"
+                aria-label="Specialist bot templates"
+              >
+                {SPECIALIST_TEMPLATES.map((t) => (
+                  <button
+                    key={t.key}
+                    type="button"
+                    className="bot-editor__specialist-chip"
+                    onClick={() => applyTemplate(t)}
+                    title={t.description}
+                    data-testid={`specialist-chip-${t.key}`}
+                  >
+                    {t.label}
+                  </button>
+                ))}
+              </div>
+              <div className="hint">
+                Bots with a single responsibility (per the Grok Bot
+                product pages) are easier to hand off and easier to
+                improve over time. Pick a template, then edit the
+                prompt to fit your workflow.
+              </div>
             </div>
             <div className="form-row">
               <label>Description</label>
@@ -291,6 +488,101 @@ export function BotEditor({
                 <code>outputs_*</code> tools.
               </div>
             </div>
+          </section>
+
+          {/* Computer (v2.0 Slice D) */}
+          <section className="form-section bot-editor__computer-section">
+            <h3>
+              Computer
+              {existingComputer && (
+                <span
+                  className={`computer-panel__status-dot computer-panel__status-dot--${existingComputer.state}`}
+                  style={{ marginLeft: 8 }}
+                  title={`VM state: ${existingComputer.state}`}
+                />
+              )}
+              {existingComputer && onViewComputer && (
+                <button
+                  type="button"
+                  className="ghost small"
+                  style={{ marginLeft: 8 }}
+                  onClick={() => onViewComputer(bot.id || initial.id)}
+                >
+                  View computer
+                </button>
+              )}
+            </h3>
+            {existingComputer && (
+              <div className="muted small">
+                This bot has a computer:{" "}
+                <strong>{existingComputer.state}</strong>
+                {existingComputer.vm_ip ? ` · ${existingComputer.vm_ip}` : ""}
+                {existingComputer.vnc_port !== null
+                  ? ` · VNC :${existingComputer.vnc_port}`
+                  : ""}
+                . Re-provisioning from here is not supported — destroy
+                and create a new computer from the Computer panel.
+              </div>
+            )}
+            <label className="bot-editor__provision-toggle">
+              <input
+                type="checkbox"
+                checked={provisionComputer}
+                onChange={(e) => setProvisionComputer(e.target.checked)}
+                data-testid="provision-computer-checkbox"
+              />
+              <span>
+                Provision a computer for this Bot
+                <span className="hint">
+                  {" "}— spin up a per-Bot Linux VM (libvirt on the
+                  Settings → Computer server). The Bot drives the
+                  VM via SSH and you can preview / take over from
+                  the Computer panel.
+                </span>
+              </span>
+            </label>
+            {provisionComputer && (
+              <div className="form-row inline bot-editor__computer-fields">
+                <div>
+                  <label>Disk size (GB, default 10)</label>
+                  <input
+                    type="number"
+                    min={1}
+                    value={provisionDiskGb}
+                    onChange={(e) =>
+                      setProvisionDiskGb(
+                        Math.max(1, parseInt(e.target.value || "10", 10)),
+                      )
+                    }
+                    data-testid="provision-disk-gb"
+                  />
+                </div>
+                <div>
+                  <label>RAM (MB, default 2048)</label>
+                  <input
+                    type="number"
+                    min={256}
+                    step={256}
+                    value={provisionRamMb}
+                    onChange={(e) =>
+                      setProvisionRamMb(
+                        Math.max(256, parseInt(e.target.value || "2048", 10)),
+                      )
+                    }
+                    data-testid="provision-ram-mb"
+                  />
+                </div>
+              </div>
+            )}
+            {provisionError && (
+              <div
+                className="bot-editor__provision-error"
+                role="alert"
+                data-testid="provision-error"
+              >
+                {provisionError}
+              </div>
+            )}
           </section>
 
           {/* Capabilities */}
@@ -448,9 +740,22 @@ export function BotEditor({
             </button>
           )}
           <div className="spacer" />
-          <button onClick={onClose}>Cancel</button>
-          <button className="primary" onClick={handleSave}>
-            {isNew ? "Create bot" : "Save"}
+          <button onClick={onClose} disabled={saving}>
+            Cancel
+          </button>
+          <button
+            className="primary"
+            onClick={handleSave}
+            disabled={saving}
+            data-testid="bot-editor-save"
+          >
+            {saving
+              ? provisionComputer
+                ? "Creating…"
+                : "Saving…"
+              : isNew
+                ? "Create bot"
+                : "Save"}
           </button>
         </footer>
       </div>

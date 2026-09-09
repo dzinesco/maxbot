@@ -79,6 +79,36 @@ export interface Settings {
    * internally. The Rust side currently doesn't read this; surfaced
    * in the Browser tab for a future override. */
   nodejs_path: string;
+
+  // ---- v2.0 Slice D: per-Bot Computer (server) ----
+  //
+  // Field names mirror the Rust struct in
+  // `src-tauri/src/storage/db.rs` exactly. The Rust side reads
+  // `computer_vnc_local_port_range` as a single `"lo-hi"` string and
+  // parses it (`parse_port_range`); the UI is free to render two
+  // separate numeric inputs and serialize them back on save.
+  // `computer_default_disk_gb` and `computer_default_ram_mb` are
+  // `u32` on the Rust side; the JSON wire shape is just a number.
+  /** Hostname or IP of the Linux server hosting per-Bot libvirt
+   * VMs. Empty = the Computer feature is disabled and the
+   * Settings → Computer tab shows the runbook empty state. */
+  computer_server_host: string;
+  /** SSH user on the Linux server. Default `tyler`. */
+  computer_server_ssh_user: string;
+  /** Optional SSH key id (references the `ssh_keys` table). Empty
+   * = rely on the OS keychain / ssh-agent. */
+  computer_server_ssh_key_id: string;
+  /** Local TCP port range the VNC proxy binds to, in `"lo-hi"`
+   * form (e.g. `"5900-5999"`). Matches the Rust struct's
+   * `String` shape. */
+  computer_vnc_local_port_range: string;
+  /** User-set passphrase. Used to derive the Argon2id key that
+   * encrypts per-Bot SSH keypairs. */
+  computer_passphrase: string;
+  /** Default disk size (GiB) for a newly-provisioned Bot VM. */
+  computer_default_disk_gb: number;
+  /** Default RAM (MiB) for a newly-provisioned Bot VM. */
+  computer_default_ram_mb: number;
 }
 
 export interface ProviderPreset {
@@ -196,6 +226,18 @@ export const DEFAULT_SETTINGS: Settings = {
   grok_cwd: "",
   ego_browser_path: "",
   nodejs_path: "",
+  // v2.0 Slice D: per-Bot Computer defaults. Match the Rust
+  // side's `default_computer_disk` / `default_computer_ram`
+  // helpers in `db.rs`. The `computer_vnc_local_port_range` is
+  // stored as a single `"lo-hi"` string; the UI parses + reserializes
+  // it for the two numeric inputs.
+  computer_server_host: "",
+  computer_server_ssh_user: "tyler",
+  computer_server_ssh_key_id: "",
+  computer_vnc_local_port_range: "5900-5999",
+  computer_passphrase: "",
+  computer_default_disk_gb: 10,
+  computer_default_ram_mb: 2048,
 };
 
 export interface TtsSpeakResponse {

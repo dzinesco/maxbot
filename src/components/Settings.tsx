@@ -9,7 +9,7 @@ import {
   PROVIDER_PRESETS,
 } from "../lib/api";
 import { ComputerUseSettings } from "./ComputerUseSettings";
-import { listMcpServers, metaSet } from "../lib/tauri";
+import { computerTestConnection, listMcpServers, metaSet } from "../lib/tauri";
 
 interface SettingsProps {
   initial: SettingsT;
@@ -18,12 +18,16 @@ interface SettingsProps {
 }
 
 /** Tabs surfaced in the Settings modal, in render order. The order
- *  here drives the Cmd+1..Cmd+5 jump shortcuts. */
+ *  here drives the Cmd+1..Cmd+6 jump shortcuts. The Computer tab
+ *  was added in v2.0 Slice D (between Browser and Grok) and is
+ *  gated on `Settings.computer_server_host` being set — see
+ *  `renderComputerTab()`. */
 const TABS = [
   { id: "general", label: "General" },
   { id: "providers", label: "Providers" },
   { id: "tts", label: "TTS" },
   { id: "browser", label: "Browser" },
+  { id: "computer", label: "Computer" },
   { id: "grok", label: "Grok" },
 ] as const;
 
@@ -94,6 +98,44 @@ export function Settings({ initial, onClose, onSave }: SettingsProps) {
   const [grokBinary, setGrokBinary] = useState(base.grok_build_binary ?? "");
   const [grokModel, setGrokModel] = useState(base.grok_build_model ?? "");
   const [grokCwd, setGrokCwd] = useState(base.grok_cwd ?? "");
+  // v2.0 Slice D — Computer tab. The Rust side stores the VNC
+  // port range as a single `"lo-hi"` string; we keep it as two
+  // numeric inputs locally and serialize back on submit. The
+  // `computerServerHost` gates the empty-state in the tab.
+  const [computerServerHost, setComputerServerHost] = useState(
+    base.computer_server_host ?? "",
+  );
+  const [computerServerSshUser, setComputerServerSshUser] = useState(
+    base.computer_server_ssh_user ?? "tyler",
+  );
+  const [computerServerSshKeyId, setComputerServerSshKeyId] = useState(
+    base.computer_server_ssh_key_id ?? "",
+  );
+  const [computerPassphrase, setComputerPassphrase] = useState(
+    base.computer_passphrase ?? "",
+  );
+  const initialPortRange = base.computer_vnc_local_port_range || "5900-5999";
+  const [computerPortLo, setComputerPortLo] = useState<number>(
+    parsePortLo(initialPortRange),
+  );
+  const [computerPortHi, setComputerPortHi] = useState<number>(
+    parsePortHi(initialPortRange),
+  );
+  const [computerDiskGb, setComputerDiskGb] = useState<number>(
+    base.computer_default_disk_gb ?? 10,
+  );
+  const [computerRamMb, setComputerRamMb] = useState<number>(
+    base.computer_default_ram_mb ?? 2048,
+  );
+  // Test-connection state: `null` = idle, `{ kind: "ok", count }` =
+  // last call succeeded, `{ kind: "err", message }` = failed. The
+  // banner shows up while `kind` is set and is dismissable.
+  const [testState, setTestState] = useState<
+    | null
+    | { kind: "ok"; count: number }
+    | { kind: "err"; message: string }
+  >(null);
+  const [testPending, setTestPending] = useState(false);
 
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -127,6 +169,15 @@ export function Settings({ initial, onClose, onSave }: SettingsProps) {
       // come from the visible inputs; the inactive providers keep
       // their stored values. The new (v1) tabs add their own fields
       // to the same payload.
+      //
+      // The Computer tab fields are serialized last. The port range
+      // is stored as a single `"lo-hi"` string in SQLite (Rust's
+      // `computer_vnc_local_port_range: String`); the UI keeps the
+      // two ends as separate numeric inputs and joins them on
+      // submit. `lo` is clamped ≤ `hi` to mirror the Rust
+      // `parse_port_range` helper's behavior on bad input.
+      const safeLo = Math.max(1, Math.min(65535, Math.floor(computerPortLo)));
+      const safeHi = Math.max(safeLo, Math.min(65535, Math.floor(computerPortHi)));
       const merged: SettingsT = {
         ...base,
         provider_kind: providerKind,
@@ -159,6 +210,21 @@ export function Settings({ initial, onClose, onSave }: SettingsProps) {
         grok_cwd: grokCwd.trim(),
         ego_browser_path: egoBrowserPath.trim(),
         nodejs_path: nodejsPath.trim(),
+        // v2.0 Slice D: Computer tab. Field names match the Rust
+        // struct in `db.rs` exactly.
+        computer_server_host: computerServerHost.trim(),
+        computer_server_ssh_user: computerServerSshUser.trim() || "tyler",
+        computer_server_ssh_key_id: computerServerSshKeyId.trim(),
+        computer_vnc_local_port_range: `${safeLo}-${safeHi}`,
+        computer_passphrase: computerPassphrase,
+        computer_default_disk_gb: Math.max(
+          1,
+          Math.floor(computerDiskGb || 10),
+        ),
+        computer_default_ram_mb: Math.max(
+          256,
+          Math.floor(computerRamMb || 2048),
+        ),
       };
       await onSave(merged);
       onClose();
@@ -166,6 +232,77 @@ export function Settings({ initial, onClose, onSave }: SettingsProps) {
       setError(String(e));
     } finally {
       setSaving(false);
+    }
+  };
+
+  /** Run the "Test connection" smoke test against the
+   * `computer_test_connection` Tauri command. The Rust side runs
+   * `sudo -n virsh list` on the server (over SSH) and returns the
+   * number of domains. The banner below the button shows the
+   * result; the X dismisses it. */
+  const runTestConnection = async () => {
+    setTestPending(true);
+    setTestState(null);
+    try {
+      // Persist the form first so the Rust side sees the user's
+      // current host / user settings before it tries to connect.
+      // We do this by calling the same payload construction as
+      // `submit` (minus `await onSave(merged); onClose();`).
+      const safeLo = Math.max(1, Math.min(65535, Math.floor(computerPortLo)));
+      const safeHi = Math.max(safeLo, Math.min(65535, Math.floor(computerPortHi)));
+      const merged: SettingsT = {
+        ...base,
+        provider_kind: providerKind,
+        default_model: defaultModel.trim(),
+        minimax_api_key:
+          providerKind === "minimax"
+            ? apiKey.trim() || null
+            : base.minimax_api_key,
+        openai_api_key:
+          providerKind === "openai"
+            ? apiKey.trim() || null
+            : extraKeys.openai.trim() || null,
+        anthropic_api_key:
+          providerKind === "anthropic"
+            ? apiKey.trim() || null
+            : extraKeys.anthropic.trim() || null,
+        xai_api_key:
+          providerKind === "xai" ? apiKey.trim() || null : extraKeys.xai.trim() || null,
+        minimax_base_url:
+          providerKind === "minimax" ? baseUrl.trim() : base.minimax_base_url,
+        openai_base_url:
+          providerKind === "openai" ? baseUrl.trim() : extraBaseUrls.openai.trim(),
+        anthropic_base_url:
+          providerKind === "anthropic" ? baseUrl.trim() : extraBaseUrls.anthropic.trim(),
+        xai_base_url:
+          providerKind === "xai" ? baseUrl.trim() : extraBaseUrls.xai.trim(),
+        tts_voice: ttsVoice.trim(),
+        grok_build_binary: grokBinary.trim(),
+        grok_build_model: grokModel.trim(),
+        grok_cwd: grokCwd.trim(),
+        ego_browser_path: egoBrowserPath.trim(),
+        nodejs_path: nodejsPath.trim(),
+        computer_server_host: computerServerHost.trim(),
+        computer_server_ssh_user: computerServerSshUser.trim() || "tyler",
+        computer_server_ssh_key_id: computerServerSshKeyId.trim(),
+        computer_vnc_local_port_range: `${safeLo}-${safeHi}`,
+        computer_passphrase: computerPassphrase,
+        computer_default_disk_gb: Math.max(
+          1,
+          Math.floor(computerDiskGb || 10),
+        ),
+        computer_default_ram_mb: Math.max(
+          256,
+          Math.floor(computerRamMb || 2048),
+        ),
+      };
+      await onSave(merged);
+      const count = await computerTestConnection();
+      setTestState({ kind: "ok", count });
+    } catch (e) {
+      setTestState({ kind: "err", message: String(e) });
+    } finally {
+      setTestPending(false);
     }
   };
 
@@ -177,15 +314,17 @@ export function Settings({ initial, onClose, onSave }: SettingsProps) {
   const canSave = true;
 
   // ---- keyboard nav ----
-  // Cmd+1..Cmd+5 jumps directly to a tab from anywhere in the modal.
+  // Cmd+1..Cmd+6 jumps directly to a tab from anywhere in the modal.
   // Arrow keys (←/→) move focus between tabs when the tab bar
   // itself is focused (the WAI-ARIA tabs pattern).
   const tabBarRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      // Cmd+1..5 — global within the modal
+      // Cmd+1..6 — global within the modal. v2.0 Slice D
+      // bumped the upper bound from 5 to 6 when the Computer
+      // tab landed between Browser (4) and Grok (6).
       if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey) {
-        const idx = ["1", "2", "3", "4", "5"].indexOf(e.key);
+        const idx = ["1", "2", "3", "4", "5", "6"].indexOf(e.key);
         if (idx >= 0) {
           e.preventDefault();
           setActiveTab(TABS[idx].id);
@@ -531,6 +670,291 @@ export function Settings({ initial, onClose, onSave }: SettingsProps) {
             </div>
           )}
 
+          {activeTab === "computer" && (
+            <div role="tabpanel" className="modal-tab-pane settings__computer-tab">
+              {computerServerHost.trim() === "" ? (
+                <div
+                  className="settings__computer-empty-state"
+                  data-testid="computer-tab-empty-state"
+                >
+                  <h3>Set up your Linux server</h3>
+                  <p>
+                    Each Bot in MaxBot can have its own Linux VM
+                    (QEMU/KVM + libvirt on your server). The Bots run
+                    inside these VMs, the human operator can preview or
+                    take over the desktop in real time, and the Bot's
+                    tools route to its VM instead of your Mac.
+                  </p>
+                  <p>
+                    Before the Computer tab unlocks, run the{" "}
+                    <a
+                      href="docs/server-setup.md"
+                      onClick={(e) => {
+                        // File-system link: in dev, this is served by
+                        // Vite; in a built Tauri app, the docs ship
+                        // with the bundle. Tauri doesn't open
+                        // arbitrary file:// links in a webview, but
+                        // the user can also navigate to the file in
+                        // Finder. We preventDefault so the modal
+                        // doesn't try to navigate the webview itself.
+                        e.preventDefault();
+                        alert(
+                          "Open docs/server-setup.md from the project root.",
+                        );
+                      }}
+                    >
+                      Linux server setup runbook
+                    </a>{" "}
+                    on the machine that will host the VMs (one-time,
+                    ~10 minutes). When the runbook is done, set the
+                    server host below and Save.
+                  </p>
+                </div>
+              ) : (
+                <>
+                  <div className="field">
+                    <label>Server host</label>
+                    <input
+                      type="text"
+                      value={computerServerHost}
+                      onChange={(e) => setComputerServerHost(e.target.value)}
+                      placeholder="192.168.0.49"
+                      data-testid="computer-server-host"
+                    />
+                    <div className="hint">
+                      Hostname or IP of the Linux server that hosts
+                      per-Bot libvirt VMs. Same machine the runbook
+                      was run on. Cleared = disable the Computer
+                      feature (every <code>computer_*</code> command
+                      returns <code>ServerNotConfigured</code>).
+                    </div>
+                  </div>
+
+                  <div className="field">
+                    <label>Server SSH user</label>
+                    <input
+                      type="text"
+                      value={computerServerSshUser}
+                      onChange={(e) =>
+                        setComputerServerSshUser(e.target.value)
+                      }
+                      placeholder="tyler"
+                    />
+                    <div className="hint">
+                      SSH user on the server. Defaults to{" "}
+                      <code>tyler</code>; the runbook sets this user
+                      up with passwordless sudo + libvirt group
+                      membership.
+                    </div>
+                  </div>
+
+                  <div className="field">
+                    <label>SSH key id (optional)</label>
+                    <input
+                      type="text"
+                      value={computerServerSshKeyId}
+                      onChange={(e) =>
+                        setComputerServerSshKeyId(e.target.value)
+                      }
+                      placeholder="(leave blank for now)"
+                      disabled
+                    />
+                    <div className="hint">
+                      <strong>Coming soon:</strong> manage keypairs
+                      here. For now the Rust side relies on the OS
+                      keychain / ssh-agent — most Tyler-style
+                      installs have the Mac key at{" "}
+                      <code>~/.ssh/id_ed25519</code> already and
+                      leave this blank.
+                    </div>
+                  </div>
+
+                  <div className="field">
+                    <label>Passphrase</label>
+                    <input
+                      type="password"
+                      value={computerPassphrase}
+                      onChange={(e) => setComputerPassphrase(e.target.value)}
+                      placeholder="(set once; used to encrypt per-Bot SSH keys)"
+                    />
+                    <div className="hint">
+                      Used to derive an Argon2id key that encrypts
+                      each Bot's SSH keypair. Set this once; if you
+                      forget it, every Bot's computer becomes
+                      inaccessible (recovery is a v2.8 feature).
+                    </div>
+                  </div>
+
+                  <div className="field">
+                    <label>VNC local port range</label>
+                    <div
+                      className="form-row inline"
+                      style={{ alignItems: "center" }}
+                    >
+                      <input
+                        type="number"
+                        min={1}
+                        max={65535}
+                        value={computerPortLo}
+                        onChange={(e) =>
+                          setComputerPortLo(
+                            Math.max(1, parseInt(e.target.value || "5900", 10)),
+                          )
+                        }
+                        style={{ width: 100 }}
+                        data-testid="computer-vnc-port-lo"
+                      />
+                      <span className="muted small">to</span>
+                      <input
+                        type="number"
+                        min={1}
+                        max={65535}
+                        value={computerPortHi}
+                        onChange={(e) =>
+                          setComputerPortHi(
+                            Math.max(
+                              computerPortLo,
+                              parseInt(e.target.value || "5999", 10),
+                            ),
+                          )
+                        }
+                        style={{ width: 100 }}
+                        data-testid="computer-vnc-port-hi"
+                      />
+                    </div>
+                    <div className="hint">
+                      Local TCP ports the SSH-tunneled VNC proxy
+                      binds to. The renderer gets one port per
+                      active VNC console (one per Bot that has a
+                      preview / takeover open). 100 ports leaves
+                      plenty of headroom. The Rust side stores this
+                      as a single <code>"lo-hi"</code> string and
+                      silently falls back to <code>5900-5999</code>{" "}
+                      on bad input.
+                    </div>
+                  </div>
+
+                  <div className="field">
+                    <label>Default per-Bot disk (GB)</label>
+                    <input
+                      type="number"
+                      min={1}
+                      value={computerDiskGb}
+                      onChange={(e) =>
+                        setComputerDiskGb(
+                          Math.max(1, parseInt(e.target.value || "10", 10)),
+                        )
+                      }
+                      style={{ width: 100 }}
+                    />
+                    <div className="hint">
+                      Used when a Bot is created with "Provision a
+                      computer" without an explicit disk size. The
+                      Linux server at <code>192.168.0.49</code> has
+                      ~491 GB free on <code>/</code>, so 10 GB per
+                      Bot leaves room for ~49 concurrent VMs.
+                    </div>
+                  </div>
+
+                  <div className="field">
+                    <label>Default per-Bot RAM (MB)</label>
+                    <input
+                      type="number"
+                      min={256}
+                      step={256}
+                      value={computerRamMb}
+                      onChange={(e) =>
+                        setComputerRamMb(
+                          Math.max(
+                            256,
+                            parseInt(e.target.value || "2048", 10),
+                          ),
+                        )
+                      }
+                      style={{ width: 100 }}
+                    />
+                    <div className="hint">
+                      Used when a Bot is created without an explicit
+                      RAM. 2048 MiB is comfortable for XFCE + a few
+                      apps; the runbook recommends 3072 MiB to
+                      silence <code>virt-install</code>'s warning.
+                      Override per-Bot in the Bot editor.
+                    </div>
+                  </div>
+
+                  <div className="field">
+                    <label>Test connection</label>
+                    <div
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 8,
+                        flexWrap: "wrap",
+                      }}
+                    >
+                      <button
+                        type="button"
+                        className="settings__test-connection-btn"
+                        onClick={runTestConnection}
+                        disabled={testPending}
+                        data-testid="computer-test-connection"
+                      >
+                        {testPending ? "Testing…" : "Test connection"}
+                      </button>
+                      {testState && testState.kind === "ok" && (
+                        <div
+                          className="settings__test-connection-banner settings__test-connection-banner--ok"
+                          data-testid="computer-test-connection-ok"
+                        >
+                          <span>
+                            Connected — {testState.count} libvirt domain
+                            {testState.count === 1 ? "" : "s"} on the
+                            server.
+                          </span>
+                          <button
+                            type="button"
+                            className="ghost small"
+                            onClick={() => setTestState(null)}
+                            aria-label="Dismiss"
+                          >
+                            ✕
+                          </button>
+                        </div>
+                      )}
+                      {testState && testState.kind === "err" && (
+                        <div
+                          className="settings__test-connection-banner settings__test-connection-banner--err"
+                          data-testid="computer-test-connection-err"
+                        >
+                          <span>
+                            <strong>Connection failed.</strong>{" "}
+                            {testState.message}
+                          </span>
+                          <button
+                            type="button"
+                            className="ghost small"
+                            onClick={() => setTestState(null)}
+                            aria-label="Dismiss"
+                          >
+                            ✕
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                    <div className="hint">
+                      Saves the current Computer-tab fields and then
+                      runs <code>virsh list</code> on the server over
+                      SSH. A green banner means the Mac can reach
+                      the server and libvirt is wired up; a red
+                      banner surfaces the SSH / libvirt error
+                      verbatim.
+                    </div>
+                  </div>
+                </>
+              )}
+            </div>
+          )}
+
           {activeTab === "grok" && (
             <div role="tabpanel" className="modal-tab-pane">
               <div className="field">
@@ -638,3 +1062,26 @@ export function Settings({ initial, onClose, onSave }: SettingsProps) {
 // "is the active provider keyed" check without importing from api
 // twice. (Pure re-export keeps the existing import surface small.)
 export { isConfigured };
+
+// v2.0 Slice D — Computer tab port-range helpers. The Rust
+// struct stores a single `"lo-hi"` string; we parse the two
+// ends for the two numeric inputs. Bad input (empty,
+// non-numeric, reversed) falls back to the default 5900-5999
+// range, mirroring the Rust `parse_port_range` helper.
+function parsePortLo(s: string): number {
+  const parts = s.split("-");
+  if (parts.length === 2) {
+    const n = parseInt(parts[0], 10);
+    if (Number.isFinite(n) && n >= 1 && n <= 65535) return n;
+  }
+  return 5900;
+}
+
+function parsePortHi(s: string): number {
+  const parts = s.split("-");
+  if (parts.length === 2) {
+    const n = parseInt(parts[1], 10);
+    if (Number.isFinite(n) && n >= 1 && n <= 65535) return n;
+  }
+  return 5999;
+}
