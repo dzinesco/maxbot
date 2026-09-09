@@ -18,11 +18,11 @@ pub struct ShellRunTool;
 
 #[async_trait]
 impl Tool for ShellRunTool {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "shell_run"
     }
 
-    fn description(&self) -> &'static str {
+    fn description(&self) -> &str {
         "Run a shell command and return its combined stdout + stderr. Hard 30-second timeout. The user is asked to confirm before the action runs. Use for one-off inspections, builds, or quick filesystem operations that don't have a dedicated tool."
     }
 

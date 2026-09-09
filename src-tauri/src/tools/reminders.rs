@@ -18,11 +18,11 @@ pub struct RemindersListTool;
 
 #[async_trait]
 impl Tool for RemindersListTool {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "reminders_list"
     }
 
-    fn description(&self) -> &'static str {
+    fn description(&self) -> &str {
         "List reminders, optionally filtered by list name. By default, incomplete reminders across all lists. Returns title, parent list, due date, and body (if any). No consent required (read-only)."
     }
 
@@ -94,11 +94,11 @@ pub struct RemindersAddTool;
 
 #[async_trait]
 impl Tool for RemindersAddTool {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "reminders_add"
     }
 
-    fn description(&self) -> &'static str {
+    fn description(&self) -> &str {
         "Create a new reminder. Optionally assign to a list and set a due date. Requires per-call consent because it mutates the user's reminders."
     }
 
@@ -168,11 +168,11 @@ pub struct RemindersCompleteTool;
 
 #[async_trait]
 impl Tool for RemindersCompleteTool {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "reminders_complete"
     }
 
-    fn description(&self) -> &'static str {
+    fn description(&self) -> &str {
         "Mark a reminder as completed by matching its name (case-insensitive, exact match first, falls back to first containing reminder). Requires per-call consent because it mutates state."
     }
 

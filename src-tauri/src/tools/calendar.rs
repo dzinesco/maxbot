@@ -23,11 +23,11 @@ pub struct CalendarTodayTool;
 
 #[async_trait]
 impl Tool for CalendarTodayTool {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "calendar_today"
     }
 
-    fn description(&self) -> &'static str {
+    fn description(&self) -> &str {
         "List all events scheduled for today across every calendar. Returns event title, start time, end time, location, and notes (if any). No consent required (read-only)."
     }
 
@@ -65,11 +65,11 @@ pub struct CalendarWeekTool;
 
 #[async_trait]
 impl Tool for CalendarWeekTool {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "calendar_week"
     }
 
-    fn description(&self) -> &'static str {
+    fn description(&self) -> &str {
         "List events from today through `days_ahead` days (default 7), across every calendar. Returns title, start, end, location, notes. No consent required (read-only)."
     }
 
@@ -125,11 +125,11 @@ pub struct CalendarCreateEventTool;
 
 #[async_trait]
 impl Tool for CalendarCreateEventTool {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "calendar_create_event"
     }
 
-    fn description(&self) -> &'static str {
+    fn description(&self) -> &str {
         "Create a new event. start is 'yyyy-mm-dd HH:MM' (or 'yyyy-mm-dd HH:MM:SS') in local time. duration_minutes defaults to 60. calendar_name defaults to the first calendar if not provided. location and notes are optional. Requires per-call consent because it mutates the user's calendar."
     }
 

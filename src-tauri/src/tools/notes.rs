@@ -21,11 +21,11 @@ pub struct NotesSearchTool;
 
 #[async_trait]
 impl Tool for NotesSearchTool {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "notes_search"
     }
 
-    fn description(&self) -> &'static str {
+    fn description(&self) -> &str {
         "Find notes by title substring. Returns title, modification date, and a short body snippet for each match. No consent required (read-only)."
     }
 
@@ -106,11 +106,11 @@ pub struct NotesReadTool;
 
 #[async_trait]
 impl Tool for NotesReadTool {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "notes_read"
     }
 
-    fn description(&self) -> &'static str {
+    fn description(&self) -> &str {
         "Read the full body of a note by name. Tries exact match first, then falls back to a single containing match. Returns 'multiple matches' with a list if more than one note contains the query — use notes_search to disambiguate. No consent required (read-only)."
     }
 
@@ -167,11 +167,11 @@ pub struct NotesCreateTool;
 
 #[async_trait]
 impl Tool for NotesCreateTool {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "notes_create"
     }
 
-    fn description(&self) -> &'static str {
+    fn description(&self) -> &str {
         "Create a new note with the given name and (optional) body. Requires per-call consent because it mutates the user's Notes."
     }
 

@@ -155,7 +155,10 @@ pub async fn send_message(
     let initial_messages = history_to_provider(&history);
 
     // 5. Tool registry stays in the command; we pass it into the loop.
-    let registry = Arc::new(ToolRegistry::default_set());
+    //    Includes MCP-backed tools loaded at startup.
+    let registry = Arc::new(ToolRegistry::default_with_extras(
+        state.mcp.tool_adapters(),
+    ));
 
     // 6. Register a cancellation token for the entire agent loop, keyed by
     //    the user message id so any iteration can be cancelled.

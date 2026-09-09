@@ -11,11 +11,11 @@ pub struct WebFetchTool;
 
 #[async_trait]
 impl Tool for WebFetchTool {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "web_fetch"
     }
 
-    fn description(&self) -> &'static str {
+    fn description(&self) -> &str {
         "Fetch a URL and return its content as plaintext. HTML is stripped down to headings, paragraphs, lists, and code blocks. Use this when the user gives you a link and wants you to read or summarize it."
     }
 

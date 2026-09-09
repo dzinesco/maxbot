@@ -16,11 +16,11 @@ pub struct WebSearchTool;
 
 #[async_trait]
 impl Tool for WebSearchTool {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "web_search"
     }
 
-    fn description(&self) -> &'static str {
+    fn description(&self) -> &str {
         "Search the web for a query and return the top results (title, url, short snippet). Powered by DuckDuckGo's HTML interface; no API key required."
     }
 

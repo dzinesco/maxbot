@@ -1,6 +1,7 @@
-import { useState } from "react";
-import type { Settings as SettingsT } from "../lib/api";
+import { useEffect, useState } from "react";
+import type { McpServerInfo, Settings as SettingsT } from "../lib/api";
 import { ComputerUseSettings } from "./ComputerUseSettings";
+import { listMcpServers } from "../lib/tauri";
 
 interface SettingsProps {
   initial: SettingsT;
@@ -16,6 +17,13 @@ export function Settings({ initial, onClose, onSave }: SettingsProps) {
   const [baseUrl, setBaseUrl] = useState(initial.base_url ?? "");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [mcpServers, setMcpServers] = useState<McpServerInfo[] | null>(null);
+
+  useEffect(() => {
+    listMcpServers()
+      .then(setMcpServers)
+      .catch(() => setMcpServers([]));
+  }, []);
 
   const submit = async () => {
     setError(null);
@@ -96,6 +104,49 @@ export function Settings({ initial, onClose, onSave }: SettingsProps) {
         />
 
         <ComputerUseSettings />
+
+        <hr
+          style={{
+            border: 0,
+            borderTop: "1px solid var(--border)",
+            margin: "6px 0",
+          }}
+        />
+
+        <div className="field">
+          <label>MCP servers</label>
+          <div className="hint">
+            Model Context Protocol servers loaded from{" "}
+            <code>~/Library/Application Support/com.maxbot.app/mcp_servers.json</code>.
+            Each server's tools are exposed to the model with the prefix{" "}
+            <code>mcp__&lt;server&gt;__&lt;tool&gt;</code> and require per-call
+            consent.
+          </div>
+          {mcpServers === null ? (
+            <div className="muted small">Loading…</div>
+          ) : mcpServers.length === 0 ? (
+            <div className="muted small">
+              No MCP servers configured. Add a{" "}
+              <code>mcp_servers.json</code> file to the data directory and
+              restart MaxBot.
+            </div>
+          ) : (
+            <ul className="mcp-server-list">
+              {mcpServers.map((s) => (
+                <li key={s.name} className="mcp-server-row">
+                  <div className="mcp-server-name">{s.name}</div>
+                  <div className="mcp-server-tools small muted">
+                    {s.tool_count} tool{s.tool_count === 1 ? "" : "s"}:{" "}
+                    {s.tool_names.slice(0, 6).join(", ")}
+                    {s.tool_names.length > 6
+                      ? `, +${s.tool_names.length - 6} more`
+                      : ""}
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
 
         {error && <div className="error">{error}</div>}
 

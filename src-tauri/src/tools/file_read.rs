@@ -18,11 +18,11 @@ pub struct FileReadTool;
 
 #[async_trait]
 impl Tool for FileReadTool {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "file_read"
     }
 
-    fn description(&self) -> &'static str {
+    fn description(&self) -> &str {
         "Read the contents of a UTF-8 text file at the given path. Use this to inspect source files, configs, or small logs. Paths starting with '~' are expanded to the user's home directory. Files larger than 1 MB or 12,000 characters are truncated with a marker."
     }
 

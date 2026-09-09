@@ -78,8 +78,12 @@ pub struct ToolContext {
 /// the model emits a matching tool call.
 #[async_trait]
 pub trait Tool: Send + Sync {
-    fn name(&self) -> &'static str;
-    fn description(&self) -> &'static str;
+    /// The tool's name, surfaced to the model in the function-calling
+    /// schema. Returning `&str` (not `&'static str`) lets dynamic tools
+    /// (MCP-backed, plugin-backed) have names computed at runtime.
+    fn name(&self) -> &str;
+    /// Human-readable description surfaced to the model.
+    fn description(&self) -> &str;
     /// True for tools that touch the filesystem, shell, or anything else
     /// where the user should be asked before the action runs. The chat
     /// command surfaces a native consent dialog before invoking `execute`.

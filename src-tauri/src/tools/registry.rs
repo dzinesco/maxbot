@@ -33,7 +33,7 @@ use super::web_search::WebSearchTool;
 use super::window::{WindowFocusTool, WindowListTool};
 
 pub struct ToolRegistry {
-    by_name: HashMap<&'static str, Arc<dyn Tool>>,
+    by_name: HashMap<String, Arc<dyn Tool>>,
 }
 
 impl ToolRegistry {
@@ -42,8 +42,11 @@ impl ToolRegistry {
     /// (`apple_script_run`), clipboard, and the system tools (notify,
     /// volume, dark mode, frontmost app). Per-app Computer Use tools
     /// (mail, calendar, safari, etc.) are added in their own slices.
-    pub fn default_set() -> Self {
-        let tools: Vec<Arc<dyn Tool>> = vec![
+    ///
+    /// `extra` lets callers add dynamic tools (e.g. MCP-backed) on top
+    /// of the built-in defaults.
+    pub fn default_with_extras(extra: Vec<Arc<dyn Tool>>) -> Self {
+        let mut tools: Vec<Arc<dyn Tool>> = vec![
             // v0.2 — web + filesystem + shell
             Arc::new(WebFetchTool),
             Arc::new(WebSearchTool),
@@ -87,11 +90,18 @@ impl ToolRegistry {
             Arc::new(WindowListTool),
             Arc::new(WindowFocusTool),
         ];
-        let mut by_name: HashMap<&'static str, Arc<dyn Tool>> = HashMap::new();
+        tools.extend(extra);
+        let mut by_name: HashMap<String, Arc<dyn Tool>> = HashMap::new();
         for t in tools {
-            by_name.insert(t.name(), t);
+            by_name.insert(t.name().to_string(), t);
         }
         Self { by_name }
+    }
+
+    /// Backwards-compatible: build the registry with the built-in
+    /// defaults and no dynamic tools.
+    pub fn default_set() -> Self {
+        Self::default_with_extras(Vec::new())
     }
 
     /// All tool declarations to send to the model.
@@ -130,10 +140,10 @@ impl ToolRegistry {
     /// gets enforced. Consent requirements are taken from the
     /// underlying tool unchanged.
     pub fn filtered(&self, allowed: &[String]) -> ToolRegistry {
-        let mut by_name: HashMap<&'static str, Arc<dyn Tool>> = HashMap::new();
+        let mut by_name: HashMap<String, Arc<dyn Tool>> = HashMap::new();
         for name in allowed {
             if let Some(tool) = self.by_name.get(name.as_str()) {
-                by_name.insert(tool.name(), tool.clone());
+                by_name.insert(tool.name().to_string(), tool.clone());
             }
         }
         ToolRegistry { by_name }

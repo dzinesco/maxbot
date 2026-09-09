@@ -181,3 +181,11 @@ export interface TccProbeResult {
   granted: boolean;
   message: string;
 }
+
+// ---- MCP ----
+
+export interface McpServerInfo {
+  name: string;
+  tool_count: number;
+  tool_names: string[];
+}

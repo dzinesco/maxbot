@@ -21,11 +21,11 @@ pub struct ClipboardReadTool;
 
 #[async_trait]
 impl Tool for ClipboardReadTool {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "clipboard_read"
     }
 
-    fn description(&self) -> &'static str {
+    fn description(&self) -> &str {
         "Read the current contents of the macOS clipboard as plain text. Returns up to ~16K characters; longer content is truncated. No consent required (read-only)."
     }
 
@@ -72,11 +72,11 @@ pub struct ClipboardWriteTool;
 
 #[async_trait]
 impl Tool for ClipboardWriteTool {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "clipboard_write"
     }
 
-    fn description(&self) -> &'static str {
+    fn description(&self) -> &str {
         "Overwrite the macOS clipboard with the given text. Requires per-call consent because it replaces whatever the user currently has on their clipboard."
     }
 

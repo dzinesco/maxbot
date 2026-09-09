@@ -1128,6 +1128,39 @@ button.link:hover {
   width: 100%;
 }
 
+.mcp-server-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-2);
+}
+
+.mcp-server-row {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.mcp-server-row:last-child {
+  border-bottom: none;
+}
+
+.mcp-server-name {
+  font-weight: 600;
+  font-size: 12.5px;
+  color: var(--text-0);
+}
+
+.mcp-server-tools {
+  margin-top: 2px;
+  line-height: 1.4;
+  font-family: var(--font-mono);
+}
+
 /* ---------- Computer Use settings list ---------- */
 
 .cu-app-list {

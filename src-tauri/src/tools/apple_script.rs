@@ -21,11 +21,11 @@ pub struct AppleScriptRunTool;
 
 #[async_trait]
 impl Tool for AppleScriptRunTool {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "apple_script_run"
     }
 
-    fn description(&self) -> &'static str {
+    fn description(&self) -> &str {
         "Run an arbitrary AppleScript snippet via `osascript -e` and return the result. Use this as an escape hatch when a dedicated tool (mail_*, calendar_*, etc.) doesn't cover your need. The script can include `do shell script \"...\"` for terminal access, and any app's AppleScript dictionary for app control — but the dedicated tools are preferred because they surface TCC errors and structured output. Hard 30-second timeout. Requires per-call consent."
     }
 

@@ -18,11 +18,11 @@ pub struct SystemNotifyTool;
 
 #[async_trait]
 impl Tool for SystemNotifyTool {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "system_notify"
     }
 
-    fn description(&self) -> &'static str {
+    fn description(&self) -> &str {
         "Show a macOS notification banner. Title is required; subtitle and message are optional. Uses the system Notification Center. No consent required — but be sparing: the user can mute MaxBot notifications globally if you spam them."
     }
 
@@ -83,11 +83,11 @@ pub struct SystemVolumeGetTool;
 
 #[async_trait]
 impl Tool for SystemVolumeGetTool {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "system_volume_get"
     }
 
-    fn description(&self) -> &'static str {
+    fn description(&self) -> &str {
         "Get the current system output volume as a 0-100 integer."
     }
 
@@ -120,11 +120,11 @@ pub struct SystemVolumeSetTool;
 
 #[async_trait]
 impl Tool for SystemVolumeSetTool {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "system_volume_set"
     }
 
-    fn description(&self) -> &'static str {
+    fn description(&self) -> &str {
         "Set the system output volume. Pass an integer 0-100. Requires per-call consent because it changes the user's environment."
     }
 
@@ -184,11 +184,11 @@ pub struct SystemDarkModeGetTool;
 
 #[async_trait]
 impl Tool for SystemDarkModeGetTool {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "system_dark_mode_get"
     }
 
-    fn description(&self) -> &'static str {
+    fn description(&self) -> &str {
         "Get the current system appearance: 'dark' or 'light'."
     }
 
@@ -229,11 +229,11 @@ pub struct SystemDarkModeSetTool;
 
 #[async_trait]
 impl Tool for SystemDarkModeSetTool {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "system_dark_mode_set"
     }
 
-    fn description(&self) -> &'static str {
+    fn description(&self) -> &str {
         "Set the system appearance. Pass 'dark' or 'light'. Requires per-call consent because it changes the user's environment."
     }
 
@@ -291,11 +291,11 @@ pub struct SystemFrontAppTool;
 
 #[async_trait]
 impl Tool for SystemFrontAppTool {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "system_front_app"
     }
 
-    fn description(&self) -> &'static str {
+    fn description(&self) -> &str {
         "Get the name of the frontmost (focused) application."
     }
 

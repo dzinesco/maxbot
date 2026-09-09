@@ -27,11 +27,11 @@ pub struct SafariOpenTool;
 
 #[async_trait]
 impl Tool for SafariOpenTool {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "safari_open"
     }
 
-    fn description(&self) -> &'static str {
+    fn description(&self) -> &str {
         "Open the given URL in Safari. If Safari is not running, launches it. If a tab is already on this URL, focuses it; otherwise opens a new tab. Requires per-call consent because it navigates the browser."
     }
 
@@ -80,11 +80,11 @@ pub struct SafariCurrentUrlTool;
 
 #[async_trait]
 impl Tool for SafariCurrentUrlTool {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "safari_current_url"
     }
 
-    fn description(&self) -> &'static str {
+    fn description(&self) -> &str {
         "Get the URL of the frontmost Safari tab. No consent required (read-only)."
     }
 
@@ -116,11 +116,11 @@ pub struct SafariExecJsTool;
 
 #[async_trait]
 impl Tool for SafariExecJsTool {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "safari_exec_js"
     }
 
-    fn description(&self) -> &'static str {
+    fn description(&self) -> &str {
         "Execute JavaScript in the frontmost Safari tab. The script runs in the page's origin and can read/modify the DOM, set cookies, call fetch(), etc. Requires per-call consent because JS in a page context is essentially unbounded."
     }
 
@@ -180,11 +180,11 @@ pub struct SafariTabsTool;
 
 #[async_trait]
 impl Tool for SafariTabsTool {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "safari_tabs"
     }
 
-    fn description(&self) -> &'static str {
+    fn description(&self) -> &str {
         "List all open Safari tabs across all windows. Returns title and URL for each. No consent required (read-only)."
     }
 
@@ -223,11 +223,11 @@ pub struct ChromeOpenTool;
 
 #[async_trait]
 impl Tool for ChromeOpenTool {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "chrome_open"
     }
 
-    fn description(&self) -> &'static str {
+    fn description(&self) -> &str {
         "Open the given URL in Google Chrome. Launches Chrome if not running. Requires per-call consent because it navigates the browser. Will fail if Chrome is not installed."
     }
 
@@ -276,11 +276,11 @@ pub struct ChromeCurrentUrlTool;
 
 #[async_trait]
 impl Tool for ChromeCurrentUrlTool {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "chrome_current_url"
     }
 
-    fn description(&self) -> &'static str {
+    fn description(&self) -> &str {
         "Get the URL of the frontmost Google Chrome tab. No consent required (read-only). Will return an error if Chrome is not running or not installed."
     }
 
@@ -312,11 +312,11 @@ pub struct ChromeExecJsTool;
 
 #[async_trait]
 impl Tool for ChromeExecJsTool {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "chrome_exec_js"
     }
 
-    fn description(&self) -> &'static str {
+    fn description(&self) -> &str {
         "Execute JavaScript in the frontmost Google Chrome tab. Same model as safari_exec_js: runs in the page's origin, can do anything. Requires per-call consent."
     }
 
@@ -371,11 +371,11 @@ pub struct ChromeTabsTool;
 
 #[async_trait]
 impl Tool for ChromeTabsTool {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "chrome_tabs"
     }
 
-    fn description(&self) -> &'static str {
+    fn description(&self) -> &str {
         "List all open Google Chrome tabs across all windows. Returns title and URL. No consent required (read-only). Errors if Chrome is not running."
     }
 

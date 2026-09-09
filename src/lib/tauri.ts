@@ -18,6 +18,7 @@ import type {
   Conversation,
   DoneEvent,
   ErrorEvent,
+  McpServerInfo,
   Message,
   SendMessageResponse,
   Settings,
@@ -205,4 +206,10 @@ export async function requestTccFor(key: string): Promise<TccProbeResult> {
 
 export async function openAutomationSettings(): Promise<void> {
   await invoke("open_automation_settings");
+}
+
+// ---- MCP ----
+
+export async function listMcpServers(): Promise<McpServerInfo[]> {
+  return invoke<McpServerInfo[]>("list_mcp_servers");
 }

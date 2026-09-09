@@ -9,6 +9,7 @@ mod bots;
 mod commands;
 mod env_loader;
 mod llm;
+mod mcp;
 mod storage;
 mod tools;
 
@@ -24,6 +25,7 @@ use tauri::async_runtime::Mutex as AsyncMutex;
 /// that we never block startup on an outbound HTTP call.
 pub struct AppState {
     pub db: Arc<Database>,
+    pub mcp: mcp::McpRegistry,
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -51,7 +53,27 @@ pub fn run() {
             // keys: MINIMAX_API_KEY, SAND_MINIMAX_BASE_URL,
             // SAND_MINIMAX_MODEL.
             seed_settings_from_env(&db);
-            app.manage(AppState { db: Arc::new(db) });
+            // Load MCP servers from mcp_servers.json. We block on the
+            // async load here so the registry is populated by the time
+            // the first chat message arrives. Servers are local
+            // processes, so the load completes in well under a second
+            // for typical configs.
+            let mcp_config_path = data_dir.join("mcp_servers.json");
+            let mcp_registry = tauri::async_runtime::block_on(async {
+                mcp::load_from_config_path(&mcp_config_path).await
+            })
+            .unwrap_or_else(|e| {
+                log::warn!("mcp: registry load failed: {e}");
+                mcp::McpRegistry::default()
+            });
+            log::info!(
+                "mcp: {} server(s) loaded",
+                mcp_registry.server_count()
+            );
+            app.manage(AppState {
+                db: Arc::new(db),
+                mcp: mcp_registry,
+            });
             app.manage(Arc::new(AsyncMutex::new(StreamRegistry::default())));
             // Start the bot scheduler. It runs in a background tokio task
             // for the lifetime of the process, waking every 30s to fire
@@ -84,6 +106,7 @@ pub fn run() {
             commands::bots::list_available_tools,
             commands::bots::run_bot_now,
             commands::bots::send_to_bot,
+            commands::bots::list_mcp_servers,
             commands::tcc::list_controllable_apps,
             commands::tcc::request_tcc_for,
             commands::tcc::open_automation_settings,

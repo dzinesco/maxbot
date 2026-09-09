@@ -27,11 +27,11 @@ pub struct MailInboxTool;
 
 #[async_trait]
 impl Tool for MailInboxTool {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "mail_inbox"
     }
 
-    fn description(&self) -> &'static str {
+    fn description(&self) -> &str {
         "List the most recent messages in the default Mail account's inbox. Each entry includes sender, subject, date received, and a short snippet. Default 20 messages, max 100. No consent required (read-only)."
     }
 
@@ -101,11 +101,11 @@ pub struct MailSearchTool;
 
 #[async_trait]
 impl Tool for MailSearchTool {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "mail_search"
     }
 
-    fn description(&self) -> &'static str {
+    fn description(&self) -> &str {
         "Search the default Mail account's inbox for messages matching a query string. The search is case-insensitive and matches against subject, sender, and content. Returns the same format as mail_inbox. No consent required (read-only)."
     }
 
@@ -185,11 +185,11 @@ pub struct MailSendTool;
 
 #[async_trait]
 impl Tool for MailSendTool {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "mail_send"
     }
 
-    fn description(&self) -> &'static str {
+    fn description(&self) -> &str {
         "Send a new email from the default Mail account. Requires per-call consent because mail_send is a destructive external action. Use mail_draft instead if you want to compose a draft for the user to review before sending."
     }
 
@@ -263,11 +263,11 @@ pub struct MailDraftTool;
 
 #[async_trait]
 impl Tool for MailDraftTool {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "mail_draft"
     }
 
-    fn description(&self) -> &'static str {
+    fn description(&self) -> &str {
         "Create a draft email in the default Mail account (no send). The draft is reversible — the user can edit, delete, or send it from Mail.app. Requires per-call consent because drafts still appear in the user's Drafts folder and may auto-send if they have a rule."
     }
 

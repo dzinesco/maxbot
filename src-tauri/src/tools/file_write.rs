@@ -16,11 +16,11 @@ pub struct FileWriteTool;
 
 #[async_trait]
 impl Tool for FileWriteTool {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "file_write"
     }
 
-    fn description(&self) -> &'static str {
+    fn description(&self) -> &str {
         "Write a UTF-8 string to a file at the given path, creating parent directories if they don't exist. Use this to save notes, code snippets, or any other text the user asks you to write. Requires user consent."
     }
 

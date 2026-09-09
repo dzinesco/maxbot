@@ -78,7 +78,12 @@ pub async fn run_bot_once(
 ) -> BotRunOutput {
     let run_id = Uuid::new_v4().to_string();
     let started_at = Utc::now();
-    let full_tool_registry = Arc::new(ToolRegistry::default_set());
+    // Build the full registry (built-in tools + MCP tools) and then
+    // apply the bot's allowed_tools filter so the bot only sees the
+    // tools its owner has granted.
+    let full_tool_registry = Arc::new(ToolRegistry::default_with_extras(
+        state.mcp.tool_adapters(),
+    ));
 
     // 1. Reuse the previous conversation for recurring bots, or create
     //    a fresh one for one-off runs.

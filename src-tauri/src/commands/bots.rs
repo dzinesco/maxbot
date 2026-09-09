@@ -158,8 +158,10 @@ pub async fn mark_inbox_read(
 /// human-readable description and whether they require consent. The
 /// frontend uses this to render the allowlist picker in the bot editor.
 #[tauri::command]
-pub async fn list_available_tools() -> Result<Vec<ToolSummary>, String> {
-    let registry = ToolRegistry::default_set();
+pub async fn list_available_tools(
+    state: State<'_, AppState>,
+) -> Result<Vec<ToolSummary>, String> {
+    let registry = ToolRegistry::default_with_extras(state.mcp.tool_adapters());
     let defs: Vec<ToolDefinition> = registry.definitions();
     let summaries: Vec<ToolSummary> = defs
         .into_iter()
@@ -202,6 +204,7 @@ pub async fn run_bot_now(
     };
     let state_arc: Arc<AppState> = Arc::new(AppState {
         db: state.db.clone(),
+        mcp: crate::mcp::McpRegistry::default(),
     });
     // The bot runs to completion here; cancel is a no-op for now (UI
     // doesn't yet expose a per-run Stop button).
@@ -269,6 +272,7 @@ pub async fn send_to_bot(
         // stream as it arrives.
         let state_arc: Arc<AppState> = Arc::new(AppState {
             db: state.db.clone(),
+            mcp: crate::mcp::McpRegistry::default(),
         });
         let db_for_lookup = state.db.clone();
         let id_for_lookup = to_bot_id.clone();
@@ -291,4 +295,47 @@ pub async fn send_to_bot(
         }
     }
     Ok(msg)
+}
+
+// ---- MCP ----
+
+#[derive(serde::Serialize, Clone)]
+pub struct McpServerInfo {
+    pub name: String,
+    pub tool_count: usize,
+    pub tool_names: Vec<String>,
+}
+
+/// List the MCP servers currently loaded and the tools they
+/// contributed. Surfaced in the Settings → Computer Use / MCP panel.
+#[tauri::command]
+pub async fn list_mcp_servers(
+    state: State<'_, AppState>,
+) -> Result<Vec<McpServerInfo>, String> {
+    use crate::tools::Tool;
+    let mut grouped: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
+    for adapter in state.mcp.tool_adapters() {
+        let full = adapter.name();
+        if let Some(rest) = full.strip_prefix("mcp__") {
+            if let Some((server, tool)) = rest.split_once("__") {
+                grouped
+                    .entry(server.to_string())
+                    .or_default()
+                    .push(tool.to_string());
+            }
+        }
+    }
+    Ok(grouped
+        .into_iter()
+        .map(|(name, mut tool_names)| {
+            tool_names.sort();
+            let tool_count = tool_names.len();
+            McpServerInfo {
+                name,
+                tool_count,
+                tool_names,
+            }
+        })
+        .collect())
 }

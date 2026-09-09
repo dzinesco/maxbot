@@ -17,11 +17,11 @@ pub struct WindowListTool;
 
 #[async_trait]
 impl Tool for WindowListTool {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "window_list"
     }
 
-    fn description(&self) -> &'static str {
+    fn description(&self) -> &str {
         "List every visible (non-background-only) application process and the titles of its open windows. No consent required (read-only)."
     }
 
@@ -58,11 +58,11 @@ pub struct WindowFocusTool;
 
 #[async_trait]
 impl Tool for WindowFocusTool {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "window_focus"
     }
 
-    fn description(&self) -> &'static str {
+    fn description(&self) -> &str {
         "Bring a named application to the foreground. Requires per-call consent because it changes the user's focused app. Errors if the app isn't running."
     }
 
