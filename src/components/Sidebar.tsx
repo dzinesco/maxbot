@@ -31,8 +31,9 @@ import type {
   Computer,
   ComputerState,
   Conversation,
+  GroupChat,
 } from "../lib/api";
-import { computerGet } from "../lib/tauri";
+import { computerGet, groupList } from "../lib/tauri";
 
 export interface SidebarProps {
   /**
@@ -84,9 +85,23 @@ export interface SidebarProps {
    * highlighted. Callbacks fire on click. The parent
    * owns the state because the main view area switches
    * based on it.
+   *
+   * v2.4.0: extended with `"group"` for multi-Bot
+   * group chats. The Sidebar's "Groups" section
+   * dispatches a `select-group` event rather than
+   * switching the top-level tabs — the active group's
+   * pane replaces the chat area, and the Bots tab
+   * stays the canonical "select a Bot" entry point.
    */
   mainView: "chat" | "skills" | "routines";
   onSelectView: (view: "chat" | "skills" | "routines") => void;
+
+  /**
+   * v2.4.0: open the "Create group" dialog. The
+   * Sidebar's Groups section renders a `+` button
+   * that fires this; App.tsx mounts the dialog.
+   */
+  onCreateGroup?: () => void;
 
   /**
    * Legacy slot — previously the sidebar mounted the
@@ -110,6 +125,7 @@ export function Sidebar({
   onOpenSettings,
   mainView,
   onSelectView,
+  onCreateGroup,
   botPanel,
 }: SidebarProps) {
   // Same defensive computer-row hydration as the
@@ -224,6 +240,16 @@ export function Sidebar({
         onCreateBot={onCreateBot}
         onOpenComputer={onOpenComputer}
       />
+
+      {/* v2.4.0 — Groups section. Sits between the Bot
+         roster and the footer so the user can scan
+         both at a glance. The list is local-state
+         fetched on mount (one-shot, no polling) —
+         a fresh list comes back on every page
+         load, and the parent re-fetches after
+         `groupCreate` so the new group lands at
+         the top. */}
+      <GroupsSection onCreateGroup={onCreateGroup} />
 
       {botPanel}
 
@@ -350,4 +376,84 @@ export function mostRecentConversationForBot(
     .filter((c) => c.bot_id === botId)
     .sort((a, b) => (a.updated_at < b.updated_at ? 1 : -1));
   return matching[0] ?? null;
+}
+
+// ---- v2.4.0 Groups section ----
+
+/**
+ * Small list of saved groups, with a `+` button that
+ * opens the CreateGroupDialog (parent owns the modal
+ * state). The list is local state — we fetch once on
+ * mount and re-fetch when the page returns to focus so
+ * a freshly-created group shows up at the top.
+ */
+function GroupsSection({
+  onCreateGroup,
+}: {
+  onCreateGroup?: () => void;
+}) {
+  const [groups, setGroups] = useState<GroupChat[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    const refresh = () => {
+      groupList()
+        .then((rows) => {
+          if (!cancelled) setGroups(rows);
+        })
+        .catch(() => {
+          /* swallow — sidebar list is non-critical */
+        });
+    };
+    refresh();
+    // Re-fetch when the user returns to the tab so a
+    // background `groupCreate` from a script lands.
+    const onFocus = () => refresh();
+    window.addEventListener("focus", onFocus);
+    return () => {
+      cancelled = true;
+      window.removeEventListener("focus", onFocus);
+    };
+  }, []);
+  return (
+    <div className="sidebar-groups" data-testid="sidebar-groups">
+      <div className="sidebar-groups-header">
+        <span>Groups</span>
+        {onCreateGroup && (
+          <button
+            className="ghost small"
+            onClick={onCreateGroup}
+            title="Create a group"
+            data-testid="sidebar-create-group"
+          >
+            +
+          </button>
+        )}
+      </div>
+      {groups.length === 0 ? (
+        <div className="sidebar-groups-empty">No groups yet</div>
+      ) : (
+        <ul className="sidebar-groups-list">
+          {groups.map((g) => (
+            <li
+              key={g.chat.id}
+              className="sidebar-groups-row"
+              data-testid={`sidebar-group-${g.chat.id}`}
+              onClick={() =>
+                window.dispatchEvent(
+                  new CustomEvent("maxbot:select-group", {
+                    detail: { groupId: g.chat.id },
+                  }),
+                )
+              }
+            >
+              <span className="sidebar-groups-name">{g.chat.name}</span>
+              <span className="sidebar-groups-count">
+                {g.member_bot_ids.length}
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
 }

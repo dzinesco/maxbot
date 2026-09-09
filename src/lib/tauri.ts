@@ -21,6 +21,8 @@ import type {
   Conversation,
   DoneEvent,
   ErrorEvent,
+  GroupChat,
+  GroupMessage,
   McpServerInfo,
   Message,
   SendMessageResponse,
@@ -552,4 +554,101 @@ export async function skillRecordStart(botId: string): Promise<SkillRecordStart>
  *  `createSkill` persists the final version. */
 export async function skillRecordStop(recordingId: string): Promise<SkillRecordStop | null> {
   return invoke<SkillRecordStop | null>("skill_record_stop", { recordingId });
+}
+
+// ---- v2.4.0 Multi-Bot groups ----
+//
+// IPC wrappers for `src-tauri/src/commands/groups.rs`.
+// The plan: 2-6 Bots collaborate in a single
+// conversation. Messages are routed via `@BotName`
+// mentions; the Rust executor persists assistant
+// replies and `<handoff>` cards into the group's
+// transcript. Bot runs stream via the existing
+// `bot://chunk` events.
+
+/** List every group, most-recently-updated first. Each
+ *  row already includes the flat `member_bot_ids` list
+ *  (no follow-up call needed). */
+export async function groupList(): Promise<GroupChat[]> {
+  return invoke<GroupChat[]>("group_list");
+}
+
+/** Look up a single group by id, including its member
+ *  list. Returns null if the group was deleted. */
+export async function groupGet(groupId: string): Promise<GroupChat | null> {
+  return invoke<GroupChat | null>("group_get", { groupId });
+}
+
+/** Create a new group. `memberBotIds` is the additional
+ *  members beyond the owner (which is implicit in the
+ *  `ownerBotId` arg). Total members must be 2-6. */
+export async function groupCreate(
+  name: string,
+  ownerBotId: string,
+  memberBotIds: string[],
+): Promise<GroupChat> {
+  return invoke<GroupChat>("group_create", {
+    name,
+    ownerBotId,
+    memberBotIds,
+  });
+}
+
+/** Add a Bot to a group. Idempotent. */
+export async function groupAddMember(groupId: string, botId: string): Promise<void> {
+  await invoke("group_add_member", { groupId, botId });
+}
+
+/** Remove a Bot from a group. The owner cannot be
+ *  removed. */
+export async function groupRemoveMember(groupId: string, botId: string): Promise<void> {
+  await invoke("group_remove_member", { groupId, botId });
+}
+
+/** Append a user-sent message to a group's transcript.
+ *  `mentions` is the list of Bot ids the Composer
+ *  resolved from the user's `@BotName` references; the
+ *  executor reads it via the persisted row to decide
+ *  which Bots to run on the next `groupRunTurn`. */
+export async function groupSend(
+  groupId: string,
+  body: string,
+  mentions: string[] = [],
+): Promise<GroupMessage> {
+  return invoke<GroupMessage>("group_send", {
+    groupId,
+    body,
+    mentions: mentions ?? null,
+  });
+}
+
+/** Last `limit` messages for a group, oldest-first. A
+ *  limit of 0 returns every message; the default is 50. */
+export async function groupHistory(
+  groupId: string,
+  limit?: number,
+): Promise<GroupMessage[]> {
+  return invoke<GroupMessage[]>("group_history", {
+    groupId,
+    limit: limit ?? null,
+  });
+}
+
+/** Run a single Bot in a group for one turn. Streams
+ *  via `bot://chunk` events (filtered by
+ *  `event.bot_run_id` for the demux). Returns the new
+ *  assistant message id. If `handoffFromMessageId` is
+ *  set, the executor folds that handoff card's content
+ *  into the bot's inbox so the next Bot has the
+ *  upstream Bot's notes. */
+export async function groupRunTurn(
+  groupId: string,
+  botId: string,
+  handoffFromMessageId?: string,
+): Promise<string> {
+  return invoke<string>("group_run_turn", {
+    groupId,
+    botId,
+    handoffFromMessageId: handoffFromMessageId ?? null,
+  });
 }

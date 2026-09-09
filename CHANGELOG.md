@@ -4,6 +4,68 @@ All notable changes to MaxBot are documented in this file. The format
 follows [Keep a Changelog](https://keepachangelog.com/) and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## v2.4.0 — 2026-09-09
+
+### Added
+- **Multi-Bot groups.** A Group is a chat surface where
+  2–6 Bots collaborate. Each Group has a name, an
+  owner Bot, and a member set. Groups live in their
+  own `group_chats` / `group_members` / `group_messages`
+  tables — the existing direct-chat `conversations`
+  table is untouched, so upgrading installs see no
+  migration churn on their existing chats.
+- **`@BotName` mention routing.** The Composer parses
+  `@BotName` tokens (case-insensitive, whole-word) and
+  dispatches the message to the mentioned Bots in the
+  order they appear. Groups are 2–6 — no broadcast
+  pattern, no implicit "send to all" mode. A user
+  message with no mentions is accepted but shows a
+  hint: "Mention a Bot with @BotName to send to one
+  of the group members."
+- **`<handoff to="BotName">` routing between Bots.** A
+  Bot that wants another member to take the next turn
+  emits `<handoff to="BotName">…</handoff>` in its
+  final reply. The group executor strips the tag from
+  the rendered text, persists a `role='handoff'` row
+  in `group_messages` with the resolved target Bot id,
+  and the front-end watches for those rows to kick off
+  the next `run_group_turn` (with the handoff body as
+  the new user message). Unknown handoff targets
+  surface as `GroupError::UnknownHandoffTarget`.
+- **Sidebar "Groups" section.** Lists every group the
+  user owns above the Bot list. Clicking a group opens
+  `GroupChatView` (a ChatView variant with a left-side
+  participant rail and a distinct handoff card for
+  `role='handoff'` rows).
+- **`CreateGroupDialog`.** Pick a name, an owner Bot,
+  and 1–5 additional members. Client-side validation
+  mirrors the 2–6 hard cap the Rust side enforces; the
+  Rust side rejects the same case with a clear error
+  if a future caller skips validation.
+- **New Tauri commands.** `group_list`, `group_create`,
+  `group_add_member`, `group_remove_member`,
+  `group_send`, `group_history`, `group_run_turn` —
+  all in `src-tauri/src/commands/groups.rs`, wired
+  through the existing `invoke_handler!` macro.
+- **Group executor** (`src-tauri/src/groups/mod.rs`).
+  Reuses the existing `BotExecutor` and the existing
+  `bot://chunk` / `bot://done` / `bot://error` event
+  surface — no new event channel, no forked
+  executor. Front-end keys streaming off `bot_run_id`
+  so multiple Bots in a group can stream concurrently
+  without crosstalk.
+- **`@BotName` mention parser** (`src/lib/mentions.ts`).
+  Pure, shared between the Composer (to pick which
+  Bots to run) and the Renderer UI (to highlight
+  mentions in the rendered message bubbles).
+
+### Fixed
+- (none for v2.4.0)
+
+### Changed
+- **Bumped to 2.4.0** in `package.json`,
+  `src-tauri/Cargo.toml`, and `src-tauri/tauri.conf.json`.
+
 ## v2.3.6 — 2026-09-09
 
 ### Fixed

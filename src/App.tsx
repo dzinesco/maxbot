@@ -12,6 +12,8 @@ import { Settings } from "./components/Settings";
 import { BotEditor } from "./components/BotEditor";
 import { BotInbox } from "./components/BotInbox";
 import { ComputerPanel } from "./components/ComputerPanel";
+import { GroupChatView } from "./components/GroupChatView";
+import { CreateGroupDialog } from "./components/CreateGroupDialog";
 import { RecordSkillDialog } from "./components/RecordSkillDialog";
 import { SkillsPanel } from "./components/SkillsPanel";
 import { RoutinesPanel } from "./components/RoutinesPanel";
@@ -26,6 +28,11 @@ import {
   getMessages,
   searchMessages,
   getSettings,
+  groupGet,
+  groupHistory,
+  groupList,
+  groupRunTurn,
+  groupSend,
   listAllSchedules,
   listAvailableTools,
   listBots,
@@ -71,6 +78,8 @@ import {
   type Conversation,
   type DoneEvent,
   type ErrorEvent,
+  type GroupChat,
+  type GroupMessage,
   type Message,
   type Settings as SettingsT,
   type ToolSummary,
@@ -144,8 +153,109 @@ export default function App() {
   // and "Skills" (the Skills panel). Skills gets its own
   // tab so a user can browse and run Skills without first
   // picking a Bot / conversation.
-  const [mainView, setMainView] = useState<"chat" | "skills" | "routines">(
-    "chat",
+  //
+  // v2.4.0 — extended with `"group"`. The Sidebar's
+  // Groups section dispatches a `maxbot:select-group`
+  // event that flips this state and populates
+  // `activeGroupId`. The Bots tab stays the canonical
+  // "select a Bot" entry point; `group` is set by
+  // group-list clicks, not by tab clicks.
+  const [mainView, setMainView] = useState<
+    "chat" | "skills" | "routines" | "group"
+  >("chat");
+  // v2.4.0 — the active group's id. Only meaningful
+  // when `mainView === "group"`. Set by the
+  // `maxbot:select-group` event listener and the
+  // CreateGroupDialog's `onCreated` callback.
+  const [activeGroupId, setActiveGroupId] = useState<string | null>(null);
+  // v2.4.0 — the active group's transcript. Re-fetched
+  // on every `maxbot:select-group` event and after
+  // every `groupRunTurn` so the new assistant / handoff
+  // row lands at the bottom.
+  const [groupMessages, setGroupMessages] = useState<
+    import("./lib/api").GroupMessage[]
+  >([]);
+  // v2.4.0 — the create-group dialog open state.
+  const [createGroupOpen, setCreateGroupOpen] = useState(false);
+  // v2.4.0 — bot_run_id keyed by bot_id. Populated by
+  // `groupRunTurn` (the parent calls it serially for
+  // each mentioned Bot) and cleared by the `bot://done`
+  // event. The GroupChatView demuxes chunks by this
+  // map; the Composer disables Send while any value is
+  // truthy.
+  const [groupRunByBot, setGroupRunByBot] = useState<Record<string, string>>(
+    {},
+  );
+  const groupStreaming = Object.keys(groupRunByBot).length > 0;
+  // v2.4.0 — full metadata for the active group. Set
+  // alongside `activeGroupId` so the header can render
+  // the group name and the rail can list members
+  // without a follow-up `groupGet` per render.
+  const [activeGroup, setActiveGroup] = useState<GroupChat | null>(null);
+  // v2.4.0 — groups list (kept in state so the
+  // Sidebar's "Groups" section can render without a
+  // re-fetch on every render). Refreshed after
+  // CreateGroupDialog and on `groupList` events.
+  const [groups, setGroups] = useState<GroupChat[]>([]);
+
+  // Refresh the groups list. Cheap (single SQL
+  // query) so we call it on mount, on focus, and
+  // after `groupCreate`.
+  const refreshGroups = useCallback(() => {
+    groupList()
+      .then(setGroups)
+      .catch(() => {});
+  }, []);
+
+  /**
+   * v2.4.0 — group send: append the user message to
+   * the active group's transcript, then serially run
+   * each mentioned Bot via `groupRunTurn`. We do the
+   * runs serially (not in parallel) so the second Bot
+   * sees the first Bot's reply in the transcript that
+   * gets folded into its inbox context. The parent
+   * still gets the live `bot://chunk` events for
+   * streaming.
+   */
+  const handleGroupSend = useCallback(
+    async (body: string, mentionedBotIds: string[]) => {
+      if (!activeGroupIdRef.current) return;
+      const gid = activeGroupIdRef.current;
+      try {
+        await groupSend(gid, body, mentionedBotIds);
+        // Refetch so the user message lands in the
+        // transcript immediately, then start the runs.
+        const history = await groupHistory(gid, 50);
+        setGroupMessages(history);
+        for (const botId of mentionedBotIds) {
+          // The executor does its own validation;
+          // errors bubble up via the bot-error event.
+          const runId = await groupRunTurn(gid, botId, undefined);
+          setGroupRunByBot((prev) => ({ ...prev, [botId]: runId }));
+        }
+      } catch (e) {
+        // Surface as a banner — for v2.4 we just log.
+        console.warn("group send failed:", e);
+      }
+    },
+    [],
+  );
+
+  /** v2.4.0 — handle a successful `groupCreate`:
+   *  refresh the list, then dispatch a
+   *  `maxbot:select-group` event so the new group
+   *  opens in the chat area. */
+  const handleGroupCreated = useCallback(
+    (groupId: string) => {
+      setCreateGroupOpen(false);
+      refreshGroups();
+      window.dispatchEvent(
+        new CustomEvent("maxbot:select-group", {
+          detail: { groupId },
+        }),
+      );
+    },
+    [refreshGroups],
   );
   // v2.2.0 — when the user clicks "Record" in the Skills
   // panel, App.tsx mounts the RecordSkillDialog. State
@@ -209,6 +319,11 @@ export default function App() {
         setSettings(s);
         setConversations(c);
         setBots(b);
+        // v2.4.0 — load the groups list in parallel so
+        // the sidebar's "Groups" section is populated
+        // on first paint. The promise rejection is
+        // non-fatal (we render an empty list).
+        groupList().then(setGroups).catch(() => {});
         const schedMap: Record<string, BotSchedule> = {};
         for (const sc of sched) schedMap[sc.bot_id] = sc;
         setBotSchedules(schedMap);
@@ -399,6 +514,22 @@ export default function App() {
           delete next[event.bot_id];
           return next;
         });
+        // v2.4.0 — group turns also use
+        // `bot://done` to signal completion. Clear
+        // the per-Bot `groupRunByBot` entry and
+        // refetch the active group's transcript so
+        // the new assistant + handoff rows land.
+        setGroupRunByBot((prev) => {
+          if (!(event.bot_id in prev)) return prev;
+          const next = { ...prev };
+          delete next[event.bot_id];
+          return next;
+        });
+        if (activeGroupIdRef.current) {
+          groupHistory(activeGroupIdRef.current, 50)
+            .then(setGroupMessages)
+            .catch(() => {});
+        }
         setLastBotFinish({
           botId: event.bot_id,
           runId: event.bot_run_id,
@@ -432,6 +563,13 @@ export default function App() {
           delete next[event.bot_id];
           return next;
         });
+        // v2.4.0 — also clear the group-run map.
+        setGroupRunByBot((prev) => {
+          if (!(event.bot_id in prev)) return prev;
+          const next = { ...prev };
+          delete next[event.bot_id];
+          return next;
+        });
       });
       if (cancelled) {
         u1();
@@ -456,6 +594,13 @@ export default function App() {
   useEffect(() => {
     activeIdRef.current = activeId;
   }, [activeId]);
+  // v2.4.0 — same idea for the active group id.
+  // The bot-done listener uses this to refetch the
+  // group transcript when a group turn finishes.
+  const activeGroupIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    activeGroupIdRef.current = activeGroupId;
+  }, [activeGroupId]);
 
   // --- load messages when active conversation changes ---
   useEffect(() => {
@@ -714,11 +859,42 @@ export default function App() {
     };
     window.addEventListener("maxbot:new-conversation", onNew);
     window.addEventListener("maxbot:select-bot-first", onSelectFirst);
+    // v2.4.0 — sidebar's Groups section fires this
+    // when a row is clicked. We flip `mainView` to
+    // `"group"`, remember the group id, and kick off
+    // a history fetch.
+    const onSelectGroup = (event: Event) => {
+      const custom = event as CustomEvent<{ groupId: string }>;
+      const groupId = custom.detail?.groupId;
+      if (!groupId) return;
+      setMainView("group");
+      setActiveGroupId(groupId);
+      // Fire-and-forget history fetch. The setState
+      // for `groupMessages` is a top-level update;
+      // we don't await so the UI switches view
+      // immediately and the transcript streams in.
+      groupGet(groupId)
+        .then((g) => {
+          if (g) setActiveGroup(g);
+        })
+        .catch((e) => console.warn("group get failed:", e));
+      groupHistory(groupId, 50)
+        .then(setGroupMessages)
+        .catch((e) => console.warn("group history failed:", e));
+    };
+    window.addEventListener(
+      "maxbot:select-group",
+      onSelectGroup as EventListener,
+    );
     return () => {
       window.removeEventListener("maxbot:new-conversation", onNew);
       window.removeEventListener(
         "maxbot:select-bot-first",
         onSelectFirst,
+      );
+      window.removeEventListener(
+        "maxbot:select-group",
+        onSelectGroup as EventListener,
       );
     };
   }, [bots, handleNewBotConversation, handleNewConversation]);
@@ -1225,8 +1401,9 @@ export default function App() {
         onOpenComputer={(botId) => setComputerPanelBotId(botId)}
         status={status}
         onOpenSettings={() => setSettingsOpen(true)}
-        mainView={mainView}
-        onSelectView={setMainView}
+        mainView={mainView === "group" ? "chat" : mainView}
+        onSelectView={(v) => setMainView(v)}
+        onCreateGroup={() => setCreateGroupOpen(true)}
       />
       <main className="main">
         {mainView === "skills" ? (
@@ -1243,6 +1420,42 @@ export default function App() {
               handleSelectBot(botId);
             }}
           />
+        ) : mainView === "group" && activeGroup ? (
+          // v2.4.0 — multi-Bot group view. Renders the
+          // active group's transcript with a participant
+          // rail and handoff cards. The Composer is
+          // rendered in group mode below the main view.
+          <>
+            <GroupChatView
+              group={activeGroup.chat}
+              messages={groupMessages}
+              bots={bots.filter((b) =>
+                activeGroup.member_bot_ids.includes(b.id),
+              )}
+              activeRunByBot={groupRunByBot}
+              activeBotRunIds={Object.keys(groupRunByBot)}
+            />
+            <Composer
+              onSend={() => {}}
+              onStop={() => {}}
+              onOpenSendToBot={() => {}}
+              hasBots={false}
+              streaming={false}
+              lastAssistantText={null}
+              ttsSpeaking={false}
+              onToggleSpeakLast={() => {}}
+              mode="group"
+              groupMembers={activeGroup.member_bot_ids
+                .map((id) => {
+                  const b = bots.find((x) => x.id === id);
+                  return b ? { id: b.id, name: b.name } : null;
+                })
+                .filter(
+                  (x): x is { id: string; name: string } => x !== null,
+                )}
+              onGroupSend={handleGroupSend}
+            />
+          </>
         ) : bots.length === 0 ? (
           // v2.0 Slice E: brand-new user with no Bots.
           // The chat area shows a single, focused "Create
@@ -1336,6 +1549,21 @@ export default function App() {
               lastAssistantText={lastAssistantText}
               ttsSpeaking={ttsSpeaking}
               onToggleSpeakLast={handleToggleSpeakLast}
+              mode={mainView === "group" ? "group" : "chat"}
+              groupMembers={
+                activeGroup
+                  ? activeGroup.member_bot_ids
+                      .map((id) => {
+                        const b = bots.find((x) => x.id === id);
+                        return b ? { id: b.id, name: b.name } : null;
+                      })
+                      .filter(
+                        (x): x is { id: string; name: string } =>
+                          x !== null,
+                      )
+                  : undefined
+              }
+              onGroupSend={handleGroupSend}
             />
           </>
         )}
@@ -1378,6 +1606,14 @@ export default function App() {
           defaultBotId={selectedBotId}
           onClose={() => setRecordSkillOpen(false)}
           onSaved={() => setRecordSkillOpen(false)}
+        />
+      )}
+      {createGroupOpen && (
+        <CreateGroupDialog
+          bots={bots}
+          defaultOwnerBotId={selectedBotId}
+          onCreated={handleGroupCreated}
+          onClose={() => setCreateGroupOpen(false)}
         />
       )}
     </div>

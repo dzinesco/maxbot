@@ -236,6 +236,66 @@ fn default_computer_use_default_ssh_key() -> bool {
     true
 }
 
+/// v2.4.0 — a multi-Bot group chat. A group has 2-6
+/// member Bots (enforced in `create_group`); messages
+/// are routed to a specific member via `@BotName` mentions
+/// parsed in the Composer. `owner_bot_id` is the creator;
+/// the renderer uses it as the default sender for
+/// unset `bot_id` columns (currently unused, but the
+/// column makes ownership obvious in queries).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GroupChat {
+    pub id: String,
+    pub name: String,
+    pub owner_bot_id: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// A `GroupChat` plus the list of its member Bot ids.
+/// Returned by `list_groups` and `get_group` so the
+/// renderer doesn't have to do a follow-up
+/// `list_group_members` per row.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GroupChatWithMembers {
+    pub chat: GroupChat,
+    pub member_bot_ids: Vec<String>,
+}
+
+/// v2.4.0 — one row of the `group_messages` transcript.
+/// `role` is one of `"user"`, `"assistant"`, or
+/// `"handoff"`. `mentions_json` is a JSON array of Bot
+/// ids (stored as TEXT so we can re-hydrate it on read).
+/// `handoff_to` is the resolved Bot id for `role =
+/// "handoff"` rows; null otherwise.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GroupMessage {
+    pub id: String,
+    pub group_id: String,
+    /// Bot id of the speaker. `None` for user-sent
+    /// messages (the user isn't a Bot).
+    pub bot_id: Option<String>,
+    /// One of `"user"`, `"assistant"`, `"handoff"`.
+    /// Stored as a free-form string so a future role
+    /// addition (e.g. `"system"`) doesn't require a
+    /// migration; the executor only writes the three
+    /// values above.
+    pub role: String,
+    pub content: String,
+    /// Bot ids that were @-mentioned in the user
+    /// message that produced this transcript row. For
+    /// assistant / handoff rows this is the union of
+    /// the originating user message's mentions plus
+    /// any explicit mentions inside the reply.
+    #[serde(default)]
+    pub mentions: Vec<String>,
+    /// Set on `role = "handoff"` rows to the resolved
+    /// target Bot id. `None` for everything else.
+    #[serde(default)]
+    pub handoff_to: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
 /// One row in the `ssh_keys` table. Returned by
 /// `Database::get_ssh_key` so the ComputerManager can
 /// decrypt the private half on demand.
@@ -391,7 +451,46 @@ impl Database {
                 result_summary  TEXT NOT NULL DEFAULT ''
              );
              CREATE INDEX IF NOT EXISTS skill_runs_by_skill
-                 ON skill_runs(skill_id, started_at DESC);",
+                 ON skill_runs(skill_id, started_at DESC);
+             -- v2.4.0 — Multi-Bot groups: 2-6 Bots can
+             -- collaborate in a single conversation. The
+             -- `group_chats` row is the conversation; the
+             -- `group_members` rows enumerate the Bot
+             -- participants; `group_messages` is the
+             -- transcript. `conversations.kind` is NOT
+             -- migrated — group chats live in their own
+             -- tables and `mainView` distinguishes them
+             -- on the renderer side. The `handoff_to`
+             -- column on `group_messages` is set for
+             -- `role='handoff'` rows and points at the
+             -- Bot that should pick the message up next
+             -- turn.
+             CREATE TABLE IF NOT EXISTS group_chats (
+                id          TEXT PRIMARY KEY,
+                name        TEXT NOT NULL,
+                owner_bot_id TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+                created_at  TEXT NOT NULL,
+                updated_at  TEXT NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS group_members (
+                group_id    TEXT NOT NULL REFERENCES group_chats(id) ON DELETE CASCADE,
+                bot_id      TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+                PRIMARY KEY (group_id, bot_id)
+             );
+             CREATE TABLE IF NOT EXISTS group_messages (
+                id            TEXT PRIMARY KEY,
+                group_id      TEXT NOT NULL REFERENCES group_chats(id) ON DELETE CASCADE,
+                bot_id        TEXT REFERENCES bots(id) ON DELETE SET NULL,
+                role          TEXT NOT NULL,
+                content       TEXT NOT NULL,
+                mentions_json TEXT NOT NULL DEFAULT '[]',
+                handoff_to    TEXT,
+                created_at    TEXT NOT NULL
+             );
+             CREATE INDEX IF NOT EXISTS group_messages_by_group
+                 ON group_messages(group_id, created_at);
+             CREATE INDEX IF NOT EXISTS group_members_by_bot
+                 ON group_members(bot_id);",
         )?;
         // Idempotent column additions for older databases. SQLite
         // doesn't have IF NOT EXISTS for columns, so we probe
@@ -1488,6 +1587,308 @@ impl Database {
         let mut out = Vec::new();
         for r in rows {
             out.push(r?);
+        }
+        Ok(out)
+    }
+
+    // ----- v2.4.0 group chats -----
+    //
+    // Storage for the multi-Bot "group chat" view. The
+    // schema is intentionally separate from the
+    // `conversations` table: a group is a multi-Bot
+    // collaboration, not a 1:1 chat with a single Bot.
+    // The renderer distinguishes via the `mainView`
+    // state (extended with `"group"` in v2.4.0).
+
+    /// Every group, most-recently-updated first. Each
+    /// row's `member_bot_ids` field is filled in by a
+    /// second pass so the renderer can render the
+    /// participant list without a follow-up call per
+    /// group.
+    pub fn list_groups(&self) -> rusqlite::Result<Vec<GroupChatWithMembers>> {
+        let conn = self.conn.lock().expect("db lock poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT id, name, owner_bot_id, created_at, updated_at
+             FROM group_chats ORDER BY updated_at DESC",
+        )?;
+        let groups: Vec<GroupChat> = stmt
+            .query_map([], |row| {
+                Ok(GroupChat {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    owner_bot_id: row.get(2)?,
+                    created_at: parse_dt(row.get::<_, String>(3)?),
+                    updated_at: parse_dt(row.get::<_, String>(4)?),
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        // Hydrate member lists. We do this in a second
+        // pass (rather than a single JOIN) so an empty
+        // membership doesn't truncate the group from the
+        // response — a UI that wants the raw group list
+        // can call `list_groups` and get every row
+        // regardless of member count.
+        let mut stmt_m = conn.prepare(
+            "SELECT bot_id FROM group_members WHERE group_id = ? ORDER BY bot_id",
+        )?;
+        let mut out = Vec::with_capacity(groups.len());
+        for g in groups {
+            let members: Vec<String> = stmt_m
+                .query_map(params![g.id], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            out.push(GroupChatWithMembers {
+                chat: g,
+                member_bot_ids: members,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Look up a single group (with members) by id.
+    pub fn get_group(
+        &self,
+        id: &str,
+    ) -> rusqlite::Result<Option<GroupChatWithMembers>> {
+        let conn = self.conn.lock().expect("db lock poisoned");
+        let chat = match conn
+            .query_row(
+                "SELECT id, name, owner_bot_id, created_at, updated_at
+                 FROM group_chats WHERE id = ?",
+                params![id],
+                |row| {
+                    Ok(GroupChat {
+                        id: row.get(0)?,
+                        name: row.get(1)?,
+                        owner_bot_id: row.get(2)?,
+                        created_at: parse_dt(row.get::<_, String>(3)?),
+                        updated_at: parse_dt(row.get::<_, String>(4)?),
+                    })
+                },
+            )
+            .optional()?
+        {
+            Some(c) => c,
+            None => return Ok(None),
+        };
+        let mut stmt = conn.prepare(
+            "SELECT bot_id FROM group_members WHERE group_id = ? ORDER BY bot_id",
+        )?;
+        let members: Vec<String> = stmt
+            .query_map(params![id], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(Some(GroupChatWithMembers {
+            chat,
+            member_bot_ids: members,
+        }))
+    }
+
+    /// Atomically create a group + insert the owner +
+    /// the additional members. The whole operation
+    /// happens in a single transaction so we never end
+    /// up with a group_chats row and a missing
+    /// group_members row (which would render the group
+    /// empty in the sidebar). Returns the persisted
+    /// group + the full member list.
+    pub fn create_group(
+        &self,
+        name: &str,
+        owner_bot_id: &str,
+        member_bot_ids: &[String],
+    ) -> rusqlite::Result<GroupChatWithMembers> {
+        let now = Utc::now();
+        let mut conn = self.conn.lock().expect("db lock poisoned");
+        let tx = conn.transaction()?;
+        let group_id = Uuid::new_v4().to_string();
+        tx.execute(
+            "INSERT INTO group_chats (id, name, owner_bot_id, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?)",
+            params![
+                group_id,
+                name,
+                owner_bot_id,
+                now.to_rfc3339(),
+                now.to_rfc3339()
+            ],
+        )?;
+        // Insert the owner as a member too, then any
+        // additional members. De-dupe the combined
+        // list so a caller that accidentally re-passes
+        // the owner doesn't trip the PRIMARY KEY.
+        let mut seen = std::collections::HashSet::new();
+        let mut all = Vec::with_capacity(member_bot_ids.len() + 1);
+        all.push(owner_bot_id.to_string());
+        for m in member_bot_ids {
+            if seen.insert(m.clone()) {
+                all.push(m.clone());
+            }
+        }
+        // The owner is unconditionally included; if
+        // the caller also passed it, drop the
+        // duplicate after the set check.
+        all.dedup();
+        for m in &all {
+            tx.execute(
+                "INSERT INTO group_members (group_id, bot_id) VALUES (?, ?)",
+                params![group_id, m],
+            )?;
+        }
+        tx.commit()?;
+        Ok(GroupChatWithMembers {
+            chat: GroupChat {
+                id: group_id,
+                name: name.to_string(),
+                owner_bot_id: owner_bot_id.to_string(),
+                created_at: now,
+                updated_at: now,
+            },
+            member_bot_ids: all,
+        })
+    }
+
+    /// Add a Bot to a group. Idempotent — re-adding a
+    /// member is a no-op so the renderer's "select all"
+    /// path doesn't have to pre-check.
+    pub fn add_group_member(&self, group_id: &str, bot_id: &str) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().expect("db lock poisoned");
+        // Bump the group's updated_at so the sidebar
+        // re-orders to the top.
+        let now = Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT OR IGNORE INTO group_members (group_id, bot_id) VALUES (?, ?)",
+            params![group_id, bot_id],
+        )?;
+        conn.execute(
+            "UPDATE group_chats SET updated_at = ? WHERE id = ?",
+            params![now, group_id],
+        )?;
+        Ok(())
+    }
+
+    /// Remove a Bot from a group. Removing the owner is
+    /// a no-op (the owner's row stays; groups are
+    /// immutable w.r.t. ownership for v2.4).
+    pub fn remove_group_member(&self, group_id: &str, bot_id: &str) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().expect("db lock poisoned");
+        let now = Utc::now().to_rfc3339();
+        // Refuse to remove the owner — the renderer
+        // doesn't surface this option, and silently
+        // leaving an owner-less group would break
+        // queries.
+        let owner: Option<String> = conn
+            .query_row(
+                "SELECT owner_bot_id FROM group_chats WHERE id = ?",
+                params![group_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if owner.as_deref() == Some(bot_id) {
+            return Ok(());
+        }
+        conn.execute(
+            "DELETE FROM group_members WHERE group_id = ? AND bot_id = ?",
+            params![group_id, bot_id],
+        )?;
+        conn.execute(
+            "UPDATE group_chats SET updated_at = ? WHERE id = ?",
+            params![now, group_id],
+        )?;
+        Ok(())
+    }
+
+    /// Append a message to a group's transcript. The
+    /// `mentions_json` column is set from
+    /// `serde_json::to_string(&mentions)`; the executor
+    /// passes the user-typed mention list so the
+    /// renderer can render a "→ @Writer" badge on the
+    /// row.
+    pub fn append_group_message(
+        &self,
+        group_id: &str,
+        bot_id: Option<&str>,
+        role: &str,
+        content: &str,
+        mentions: &[String],
+        handoff_to: Option<&str>,
+    ) -> rusqlite::Result<GroupMessage> {
+        let now = Utc::now();
+        let id = Uuid::new_v4().to_string();
+        let mentions_json =
+            serde_json::to_string(mentions).unwrap_or_else(|_| "[]".to_string());
+        let conn = self.conn.lock().expect("db lock poisoned");
+        conn.execute(
+            "INSERT INTO group_messages
+                (id, group_id, bot_id, role, content, mentions_json, handoff_to, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            params![
+                id,
+                group_id,
+                bot_id,
+                role,
+                content,
+                mentions_json,
+                handoff_to,
+                now.to_rfc3339(),
+            ],
+        )?;
+        // Bump the group's updated_at so the sidebar
+        // re-orders.
+        conn.execute(
+            "UPDATE group_chats SET updated_at = ? WHERE id = ?",
+            params![now.to_rfc3339(), group_id],
+        )?;
+        Ok(GroupMessage {
+            id,
+            group_id: group_id.to_string(),
+            bot_id: bot_id.map(str::to_string),
+            role: role.to_string(),
+            content: content.to_string(),
+            mentions: mentions.to_vec(),
+            handoff_to: handoff_to.map(str::to_string),
+            created_at: now,
+        })
+    }
+
+    /// List the most-recent `limit` messages for a
+    /// group, oldest-first (so the renderer can append
+    /// directly to the transcript). `limit = 0` means
+    /// "all" — used by the history-on-open path.
+    pub fn list_group_messages(
+        &self,
+        group_id: &str,
+        limit: u32,
+    ) -> rusqlite::Result<Vec<GroupMessage>> {
+        let conn = self.conn.lock().expect("db lock poisoned");
+        let limit_clause = if limit == 0 {
+            String::new()
+        } else {
+            format!(" LIMIT {}", limit)
+        };
+        let sql = format!(
+            "SELECT id, group_id, bot_id, role, content, mentions_json, handoff_to, created_at
+             FROM group_messages
+             WHERE group_id = ?
+             ORDER BY created_at ASC{}",
+            limit_clause
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(params![group_id], |row| {
+            let mentions_json: String = row.get(5)?;
+            let mentions: Vec<String> =
+                serde_json::from_str(&mentions_json).unwrap_or_default();
+            Ok(GroupMessage {
+                id: row.get(0)?,
+                group_id: row.get(1)?,
+                bot_id: row.get(2)?,
+                role: row.get(3)?,
+                content: row.get(4)?,
+                mentions,
+                handoff_to: row.get(6)?,
+                created_at: parse_dt(row.get::<_, String>(7)?),
+            })
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
         }
         Ok(out)
     }

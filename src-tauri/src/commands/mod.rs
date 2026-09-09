@@ -5,6 +5,7 @@ pub mod bots;
 pub mod chat;
 pub mod computer;
 pub mod conversations;
+pub mod groups;
 pub mod meta;
 pub mod settings;
 pub mod skills;

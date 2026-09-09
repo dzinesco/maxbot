@@ -14,6 +14,7 @@
 // scheduler-test surface.
 pub mod bots;
 pub mod computer;
+pub mod groups;
 pub mod mcp;
 pub mod skills;
 pub mod storage;
@@ -211,6 +212,19 @@ pub fn run() {
             commands::skills::skill_run_history,
             commands::skills::skill_record_start,
             commands::skills::skill_record_stop,
+            // v2.4.0 — Multi-Bot groups: list / get / create
+            // groups, manage members, send messages, fetch
+            // history, and run a single Bot in the group for
+            // one turn (which streams via bot://chunk as
+            // usual).
+            commands::groups::group_list,
+            commands::groups::group_get,
+            commands::groups::group_create,
+            commands::groups::group_add_member,
+            commands::groups::group_remove_member,
+            commands::groups::group_send,
+            commands::groups::group_history,
+            commands::groups::group_run_turn,
         ])
         .run(tauri::generate_context!())
         .expect("error while running MaxBot");

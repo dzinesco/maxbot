@@ -414,6 +414,44 @@ export interface BotRunOutput {
   result_summary: string;
 }
 
+// ---- v2.4.0 Multi-Bot groups ----
+
+/**
+ * A group of 2-6 Bots that collaborate in a single
+ * conversation. `member_bot_ids` is the flat list of Bot
+ * ids; the renderer resolves them to display names via
+ * the existing `Bot[]` list. `owner_bot_id` is the
+ * creator; the owner cannot be removed via the UI.
+ */
+export interface GroupChat {
+  chat: {
+    id: string;
+    name: string;
+    owner_bot_id: string;
+    created_at: string;
+    updated_at: string;
+  };
+  member_bot_ids: string[];
+}
+
+export type GroupRole = "user" | "assistant" | "handoff";
+
+export interface GroupMessage {
+  id: string;
+  group_id: string;
+  /** Speaker Bot id; `null` for user-sent messages. */
+  bot_id: string | null;
+  role: GroupRole;
+  content: string;
+  /** Bot ids that were @-mentioned. Renderer uses this
+   * to render the "→ @Writer" badge on a row. */
+  mentions: string[];
+  /** For `role='handoff'` rows, the resolved target Bot
+   * id. `null` otherwise. */
+  handoff_to: string | null;
+  created_at: string;
+}
+
 // Helper: build a fresh empty bot (used by the editor's "New bot" path).
 export function blankBot(): Bot {
   const now = new Date().toISOString();
