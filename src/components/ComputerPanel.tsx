@@ -167,6 +167,13 @@ function FullComputerPanel({
   const [loading, setLoading] = useState(true);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [consoleUrl, setConsoleUrl] = useState<string | null>(null);
+  // `consoleUrlError` is set when the Tauri `computer_console_url`
+  // command itself fails — typically because the SSH tunnel
+  // child exited before the readiness window elapsed (auth
+  // failed, no passphrase, etc.). We surface this in the
+  // Console tab body so the user sees a real reason instead
+  // of a black noVNC canvas.
+  const [consoleUrlError, setConsoleUrlError] = useState<string | null>(null);
   // `viewerError` is the noVNC RFB/WebSocket error. Distinct
   // from `errorMsg`, which is reserved for the computer.state
   // === "error" path. The viewer's failure is the most
@@ -205,17 +212,24 @@ function FullComputerPanel({
           try {
             const url = await computerConsoleUrl(botId);
             setConsoleUrl(url);
+            setConsoleUrlError(null);
           } catch (e) {
-            // The viewer is unmounted; we just don't render
-            // it. The next poll retries.
+            // The Rust side waited for the SSH tunnel to
+            // be ready (3s window) and refused to return a
+            // URL because the tunnel child had already
+            // exited. Surface the real reason — usually
+            // the passphrase is missing, or the key was
+            // rejected, or the host key didn't match.
             setConsoleUrl(null);
-            console.warn("computer_console_url failed:", e);
+            setConsoleUrlError(String(e));
           }
         } else {
           setConsoleUrl(null);
+          setConsoleUrlError(null);
         }
       } else {
         setConsoleUrl(null);
+        setConsoleUrlError(null);
       }
     } catch (e) {
       setErrorMsg(String(e));
@@ -507,6 +521,26 @@ function FullComputerPanel({
                 onError={(e) => setViewerError(e)}
                 onConnect={() => setViewerError(null)}
               />
+            ) : consoleUrlError ? (
+              <div
+                className="computer-panel__body--error"
+                data-testid="console-url-error"
+              >
+                <div className="computer-panel__error-title">
+                  Console unavailable
+                </div>
+                <div className="computer-panel__error-detail">
+                  {consoleUrlError}
+                </div>
+                <div
+                  className="computer-panel__error-detail"
+                  style={{ opacity: 0.7, marginTop: 8 }}
+                >
+                  Most common cause: the SSH tunnel could not
+                  authenticate. Check Settings → Computer →
+                  passphrase, then re-open the panel.
+                </div>
+              </div>
             ) : (
               <div className="computer-panel__body--loading">
                 <div className="computer-panel__spinner" />

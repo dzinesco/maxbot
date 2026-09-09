@@ -26,6 +26,7 @@
 use std::net::SocketAddr;
 use std::process::Stdio;
 use std::sync::Arc;
+use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
 use thiserror::Error;
@@ -47,6 +48,16 @@ pub enum VncError {
     Bind(String),
     #[error("vnc tunnel spawn failed: {0}")]
     Tunnel(String),
+    /// The SSH tunnel child process exited before the
+    /// readiness window elapsed — typically because SSH
+    /// auth failed (no passphrase set, key rejected,
+    /// host key mismatch). `stderr` carries the captured
+    /// ssh output for diagnosis. Distinct from
+    /// `Tunnel` (which is a spawn-time failure) because
+    /// here the child DID start; it just didn't survive
+    /// the first few seconds.
+    #[error("vnc tunnel auth failed: {0}")]
+    TunnelAuthFailed(String),
     #[error("websocket handshake failed: {0}")]
     Ws(String),
     #[error("io error: {0}")]
@@ -205,12 +216,81 @@ pub async fn start(
     let actual = listener
         .local_addr()
         .map_err(|e| VncError::Bind(e.to_string()))?;
-    let tunnel = spawn_tunnel(pool, actual.port(), remote_vnc_port).await?;
+    let mut tunnel = spawn_tunnel(pool, actual.port(), remote_vnc_port).await?;
+    // Wait for the SSH tunnel to be ready. The previous
+    // design returned the proxy immediately and let the
+    // bridge discover a dead VNC side on first WS — which
+    // meant the renderer got a valid-looking URL and
+    // noVNC showed a black canvas with no indication.
+    // Now we poll the tunnel child for up to 3s; if it
+    // exits during that window (auth failed, no
+    // passphrase, host key mismatch), capture its stderr
+    // and return a `TunnelAuthFailed` so the renderer can
+    // show the real reason instead of a black screen.
+    if !wait_for_tunnel_ready(&mut tunnel).await? {
+        let stderr = read_child_stderr(&mut tunnel).await;
+        // Kill it for good measure in case it's stuck.
+        let _ = tunnel.start_kill();
+        let _ = tunnel.wait().await;
+        return Err(VncError::TunnelAuthFailed(stderr));
+    }
     Ok(VncProxy {
         tunnel: Arc::new(Mutex::new(Some(tunnel))),
         listener: Some(listener),
         local_addr: actual,
     })
+}
+
+/// Poll the SSH tunnel child for `READY_WINDOW` and return
+/// `Ok(true)` if it stays alive that long (i.e. the
+/// forward is established). Returns `Ok(false)` if it
+/// exits within the window. Errors from `try_wait` other
+/// than `NotFound` are returned as `Err`.
+async fn wait_for_tunnel_ready(child: &mut Child) -> Result<bool, VncError> {
+    const READY_WINDOW: Duration = Duration::from_secs(3);
+    const POLL_INTERVAL: Duration = Duration::from_millis(100);
+    let deadline = tokio::time::Instant::now() + READY_WINDOW;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_status)) => return Ok(false), // child exited
+            Ok(None) => {
+                // still running
+                if tokio::time::Instant::now() >= deadline {
+                    return Ok(true); // survived the window — assume ready
+                }
+                tokio::time::sleep(POLL_INTERVAL).await;
+            }
+            Err(e) => return Err(VncError::Tunnel(e.to_string())),
+        }
+    }
+}
+
+/// Drain the child's stderr (non-blocking-ish via
+/// `try_wait` + a small read). Returns the captured
+/// output as a single string, or a placeholder if the
+/// pipe was already drained or empty. The caller is
+/// expected to have just observed the child exit.
+async fn read_child_stderr(child: &mut Child) -> String {
+    use std::io::Read;
+    let mut buf = String::new();
+    if let Some(mut stderr) = child.stderr.take() {
+        // Use a short blocking read with a timeout via
+        // tokio's spawn_blocking. The child has already
+        // exited, so the pipe will close after we drain.
+        let _ = tokio::task::spawn_blocking(move || {
+            let mut s = String::new();
+            let _ = stderr.read_to_string(&mut s);
+            s
+        })
+        .await
+        .map(|s| buf = s);
+    }
+    let trimmed = buf.trim();
+    if trimmed.is_empty() {
+        "(no stderr output captured)".to_string()
+    } else {
+        trimmed.to_string()
+    }
 }
 
 /// Pick the next free TCP port in `[lo, hi]`. Walks
@@ -397,5 +477,36 @@ mod tests {
             ssh_config: String::new(),
         });
         assert!(pool.server_config().is_none());
+    }
+
+    #[tokio::test]
+    async fn wait_for_tunnel_ready_detects_immediate_exit() {
+        // Spawn a child that exits immediately. The
+        // readiness window should observe the exit
+        // (via `try_wait` returning `Some`) and return
+        // `Ok(false)`. This is the path that
+        // `vnc::start()` maps to `TunnelAuthFailed`.
+        // We use `true` so the child exits with status 0
+        // and the wait completes cleanly.
+        let mut child = Command::new("true").spawn().unwrap();
+        let ready = wait_for_tunnel_ready(&mut child).await.unwrap();
+        assert!(!ready, "immediate-exit child should not be ready");
+    }
+
+    #[tokio::test]
+    async fn wait_for_tunnel_ready_survives_long_running_child() {
+        // `sleep 30` is a long-running child. The
+        // 3-second readiness window elapses, the helper
+        // returns `Ok(true)` because the child is still
+        // alive. We then kill it so the test doesn't
+        // leak a subprocess.
+        let mut child = Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let ready = wait_for_tunnel_ready(&mut child).await.unwrap();
+        assert!(ready, "long-running child should be considered ready");
+        let _ = child.start_kill();
+        let _ = child.wait().await;
     }
 }
