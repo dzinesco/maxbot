@@ -12,6 +12,7 @@
 // `maxbot_lib::bots::...`. The `bots::scheduler::tick`
 // and `skills::executor::run_skill_inner` are the
 // scheduler-test surface.
+pub mod approvals;
 pub mod bots;
 pub mod computer;
 pub mod groups;
@@ -233,6 +234,17 @@ pub fn run() {
             commands::memory::memory_remember,
             commands::memory::memory_forget,
             commands::memory::memory_list,
+            // v2.6.0 — Approval flows: per-Bot per-tool
+            // auto/ask/deny rules, the pending queue, and
+            // the Approve / Reject / Edit & send decision
+            // surface. See `crate::approvals` and
+            // `commands::approvals`.
+            commands::approvals::approval_list,
+            commands::approvals::approval_get,
+            commands::approvals::approval_pending_count,
+            commands::approvals::approval_rule_list,
+            commands::approvals::approval_rule_set,
+            commands::approvals::approval_decide,
         ])
         .run(tauri::generate_context!())
         .expect("error while running MaxBot");

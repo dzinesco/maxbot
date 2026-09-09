@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
-import type { Bot, BotSchedule, ToolSummary } from "../lib/api";
+import type { Bot, BotSchedule, Rule, ToolSummary } from "../lib/api";
 import {
+  approvalRuleList,
+  approvalRuleSet,
   computerGet,
   computerProvision,
   revealBotFolder,
@@ -192,6 +194,38 @@ export function BotEditor({
   >(null);
   const [provisionError, setProvisionError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  // ---- v2.6.0 — Approval rules ----
+  // Per-Bot per-tool rule (auto / ask / deny). Loaded
+  // once on mount from `approval_rule_list`. The
+  // editor shows one row per known tool; missing
+  // tools default to `auto` until the user sets
+  // something else.
+  const [rules, setRules] = useState<
+    Record<string, Rule>
+  >({});
+  // v2.6.0 — pull the existing rules once we have
+  // an `id`. For brand-new Bots (no id yet) we leave
+  // the map empty; the Rust side seeds defaults on
+  // first save, but the editor's preview shows
+  // `auto` everywhere until that happens.
+  useEffect(() => {
+    const targetId = bot.id || initial.id;
+    if (!targetId) return;
+    let cancelled = false;
+    approvalRuleList(targetId)
+      .then((rows) => {
+        if (cancelled) return;
+        const map: Record<string, Rule> = {};
+        for (const r of rows) map[r.tool_name] = r.rule;
+        setRules(map);
+      })
+      .catch(() => {
+        /* non-fatal — render auto by default */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [bot.id, initial.id]);
 
   // Esc closes
   useEffect(() => {
@@ -642,6 +676,71 @@ export function BotEditor({
                 })}
               </ul>
             )}
+          </section>
+
+          {/* v2.6.0 — Approval rules. One row per
+            known tool. The user picks auto / ask /
+            deny; the change is fire-and-forget
+            persisted so the user can keep editing
+            without waiting. The Rust side seeds
+            defaults on first install, so for an
+            existing Bot the map starts populated;
+            for a new Bot every row is `auto` until
+            the user picks something. */}
+          <section className="form-section">
+            <h3>
+              Rules
+              <span className="hint">
+                {" "}— auto runs, ask queues, deny blocks
+              </span>
+            </h3>
+            <ul className="rule-list">
+              {availableTools.map((t) => {
+                const current = rules[t.name] ?? "auto";
+                return (
+                  <li
+                    key={t.name}
+                    className="rule-list__row"
+                    data-testid={`rule-row-${t.name}`}
+                  >
+                    <code className="rule-list__tool">{t.name}</code>
+                    <div className="rule-list__radios">
+                      {(["auto", "ask", "deny"] as Rule[]).map((r) => (
+                        <label
+                          key={r}
+                          className="rule-list__radio"
+                          data-testid={`rule-radio-${t.name}-${r}`}
+                        >
+                          <input
+                            type="radio"
+                            name={`rule-${t.name}`}
+                            value={r}
+                            checked={current === r}
+                            onChange={() => {
+                              setRules((prev) => ({
+                                ...prev,
+                                [t.name]: r,
+                              }));
+                              const targetId = bot.id || initial.id;
+                              if (targetId) {
+                                approvalRuleSet(targetId, t.name, r).catch(
+                                  (e) =>
+                                    console.warn(
+                                      "approval_rule_set failed:",
+                                      e,
+                                    ),
+                                );
+                              }
+                            }}
+                          />
+                          <span>{r}</span>
+                        </label>
+                      ))}
+                    </div>
+                  </li>
+                );
+              })}
+            </ul>
           </section>
 
           {/* Schedule */}

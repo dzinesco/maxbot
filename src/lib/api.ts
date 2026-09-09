@@ -386,6 +386,51 @@ export interface ToolSummary {
   requires_consent: boolean;
 }
 
+// ---- v2.6.0 — Approval flows ----
+//
+// The renderer mirrors the Rust shapes in
+// `src-tauri/src/approvals/mod.rs` (Rule enum + the
+// ApprovalRule / Approval rows). `Rule` is a string
+// union (matches serde's `rename_all = "lowercase"`)
+// so the renderer can `as`-cast safely from
+// `unknown` invoke results without an extra import.
+
+export type Rule = "auto" | "ask" | "deny";
+
+export interface ApprovalRule {
+  bot_id: string;
+  tool_name: string;
+  rule: Rule;
+}
+
+export type ApprovalStatus =
+  | "pending"
+  | "approved"
+  | "rejected"
+  | "edited";
+
+export interface Approval {
+  id: string;
+  bot_id: string;
+  tool_name: string;
+  status: ApprovalStatus;
+  payload: unknown;
+  result: unknown | null;
+  bot_run_id: string | null;
+  created_at: string;
+  decided_at: string | null;
+}
+
+/** Returned by `approval_decide` — the canonical
+ *  Approval row plus the tool's result string (when
+ *  approved / edited). The renderer uses
+ *  `tool_result` for the toast and `approval.result`
+ *  for the row's "decided" badge. */
+export interface ApprovalDecideOutput {
+  approval: Approval;
+  tool_result: string | null;
+}
+
 export interface BotChunkEvent {
   bot_id: string;
   bot_run_id: string;

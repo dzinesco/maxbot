@@ -270,6 +270,162 @@ textarea:focus {
   color: var(--text-3);
 }
 
+/* ---- v2.6.0 — Sidebar Approvals section ---- */
+.sidebar-approvals {
+  padding: 10px 12px;
+  border-top: 1px solid var(--border);
+  cursor: pointer;
+  user-select: none;
+  font-size: 12px;
+  color: var(--text-2);
+  transition: background 0.1s ease;
+}
+.sidebar-approvals:hover {
+  background: var(--bg-2);
+}
+.sidebar-approvals-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.sidebar-approvals-badge {
+  background: var(--accent);
+  color: var(--bg-0);
+  font-weight: 600;
+  font-size: 11px;
+  border-radius: 999px;
+  padding: 2px 8px;
+  min-width: 18px;
+  text-align: center;
+}
+
+/* ---- v2.6.0 — Approval rules list (in BotEditor) ---- */
+.rule-list {
+  list-style: none;
+  padding: 0;
+  margin: 8px 0 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.rule-list__row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-1);
+}
+.rule-list__tool {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-1);
+}
+.rule-list__radios {
+  display: flex;
+  gap: 8px;
+}
+.rule-list__radio {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--text-2);
+  cursor: pointer;
+}
+.rule-list__radio input[type="radio"] {
+  cursor: pointer;
+}
+
+/* ---- v2.6.0 — ApprovalQueue panel ---- */
+.approval-queue {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  padding: 20px 24px;
+  overflow-y: auto;
+}
+.approval-queue__header h2 {
+  margin: 0 0 4px;
+}
+.approval-queue__empty {
+  margin-top: 24px;
+}
+.approval-queue__list {
+  list-style: none;
+  padding: 0;
+  margin: 16px 0 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.approval-queue__row {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px 14px;
+  background: var(--bg-1);
+}
+.approval-queue__row-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+.approval-queue__bot strong {
+  font-weight: 600;
+}
+.approval-queue__tool {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  background: var(--bg-2);
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+.approval-queue__payload {
+  position: relative;
+  background: var(--bg-0);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  margin: 0 0 8px;
+  max-height: 140px;
+  overflow: auto;
+  font-size: 12px;
+  font-family: var(--font-mono);
+}
+.approval-queue__payload code {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.approval-queue__show-more {
+  position: sticky;
+  left: 0;
+  margin-top: 4px;
+  font-size: 11px;
+}
+.approval-queue__row-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.approval-queue__edit-area {
+  width: 100%;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  background: var(--bg-0);
+  color: var(--text-1);
+  resize: vertical;
+  min-height: 220px;
+}
+.approval-queue__edit-area--invalid {
+  border-color: var(--danger);
+}
+
 .sidebar-footer .status {
   display: flex;
   align-items: center;

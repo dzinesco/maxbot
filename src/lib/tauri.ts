@@ -700,3 +700,78 @@ export async function memoryList(
 ): Promise<MemEntry[]> {
   return invoke<MemEntry[]>("memory_list", { botId, kind });
 }
+
+// ---- v2.6.0 — Approval flows ----
+//
+// IPC wrappers for `src-tauri/src/commands/approvals.rs`.
+// `approval_decide` accepts the new `edited_args`
+// payload; the `decision` is a string (one of
+// "approved" / "rejected" / "edited") so the wire
+// stays a single flat invoke call.
+
+import type {
+  Approval,
+  ApprovalDecideOutput,
+  ApprovalRule,
+  Rule,
+} from "./api";
+
+/** All pending approvals. If `botId` is set, filtered
+ *  to that Bot. */
+export async function approvalList(botId?: string): Promise<Approval[]> {
+  return invoke<Approval[]>("approval_list", {
+    botId: botId ?? null,
+  });
+}
+
+/** Fetch one approval by id. */
+export async function approvalGet(id: string): Promise<Approval | null> {
+  return invoke<Approval | null>("approval_get", { id });
+}
+
+/** Total pending approvals across all Bots. Drives the
+ *  Sidebar's "Approvals" badge. */
+export async function approvalPendingCount(): Promise<number> {
+  return invoke<number>("approval_pending_count");
+}
+
+/** All rules for one Bot (every tool the Bot has an
+ *  opinion about). Missing tools default to `auto`
+ *  in the queue. */
+export async function approvalRuleList(botId: string): Promise<ApprovalRule[]> {
+  return invoke<ApprovalRule[]>("approval_rule_list", { botId });
+}
+
+/** Upsert a per-Bot per-tool rule. The Rust side
+ *  parses "auto" / "ask" / "deny" via `Rule::parse`
+ *  and falls back to `auto` for anything else. */
+export async function approvalRuleSet(
+  botId: string,
+  toolName: string,
+  rule: Rule,
+): Promise<void> {
+  await invoke<void>("approval_rule_set", {
+    botId,
+    toolName,
+    rule,
+  });
+}
+
+/** Decide an approval. `decision` is
+ *  `"approved" | "rejected" | "edited"`. `editedArgs`
+ *  is required when `decision === "edited"`, ignored
+ *  otherwise. On `"approved"` / `"edited"` the
+ *  underlying tool runs and its result is written to
+ *  `approvals.result_json` before this returns. The
+ *  Bot does NOT auto-resume (v2.6.1). */
+export async function approvalDecide(
+  id: string,
+  decision: "approved" | "rejected" | "edited",
+  editedArgs?: unknown,
+): Promise<ApprovalDecideOutput> {
+  return invoke<ApprovalDecideOutput>("approval_decide", {
+    id,
+    decision,
+    editedArgs: editedArgs ?? null,
+  });
+}

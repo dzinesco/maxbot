@@ -308,7 +308,13 @@ pub struct SshKeyRow {
 }
 
 pub struct Database {
-    conn: Mutex<Connection>,
+    // `pub(crate)` so the new-module `impl Database`
+    // blocks (e.g. `crate::approvals::store`) can do
+    // their own queries without round-tripping
+    // through a `with_conn` helper. Locking discipline
+    // is the same as in `db.rs` — short-lived, no
+    // await points while held.
+    pub(crate) conn: Mutex<Connection>,
 }
 
 impl Database {
@@ -490,7 +496,30 @@ impl Database {
              CREATE INDEX IF NOT EXISTS group_messages_by_group
                  ON group_messages(group_id, created_at);
              CREATE INDEX IF NOT EXISTS group_members_by_bot
-                 ON group_members(bot_id);",
+                 ON group_members(bot_id);
+             -- v2.6.0 — Approval flows. Per-Bot per-tool
+             -- rule (auto/ask/deny) and a queue of pending
+             -- approvals that the user can Approve / Reject /
+             -- Edit & send. See `crate::approvals`.
+             CREATE TABLE IF NOT EXISTS approval_rules (
+                 bot_id    TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+                 tool_name TEXT NOT NULL,
+                 rule      TEXT NOT NULL,
+                 PRIMARY KEY (bot_id, tool_name)
+             );
+             CREATE TABLE IF NOT EXISTS approvals (
+                 id           TEXT PRIMARY KEY,
+                 bot_id       TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+                 tool_name    TEXT NOT NULL,
+                 status       TEXT NOT NULL,
+                 payload_json TEXT NOT NULL,
+                 result_json  TEXT,
+                 bot_run_id   TEXT,
+                 created_at   TEXT NOT NULL,
+                 decided_at   TEXT
+             );
+             CREATE INDEX IF NOT EXISTS approvals_by_bot_status
+                 ON approvals(bot_id, status, created_at DESC);",
         )?;
         // Idempotent column additions for older databases. SQLite
         // doesn't have IF NOT EXISTS for columns, so we probe
@@ -554,6 +583,28 @@ impl Database {
             "settings",
             "computer_use_default_ssh_key",
             "INTEGER NOT NULL DEFAULT 1",
+        )?;
+        // v2.6.0 — Seed default approval rules for every
+        // existing Bot. Tools that send data out
+        // (`mail_send`, `message_bot`, `file_write`,
+        // `shell_run`) default to `ask`; every other tool
+        // defaults to `auto`. The `INSERT OR IGNORE` is
+        // idempotent — a Bot that already has a row in
+        // `approval_rules` (e.g. set by the user before
+        // the upgrade) keeps its rule. Note: `message_bot`
+        // is special-cased in the executor (it routes via
+        // the DB rather than going through the tool
+        // registry) but we still seed a rule for it so the
+        // user can flip it to `deny` from the editor.
+        conn.execute_batch(
+            "INSERT OR IGNORE INTO approval_rules (bot_id, tool_name, rule)
+             SELECT id, 'mail_send', 'ask' FROM bots;
+             INSERT OR IGNORE INTO approval_rules (bot_id, tool_name, rule)
+             SELECT id, 'message_bot', 'ask' FROM bots;
+             INSERT OR IGNORE INTO approval_rules (bot_id, tool_name, rule)
+             SELECT id, 'file_write', 'ask' FROM bots;
+             INSERT OR IGNORE INTO approval_rules (bot_id, tool_name, rule)
+             SELECT id, 'shell_run', 'ask' FROM bots;",
         )?;
         Ok(())
     }

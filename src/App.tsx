@@ -17,6 +17,7 @@ import { CreateGroupDialog } from "./components/CreateGroupDialog";
 import { RecordSkillDialog } from "./components/RecordSkillDialog";
 import { SkillsPanel } from "./components/SkillsPanel";
 import { MemoryPanel } from "./components/MemoryPanel";
+import { ApprovalQueue } from "./components/ApprovalQueue";
 import { RoutinesPanel } from "./components/RoutinesPanel";
 import { SendToBotModal } from "./components/SendToBotModal";
 import { Welcome } from "./components/Welcome";
@@ -162,7 +163,7 @@ export default function App() {
   // "select a Bot" entry point; `group` is set by
   // group-list clicks, not by tab clicks.
   const [mainView, setMainView] = useState<
-    "chat" | "skills" | "routines" | "group" | "memory"
+    "chat" | "skills" | "routines" | "group" | "memory" | "approvals"
   >("chat");
   // v2.4.0 — the active group's id. Only meaningful
   // when `mainView === "group"`. Set by the
@@ -860,6 +861,18 @@ export default function App() {
     };
     window.addEventListener("maxbot:new-conversation", onNew);
     window.addEventListener("maxbot:select-bot-first", onSelectFirst);
+    // v2.6.0 — sidebar's Approvals section fires
+    // this when the badge / row is clicked. We
+    // flip `mainView` to `"approvals"` and let
+    // `ApprovalQueue` do its own data fetch on
+    // mount.
+    const onOpenApprovals = () => {
+      setMainView("approvals");
+    };
+    window.addEventListener(
+      "maxbot:open-approvals",
+      onOpenApprovals as EventListener,
+    );
     // v2.4.0 — sidebar's Groups section fires this
     // when a row is clicked. We flip `mainView` to
     // `"group"`, remember the group id, and kick off
@@ -892,6 +905,10 @@ export default function App() {
       window.removeEventListener(
         "maxbot:select-bot-first",
         onSelectFirst,
+      );
+      window.removeEventListener(
+        "maxbot:open-approvals",
+        onOpenApprovals as EventListener,
       );
       window.removeEventListener(
         "maxbot:select-group",
@@ -1408,8 +1425,11 @@ export default function App() {
           // Sidebar's onSelectView is typed as the older
           // union; we widen it here so adding a new tab on
           // the Sidebar side is a one-line change.
+          // v2.6.0 — same trick for "approvals".
           if (v === "memory") {
             setMainView("memory");
+          } else if (v === "approvals") {
+            setMainView("approvals");
           } else {
             setMainView(v);
           }
@@ -1437,6 +1457,12 @@ export default function App() {
           // Read failures collapse to empty lists so a Bot
           // without a VM still shows a usable UI.
           <MemoryPanel botId={selectedBotId} />
+        ) : mainView === "approvals" ? (
+          // v2.6.0 — Approval flows. Lists every pending
+          // tool call across all Bots. Each row has
+          // Approve / Reject / Edit & send; the user
+          // decides before the tool runs.
+          <ApprovalQueue bots={bots} />
         ) : mainView === "group" && activeGroup ? (
           // v2.4.0 — multi-Bot group view. Renders the
           // active group's transcript with a participant

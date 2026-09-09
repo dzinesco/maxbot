@@ -27,10 +27,16 @@ vi.mock("../lib/tauri", () => ({
   computerGet: vi.fn(() => Promise.resolve(null)),
   computerProvision: vi.fn(() => Promise.resolve()),
   revealBotFolder: vi.fn(() => Promise.resolve("/tmp/bot-folder")),
+  // v2.6.0 — Approval rules: the editor preloads
+  // the rules on mount and writes on radio change.
+  // The default mock returns an empty list so the
+  // editor falls through to `auto` for every tool.
+  approvalRuleList: vi.fn(() => Promise.resolve([])),
+  approvalRuleSet: vi.fn(() => Promise.resolve()),
 }));
 
 import { BotEditor } from "./BotEditor";
-import { computerProvision } from "../lib/tauri";
+import { approvalRuleSet, computerProvision } from "../lib/tauri";
 import type { Bot, BotSchedule, ToolSummary } from "../lib/api";
 
 const noTools: ToolSummary[] = [];
@@ -83,6 +89,9 @@ function renderEditor(
 beforeEach(() => {
   vi.mocked(computerProvision).mockReset();
   vi.mocked(computerProvision).mockResolvedValue(undefined);
+  // v2.6.0 — reset the approval rule mocks.
+  vi.mocked(approvalRuleSet).mockReset();
+  vi.mocked(approvalRuleSet).mockResolvedValue(undefined);
 });
 
 describe("BotEditor — specialist templates", () => {
@@ -189,5 +198,104 @@ describe("BotEditor — save flow", () => {
       expect(onSave).toHaveBeenCalledTimes(1);
     });
     expect(computerProvision).not.toHaveBeenCalled();
+  });
+});
+
+// ---- v2.6.0 — Approval Rules section ----
+//
+// The Rules section is a flat list (one row per
+// known tool) with three radios: auto / ask / deny.
+// Picking one calls `approval_rule_set` immediately.
+
+describe("BotEditor — Rules section (v2.6.0)", () => {
+  // We need at least one tool so the row renders.
+  const tools: ToolSummary[] = [
+    {
+      name: "mail_send",
+      description: "Send an email.",
+      requires_consent: true,
+    },
+    {
+      name: "file_write",
+      description: "Write a file.",
+      requires_consent: true,
+    },
+  ];
+
+  it("shows 3 radio buttons per known tool", () => {
+    const onSave = vi.fn((bot: Bot) => Promise.resolve({ ...bot, id: "new-id" }));
+    render(
+      <BotEditor
+        initial={blankBot()}
+        schedule={noSchedule}
+        availableTools={tools}
+        isNew={true}
+        onClose={() => {}}
+        onSave={onSave}
+      />,
+    );
+    // One row per tool, three radios per row.
+    expect(screen.getByTestId("rule-row-mail_send")).toBeTruthy();
+    expect(screen.getByTestId("rule-row-file_write")).toBeTruthy();
+    expect(
+      screen.getByTestId("rule-radio-mail_send-auto"),
+    ).toBeTruthy();
+    expect(
+      screen.getByTestId("rule-radio-mail_send-ask"),
+    ).toBeTruthy();
+    expect(
+      screen.getByTestId("rule-radio-mail_send-deny"),
+    ).toBeTruthy();
+  });
+
+  it("picking a radio calls approval_rule_set with the new rule", async () => {
+    // Bot must have an id for the editor to persist
+    // the rule (the same id flows through to the
+    // `approval_rule_set` invoke).
+    const onSave = vi.fn((bot: Bot) =>
+      Promise.resolve({ ...bot, id: "bot-rules" }),
+    );
+    render(
+      <BotEditor
+        initial={blankBot({ id: "bot-rules" })}
+        schedule={noSchedule}
+        availableTools={tools}
+        isNew={true}
+        onClose={() => {}}
+        onSave={onSave}
+      />,
+    );
+    fireEvent.click(screen.getByTestId("rule-radio-mail_send-ask"));
+    await waitFor(() => {
+      expect(approvalRuleSet).toHaveBeenCalledWith(
+        "bot-rules",
+        "mail_send",
+        "ask",
+      );
+    });
+  });
+
+  it("picking deny on file_write persists the deny rule", async () => {
+    const onSave = vi.fn((bot: Bot) =>
+      Promise.resolve({ ...bot, id: "bot-rules-2" }),
+    );
+    render(
+      <BotEditor
+        initial={blankBot({ id: "bot-rules-2" })}
+        schedule={noSchedule}
+        availableTools={tools}
+        isNew={true}
+        onClose={() => {}}
+        onSave={onSave}
+      />,
+    );
+    fireEvent.click(screen.getByTestId("rule-radio-file_write-deny"));
+    await waitFor(() => {
+      expect(approvalRuleSet).toHaveBeenCalledWith(
+        "bot-rules-2",
+        "file_write",
+        "deny",
+      );
+    });
   });
 });

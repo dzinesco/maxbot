@@ -33,7 +33,7 @@ import type {
   Conversation,
   GroupChat,
 } from "../lib/api";
-import { computerGet, groupList } from "../lib/tauri";
+import { approvalPendingCount, computerGet, groupList } from "../lib/tauri";
 
 export interface SidebarProps {
   /**
@@ -92,9 +92,17 @@ export interface SidebarProps {
    * switching the top-level tabs — the active group's
    * pane replaces the chat area, and the Bots tab
    * stays the canonical "select a Bot" entry point.
+   *
+   * v2.6.0: added `"approvals"`. The "Approvals"
+   * section flips `mainView` to this value (the
+   * Sidebar's tablist doesn't include an Approvals
+   * tab — the badge in the Approvals section is the
+   * entry point, not a tab).
    */
-  mainView: "chat" | "skills" | "routines" | "memory";
-  onSelectView: (view: "chat" | "skills" | "routines" | "memory") => void;
+  mainView: "chat" | "skills" | "routines" | "memory" | "approvals";
+  onSelectView: (
+    view: "chat" | "skills" | "routines" | "memory" | "approvals",
+  ) => void;
 
   /**
    * v2.4.0: open the "Create group" dialog. The
@@ -258,6 +266,17 @@ export function Sidebar({
          `groupCreate` so the new group lands at
          the top. */}
       <GroupsSection onCreateGroup={onCreateGroup} />
+
+      {/* v2.6.0 — Approvals. Sits between the Groups
+         section and the footer. The badge is the
+         entry point: clicking it dispatches a custom
+         event that flips `mainView` to `"approvals"`,
+         which renders the ApprovalQueue in the main
+         area. We poll the count lightly (every 5s +
+         on window focus) so a Bot run that enqueues
+         a fresh approval lands the badge within a
+         few seconds. */}
+      <ApprovalsSection />
 
       {botPanel}
 
@@ -462,6 +481,67 @@ function GroupsSection({
           ))}
         </ul>
       )}
+    </div>
+  );
+}
+
+// ---- v2.6.0 Approvals section ----
+
+/**
+ * Sidebar section that shows the count of pending
+ * approvals and routes the user to the
+ * `ApprovalQueue` view. The count is light-poll
+ * (5s + on focus) so a fresh enqueue lands the
+ * badge within a few seconds; the actual
+ * `ApprovalQueue` component does its own refetch
+ * on mount, so this section doesn't need to share
+ * state with the queue.
+ */
+function ApprovalsSection() {
+  const [count, setCount] = useState(0);
+  useEffect(() => {
+    let cancelled = false;
+    const refresh = () => {
+      approvalPendingCount()
+        .then((n) => {
+          if (!cancelled) setCount(n);
+        })
+        .catch(() => {
+          /* non-critical */
+        });
+    };
+    refresh();
+    const onFocus = () => refresh();
+    window.addEventListener("focus", onFocus);
+    // Light polling: a Bot's run is the only thing
+    // that bumps the count and we want the badge to
+    // land within a few seconds.
+    const interval = window.setInterval(refresh, 5_000);
+    return () => {
+      cancelled = true;
+      window.removeEventListener("focus", onFocus);
+      window.clearInterval(interval);
+    };
+  }, []);
+  return (
+    <div
+      className="sidebar-approvals"
+      data-testid="sidebar-approvals"
+      onClick={() =>
+        window.dispatchEvent(new CustomEvent("maxbot:open-approvals"))
+      }
+    >
+      <div className="sidebar-approvals-row">
+        <span>Approvals</span>
+        {count > 0 && (
+          <span
+            className="sidebar-approvals-badge"
+            data-testid="sidebar-approvals-badge"
+          >
+            {count}
+          </span>
+        )}
+      </div>
     </div>
   );
 }

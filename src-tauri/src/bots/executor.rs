@@ -23,6 +23,7 @@ use tauri::{AppHandle, Emitter};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+use crate::approvals::queue::{enqueue_if_ask_rule, pending_message};
 use crate::bots::{Bot, BotRun, BotRunStatus, registry_for};
 use crate::llm::provider::{provider_for_settings, ChatMessage, ChatRequest, Provider};
 use crate::llm::stream::{StreamChunk, StreamError};
@@ -495,11 +496,98 @@ pub async fn run_bot_once(
         //    granted (the user already consented by enabling the tool in
         //    the bot's allowlist). The `message_bot` tool is special: it
         //    routes the message through the DB instead of running shell.
+        //
+        //    v2.6.0 — Approval gate. Before invoking a tool
+        //    (or `message_bot`), we ask the approvals queue
+        //    whether the Bot's rule for that tool is
+        //    `auto`/`ask`/`deny`. `auto` runs the tool
+        //    immediately. `ask` enqueues an approval and
+        //    returns a "pending (id=...)" string to the
+        //    LLM so the reasoning loop can continue. `deny`
+        //    returns an error to the LLM. The user clicks
+        //    Approve / Reject / Edit in the queue; the
+        //    actual tool runs then (v2.6.1 will auto-resume
+        //    the Bot; for v2.6 the user follows up
+        //    manually).
         for tc in &tool_calls_collected {
             if cancel.is_cancelled() {
                 break;
             }
             let resolved_args = parse_tool_args(&tc.arguments);
+            // Step 1 — approval gate. The gate runs for
+            // every tool, including `message_bot`, so the
+            // user can flip the per-Bot rule on
+            // cross-Bot pings too.
+            match enqueue_if_ask_rule(
+                &state,
+                &bot.id,
+                &tc.name,
+                &resolved_args,
+                Some(&run_id),
+            )
+            .await
+            {
+                Ok(None) => {
+                    // Auto — proceed.
+                }
+                Ok(Some(approval_id)) => {
+                    // Ask — enqueue and tell the LLM the
+                    // call is gated. The Bot's loop
+                    // continues; the user decides
+                    // separately. We persist the
+                    // placeholder as a `tool` message so
+                    // the conversation log shows the
+                    // pending state and the LLM has
+                    // something to reason about on the
+                    // next turn.
+                    let content = pending_message(&approval_id);
+                    state.recorder.record(
+                        recording_id.as_deref(),
+                        crate::skills::recorder::make_recorded_step(
+                            tc.name.clone(),
+                            resolved_args,
+                            content.clone(),
+                            false,
+                        ),
+                    );
+                    let _ = state.db.insert_message(
+                        &conversation_id,
+                        MessageRole::Tool,
+                        &content,
+                        &[],
+                    );
+                    messages.push(ChatMessage::Tool {
+                        tool_call_id: tc.id.clone(),
+                        content,
+                    });
+                    continue;
+                }
+                Err(deny_msg) => {
+                    // Deny — surface to the LLM as a
+                    // tool error.
+                    let content = format!("[error] {deny_msg}");
+                    state.recorder.record(
+                        recording_id.as_deref(),
+                        crate::skills::recorder::make_recorded_step(
+                            tc.name.clone(),
+                            resolved_args,
+                            content.clone(),
+                            true,
+                        ),
+                    );
+                    let _ = state.db.insert_message(
+                        &conversation_id,
+                        MessageRole::Tool,
+                        &content,
+                        &[],
+                    );
+                    messages.push(ChatMessage::Tool {
+                        tool_call_id: tc.id.clone(),
+                        content,
+                    });
+                    continue;
+                }
+            }
             let (content, is_error) = if tc.name == "message_bot" {
                 handle_message_bot(&state, &bot, tc)
             } else {
