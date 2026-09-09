@@ -95,6 +95,7 @@ pub fn run() {
             commands::conversations::rename_conversation,
             commands::conversations::get_messages,
             commands::conversations::search_messages,
+            commands::conversations::migrate_message_error_shape,
             commands::chat::send_message,
             commands::chat::stop_message,
             commands::chat::regenerate_last,
@@ -120,6 +121,9 @@ pub fn run() {
             commands::tcc::open_automation_settings,
             commands::tts::tts_speak,
             commands::tts::tts_stop,
+            commands::meta::meta_get,
+            commands::meta::meta_set,
+            commands::meta::meta_list,
         ])
         .run(tauri::generate_context!())
         .expect("error while running MaxBot");

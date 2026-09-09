@@ -237,7 +237,11 @@ impl Database {
                 conversation_id TEXT
              );
              CREATE INDEX IF NOT EXISTS bot_messages_inbox
-                 ON bot_messages(to_bot_id, read, created_at);",
+                 ON bot_messages(to_bot_id, read, created_at);
+             CREATE TABLE IF NOT EXISTS meta (
+                key   TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+             );",
         )?;
         // Idempotent column additions for older databases. SQLite
         // doesn't have IF NOT EXISTS for columns, so we probe
@@ -968,6 +972,53 @@ impl Database {
         )?;
         Ok(())
     }
+
+    // ----- meta -----
+    //
+    // Small key/value table for first-run / onboarding state, schema
+    // version, and other non-settings flags. Distinct from `settings`
+    // because (a) it's a key/value shape rather than a JSON blob and
+    // (b) it has no migration story for legacy users — we add columns
+    // to `settings` when we need to add fields, but `meta` is fine
+    // for flat strings.
+
+    /// Look up a meta value by key. Returns None if the key is missing.
+    pub fn meta_get(&self, key: &str) -> rusqlite::Result<Option<String>> {
+        let conn = self.conn.lock().expect("db lock poisoned");
+        let mut stmt = conn.prepare("SELECT value FROM meta WHERE key = ?")?;
+        let mut rows = stmt.query(params![key])?;
+        if let Some(row) = rows.next()? {
+            Ok(Some(row.get(0)?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Insert or overwrite a meta value. Always writes the new value —
+    /// if the key already existed, the old value is replaced.
+    pub fn meta_set(&self, key: &str, value: &str) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().expect("db lock poisoned");
+        conn.execute(
+            "INSERT INTO meta (key, value) VALUES (?, ?)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![key, value],
+        )?;
+        Ok(())
+    }
+
+    /// List every (key, value) pair in the meta table. Used for the
+    /// "Reset onboarding" debug flow and any future developer
+    /// introspection. Ordering is by key for stable snapshots.
+    pub fn meta_list(&self) -> rusqlite::Result<Vec<(String, String)>> {
+        let conn = self.conn.lock().expect("db lock poisoned");
+        let mut stmt = conn.prepare("SELECT key, value FROM meta ORDER BY key ASC")?;
+        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
 }
 
 fn parse_dt(value: String) -> DateTime<Utc> {
@@ -1014,4 +1065,51 @@ fn add_column_if_missing(
         )?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build a fresh in-memory database for each test so they don't
+    /// share state. SQLite's `:memory:` is per-connection, so we
+    /// open a new Database against a tempdir-backed path — same
+    /// shape as the production code, but no shared file.
+    fn fresh_db() -> Database {
+        let dir = std::env::temp_dir().join(format!("maxbot-test-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("test.sqlite");
+        Database::open(&path).expect("open test db")
+    }
+
+    #[test]
+    fn meta_get_set_round_trip() {
+        let db = fresh_db();
+        assert_eq!(db.meta_get("is_onboarded").unwrap(), None);
+        db.meta_set("is_onboarded", "1").unwrap();
+        assert_eq!(db.meta_get("is_onboarded").unwrap().as_deref(), Some("1"));
+        // Distinct keys are independent — writing one doesn't touch
+        // the other.
+        db.meta_set("schema_version", "7").unwrap();
+        assert_eq!(db.meta_get("is_onboarded").unwrap().as_deref(), Some("1"));
+        assert_eq!(db.meta_get("schema_version").unwrap().as_deref(), Some("7"));
+    }
+
+    #[test]
+    fn meta_set_overwrites_previous_value() {
+        let db = fresh_db();
+        db.meta_set("is_onboarded", "0").unwrap();
+        assert_eq!(db.meta_get("is_onboarded").unwrap().as_deref(), Some("0"));
+        // Calling meta_set again on the same key replaces the value
+        // — important for the "reset onboarding" path, which writes
+        // the empty string to clear the flag.
+        db.meta_set("is_onboarded", "1").unwrap();
+        assert_eq!(db.meta_get("is_onboarded").unwrap().as_deref(), Some("1"));
+        db.meta_set("is_onboarded", "").unwrap();
+        assert_eq!(db.meta_get("is_onboarded").unwrap().as_deref(), Some(""));
+        // meta_list also reflects the latest value.
+        let all = db.meta_list().unwrap();
+        let entry = all.iter().find(|(k, _)| k == "is_onboarded").unwrap();
+        assert_eq!(entry.1, "");
+    }
 }

@@ -271,3 +271,24 @@ export async function ttsSpeak(
 export async function ttsStop(): Promise<boolean> {
   return invoke<boolean>("tts_stop");
 }
+
+// ---- Meta key/value (onboarding state, schema version) ----
+
+/**
+ * Read a meta value. Returns null if the key is missing — convenient
+ * for the frontend's "first run?" check, where `is_onboarded` is
+ * absent on a brand-new install.
+ */
+export async function metaGet(key: string): Promise<string | null> {
+  return invoke<string | null>("meta_get", { key });
+}
+
+/** Insert or overwrite a meta value. */
+export async function metaSet(key: string, value: string): Promise<void> {
+  await invoke("meta_set", { key, value });
+}
+
+/** List every (key, value) pair in the meta table. For debugging. */
+export async function metaList(): Promise<Array<[string, string]>> {
+  return invoke<Array<[string, string]>>("meta_list");
+}

@@ -4,6 +4,7 @@
 pub mod bots;
 pub mod chat;
 pub mod conversations;
+pub mod meta;
 pub mod settings;
 pub mod tcc;
 pub mod tts;
