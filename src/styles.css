@@ -2683,3 +2683,373 @@ button.link:hover {
   border-color: rgba(239, 68, 68, 0.6);
 }
 
+/* ---------- v2.0 Slice C: Computer panel + sidebar chip + noVNC viewer ----------
+ *
+ * The ComputerPanel is the visual surface for the per-Bot VM.
+ * Three modes share the same stylesheet:
+ *   - status   : sidebar / title-bar chip (small dot + label)
+ *   - preview  : pinned side panel, ~30% width, noVNC viewer
+ *   - takeover : full-window noVNC viewer with footer
+ *
+ * Color palette follows the Grok Bot essay ("purple = active,
+ * gray = idle") but uses MaxBot's existing tokens where they
+ * fit: --accent for the running state, --success for an extra
+ * "online" cue on take-over, --text-3 for idle, --danger for
+ * error. The status dot is the same shape in every surface so
+ * the eye reads the same green/purple/grey/red across the
+ * sidebar chip, the toolbar, and the full panel.
+ */
+
+.computer-panel {
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  color: var(--text-1);
+  font-size: 13px;
+}
+
+.computer-panel__preview {
+  /* Pinned side panel — Agent D (Slice E) will likely pin this
+   * to the right edge of the chat surface. We size to ~30%
+   * width with a sensible min/max so the layout doesn't
+   * collapse on a narrow window. */
+  width: 30%;
+  min-width: 320px;
+  max-width: 640px;
+  height: 100%;
+}
+
+.computer-panel__takeover {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  border: none;
+  border-radius: 0;
+  background: var(--bg-0);
+}
+
+.computer-panel__body {
+  flex: 1 1 auto;
+  min-height: 0;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-0);
+  overflow: hidden;
+}
+
+.computer-panel__body--loading,
+.computer-panel__body--empty,
+.computer-panel__body--error {
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 32px 24px;
+  gap: 8px;
+}
+
+.computer-panel__body--error {
+  color: var(--danger);
+}
+
+.computer-panel__empty-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-0);
+}
+
+.computer-panel__empty-detail,
+.computer-panel__sub,
+.computer-panel__error-detail {
+  font-size: 12px;
+  color: var(--text-2);
+  max-width: 340px;
+  line-height: 1.5;
+}
+
+.computer-panel__error-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--danger);
+}
+
+.computer-panel__error-detail {
+  color: var(--text-2);
+  font-family: var(--font-mono);
+  text-align: left;
+  background: rgba(239, 68, 68, 0.06);
+  border: 1px solid rgba(239, 68, 68, 0.18);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+}
+
+.computer-panel__spinner {
+  /* Plain CSS spinner — no asset dep. The animation is a
+   * 1.4s linear infinite rotation; the dot color matches
+   * the accent so the loading state reads as "MaxBot is
+   * working on it" rather than a generic system wait. */
+  width: 18px;
+  height: 18px;
+  border: 2px solid var(--border-strong);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: computer-panel-spinner 1s linear infinite;
+}
+
+@keyframes computer-panel-spinner {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* --- Toolbar --- */
+
+.computer-panel__toolbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 10px;
+  background: var(--bg-2);
+  border-bottom: 1px solid var(--border);
+  flex: 0 0 auto;
+}
+
+.computer-panel__toolbar-title {
+  font-size: 12px;
+  color: var(--text-2);
+  font-family: var(--font-mono);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.computer-panel__toolbar-spacer {
+  flex: 1;
+}
+
+.computer-panel__toolbar button {
+  font-size: 11px;
+  padding: 4px 8px;
+}
+
+/* --- Footer (takeover) --- */
+
+.computer-panel__footer {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 10px;
+  background: var(--bg-2);
+  border-top: 1px solid var(--border);
+  font-size: 11px;
+  color: var(--text-2);
+  font-family: var(--font-mono);
+  flex: 0 0 auto;
+}
+
+.computer-panel__footer-cell.muted {
+  color: var(--text-3);
+}
+
+.computer-panel__footer-spacer {
+  flex: 1;
+}
+
+/* --- Status dot (shared) --- */
+/* A single 8px dot, recolored by the state modifier class.
+ * Used in the toolbar, the sidebar chip, and the status
+ * icon — keeping the shape identical across surfaces so the
+ * eye reads the same green/purple/grey/red everywhere. */
+
+.computer-panel__status-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--text-3);
+  flex-shrink: 0;
+}
+
+.computer-panel__status-dot--running {
+  /* "Active" / "purple = active" per the Grok Bot essay;
+   * tinted toward the brand accent so the visual
+   * association is clear. */
+  background: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.computer-panel__status-dot--stopped {
+  background: var(--text-3);
+}
+
+.computer-panel__status-dot--provisioning {
+  /* Pulsing orange — the only transient state, so the
+   * pulse is intentional (vs. the static running dot). */
+  background: #f59e0b;
+  animation: computer-panel-dot-pulse 1.4s ease-in-out infinite;
+}
+
+.computer-panel__status-dot--error {
+  background: var(--danger);
+  box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.18);
+}
+
+.computer-panel__status-dot--unknown {
+  background: var(--text-3);
+}
+
+@keyframes computer-panel-dot-pulse {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.45;
+  }
+}
+
+/* --- Title-bar status icon (status mode) --- */
+
+.computer-panel__status-icon {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  font-size: 11px;
+  color: var(--text-2);
+  font-family: var(--font-mono);
+  letter-spacing: 0.02em;
+  cursor: default;
+  user-select: none;
+}
+
+.computer-panel__status-icon--running {
+  border-color: var(--accent);
+  color: var(--text-0);
+}
+
+.computer-panel__status-icon--error {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.computer-panel__status-icon--provisioning {
+  border-color: #f59e0b;
+  color: #f59e0b;
+}
+
+.computer-panel__status-label {
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+
+/* --- Sidebar computer chip --- */
+/* Lives next to the bot icon in the conversation list. The
+ * chip is intentionally small — the goal is "is this Bot
+ * online?" at a glance, not a full status readout. */
+
+.sidebar__computer-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 6px 1px 4px;
+  border-radius: 999px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  font-size: 10px;
+  font-family: var(--font-mono);
+  color: var(--text-2);
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  flex-shrink: 0;
+  /* The chip should sit *after* the bot dot in the
+   * conversation item, with a small gap. */
+  margin-left: 2px;
+}
+
+.sidebar__computer-chip-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-3);
+  display: inline-block;
+}
+
+.sidebar__computer-chip--running {
+  border-color: var(--accent);
+  color: var(--text-0);
+}
+
+.sidebar__computer-chip--running .sidebar__computer-chip-dot {
+  background: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+
+.sidebar__computer-chip--stopped .sidebar__computer-chip-dot {
+  background: var(--text-3);
+}
+
+.sidebar__computer-chip--provisioning {
+  border-color: #f59e0b;
+  color: #f59e0b;
+}
+
+.sidebar__computer-chip--provisioning .sidebar__computer-chip-dot {
+  background: #f59e0b;
+  animation: computer-panel-dot-pulse 1.4s ease-in-out infinite;
+}
+
+.sidebar__computer-chip--error {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.sidebar__computer-chip--error .sidebar__computer-chip-dot {
+  background: var(--danger);
+}
+
+.sidebar__computer-chip-label {
+  font-size: 10px;
+  font-weight: 500;
+}
+
+/* --- noVNC viewer wrapper --- */
+/* The RFB constructor injects its own canvas + screen div
+ * into the container; this rule just gives the wrapper a
+ * fill-the-parent layout so the canvas can size to the
+ * remote desktop's natural dimensions or scale to fit
+ * (per the `scaleViewport` prop on NoVncViewer). */
+
+.novnc-viewer {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  background: var(--bg-0);
+  overflow: hidden;
+}
+
+.novnc-viewer[data-connected="false"]::after {
+  /* Subtle "reconnecting…" overlay while noVNC is between
+   * sockets. The overlay is a thin tinted layer so the
+   * framebuffer remains visible underneath (useful for
+   * diagnosing a stuck VM). */
+  content: "reconnecting…";
+  position: absolute;
+  bottom: 8px;
+  left: 8px;
+  padding: 2px 8px;
+  border-radius: var(--radius-sm);
+  background: rgba(0, 0, 0, 0.5);
+  color: var(--text-2);
+  font-size: 11px;
+  font-family: var(--font-mono);
+  pointer-events: none;
+}
+

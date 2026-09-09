@@ -14,6 +14,8 @@ import type {
   BotRunOutput,
   BotSchedule,
   ChunkEvent,
+  Computer,
+  ComputerStateChangedEvent,
   ControllableApp,
   Conversation,
   DoneEvent,
@@ -243,6 +245,75 @@ export async function requestTccFor(key: string): Promise<TccProbeResult> {
 
 export async function openAutomationSettings(): Promise<void> {
   await invoke("open_automation_settings");
+}
+
+// ---- Per-Bot Computer (v2.0 Slice C) ----
+//
+// These wrappers mirror the Tauri commands registered in
+// `src-tauri/src/lib.rs` and implemented in
+// `src-tauri/src/commands/computer.rs`. The Rust side is the
+// source of truth for shapes (camelCase serializations) — keep
+// the `Computer` interface in `./api` in sync if you add fields.
+
+/** Fetch the persisted `Computer` row for a Bot, or null if none. */
+export async function computerGet(botId: string): Promise<Computer | null> {
+  return invoke<Computer | null>("computer_get", { botId });
+}
+
+/** Kick off VM provisioning for a Bot. The Tauri command returns
+ * immediately and runs the orchestrator in a background tokio
+ * task; the renderer should listen on `computer://state-changed`
+ * for the terminal `running` / `error` transition. */
+export async function computerProvision(
+  botId: string,
+  opts: { disk_gb: number; ram_mb: number },
+): Promise<void> {
+  await invoke("computer_provision", { botId, opts });
+}
+
+export async function computerStart(botId: string): Promise<void> {
+  await invoke("computer_start", { botId });
+}
+
+export async function computerStop(botId: string): Promise<void> {
+  await invoke("computer_stop", { botId });
+}
+
+export async function computerDestroy(botId: string): Promise<void> {
+  await invoke("computer_destroy", { botId });
+}
+
+/** Return the `ws://localhost:<port>/` URL noVNC should connect
+ * to. The Tauri side spawns a per-Bot SSH-tunneled VNC proxy and
+ * returns the local WebSocket URL — never the server-side address
+ * (security-critical: the renderer must not see
+ * `ws://192.168.0.49:...`). */
+export async function computerConsoleUrl(botId: string): Promise<string> {
+  return invoke<string>("computer_console_url", { botId });
+}
+
+/** Smoke-test the libvirt connection. Returns the number of
+ * domains currently defined on the server. Used by the Settings
+ * → Computer tab's "Test connection" button.
+ *
+ * NOTE: returns a number (the Rust side returns `usize`), not a
+ * string — the plan called for a string message, but the Rust
+ * implementation chose the simpler `count` shape. */
+export async function computerTestConnection(): Promise<number> {
+  return invoke<number>("computer_test_connection");
+}
+
+/** Subscribe to state-change events for any Bot. The handler
+ * receives the full payload (bot id + new state + optional
+ * error). The Tauri side emits on every start/stop/destroy/provision
+ * transition. */
+export async function onComputerStateChanged(
+  handler: (event: ComputerStateChangedEvent) => void,
+): Promise<UnlistenFn> {
+  return listen<ComputerStateChangedEvent>(
+    "computer://state-changed",
+    (e) => handler(e.payload),
+  );
 }
 
 // ---- MCP ----

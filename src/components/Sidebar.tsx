@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import type { Bot, Conversation } from "../lib/api";
+import type { Bot, Computer, Conversation } from "../lib/api";
+import { computerGet } from "../lib/tauri";
 
 interface SidebarProps {
   conversations: Conversation[];
@@ -22,6 +23,12 @@ interface SidebarProps {
     string,
     { count: number; firstSnippet: string; mostRecentAt: string }
   > | null;
+  /** Optional pre-fetched map of bot id → computer. Pass this in to
+   * skip the per-conversation `computerGet` round-trip; the sidebar
+   * will still merge in the most recent row when given both a prop
+   * and an async lookup. Slice E (Agent D) will switch to passing
+   * the prop once the roster is the data source of truth. */
+  computersByBot?: Record<string, Computer>;
 }
 
 export function Sidebar({
@@ -38,12 +45,64 @@ export function Sidebar({
   searchQuery,
   onSearchChange,
   searchView,
+  computersByBot,
 }: SidebarProps) {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
+  // Locally-merged `bot id → computer` map. We seed it with the
+  // `computersByBot` prop (Slice E will pass this in) and fall
+  // back to a per-bot `computerGet` round-trip for any bot
+  // missing from the prop. This keeps Slice C independent of
+  // the Slice E refactor (the sidebar still works without any
+  // parent-supplied data, just slower on the first render).
+  const [localComputers, setLocalComputers] = useState<
+    Record<string, Computer | null>
+  >({});
   const searchRef = useRef<HTMLInputElement>(null);
   const botsById = new Map(bots.map((b) => [b.id, b]));
   const searching = searchView !== null;
+
+  // Fetch the computer row for every Bot that the parent
+  // hasn't already told us about. One-shot, no polling — the
+  // ComputerPanel itself drives live updates.
+  useEffect(() => {
+    const missing = bots
+      .map((b) => b.id)
+      .filter(
+        (id) =>
+          computersByBot === undefined ||
+          !(id in computersByBot),
+      )
+      .filter((id) => !(id in localComputers));
+    if (missing.length === 0) return;
+    let cancelled = false;
+    Promise.all(
+      missing.map((id) =>
+        computerGet(id)
+          .then((c) => ({ id, c }))
+          .catch(() => ({ id, c: null as Computer | null })),
+      ),
+    ).then((results) => {
+      if (cancelled) return;
+      const next: Record<string, Computer | null> = {};
+      for (const { id, c } of results) next[id] = c;
+      setLocalComputers((prev) => ({ ...prev, ...next }));
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [bots, computersByBot, localComputers]);
+
+  // The merged view: prop wins over local. Conversations
+  // without a Bot don't need a computer chip.
+  const mergedComputers: Record<string, Computer | null> = {};
+  for (const b of bots) {
+    if (computersByBot && b.id in computersByBot) {
+      mergedComputers[b.id] = computersByBot[b.id] ?? null;
+    } else if (b.id in localComputers) {
+      mergedComputers[b.id] = localComputers[b.id];
+    }
+  }
 
   // Cmd/Ctrl+F focuses the search box, just like every other chat
   // app. Escape clears it.
@@ -133,6 +192,9 @@ export function Sidebar({
                   {bot.icon || "🤖"}
                 </span>
               )}
+              {bot && mergedComputers[bot.id] && (
+                <ComputerChip computer={mergedComputers[bot.id]!} />
+              )}
               {editingId === c.id ? (
                 <input
                   autoFocus
@@ -218,4 +280,53 @@ export function Sidebar({
       </div>
     </aside>
   );
+}
+
+/** Small chip rendered next to a Bot's icon in the conversation
+ * list, indicating the Bot has a provisioned computer. The
+ * color mirrors the `computer-panel__status-dot` palette so the
+ * visual language is consistent between the sidebar chip and
+ * the full panel. */
+function ComputerChip({ computer }: { computer: Computer | null }) {
+  if (!computer) return null;
+  const state = computer.state;
+  const label = (() => {
+    switch (state) {
+      case "running":
+        return "PC · running";
+      case "stopped":
+        return "PC · stopped";
+      case "provisioning":
+        return "PC · provisioning";
+      case "error":
+        return "PC · error";
+      default:
+        return "PC";
+    }
+  })();
+  return (
+    <span
+      className={`sidebar__computer-chip sidebar__computer-chip--${stateClassChip(state)}`}
+      title={`Bot computer: ${label}`}
+      data-state={state}
+    >
+      <span className="sidebar__computer-chip-dot" />
+      <span className="sidebar__computer-chip-label">{label}</span>
+    </span>
+  );
+}
+
+function stateClassChip(state: string | null | undefined): string {
+  switch (state) {
+    case "running":
+      return "running";
+    case "stopped":
+      return "stopped";
+    case "provisioning":
+      return "provisioning";
+    case "error":
+      return "error";
+    default:
+      return "unknown";
+  }
 }

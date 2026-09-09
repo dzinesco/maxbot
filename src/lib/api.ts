@@ -349,6 +349,40 @@ export interface TccProbeResult {
   message: string;
 }
 
+// ---- Per-Bot Computer (v2.0 Slice C) ----
+//
+// Mirrors the Rust struct in `src-tauri/src/computer/mod.rs`.
+// `state` is a string (mirroring the `ComputerState` enum) — kept as
+// a free-form string here so a future enum addition on the Rust side
+// doesn't immediately break the renderer.
+export type ComputerState =
+  | "provisioning"
+  | "running"
+  | "stopped"
+  | "error";
+
+export interface Computer {
+  bot_id: string;
+  vm_name: string;
+  vm_ip: string | null;
+  vnc_port: number | null;
+  ssh_key_id: string;
+  state: ComputerState | string;
+  last_seen_at: string | null;
+  created_at: string;
+}
+
+/** Payload emitted on the `computer://state-changed` Tauri event. */
+export interface ComputerStateChangedEvent {
+  bot_id: string;
+  /** Best-effort state string from the Rust side. The terminal
+   * "destroyed" state is not a `ComputerState` enum variant (the
+   * row is gone) but the Rust side still emits it for the
+   * renderer's bookkeeping — so the type is a free-form string. */
+  state: string;
+  error?: string | null;
+}
+
 // ---- MCP ----
 
 export interface McpServerInfo {
