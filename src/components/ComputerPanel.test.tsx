@@ -31,6 +31,9 @@ vi.mock("../lib/tauri", () => {
     computerStart: vi.fn(),
     computerStop: vi.fn(),
     computerDestroy: vi.fn(),
+    computerFileList: vi.fn(),
+    computerFileRead: vi.fn(),
+    computerFileWrite: vi.fn(),
     onComputerStateChanged: vi.fn(() => Promise.resolve(() => {})),
   };
 });

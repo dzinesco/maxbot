@@ -421,3 +421,44 @@ export async function metaSet(key: string, value: string): Promise<void> {
 export async function metaList(): Promise<Array<[string, string]>> {
   return invoke<Array<[string, string]>>("meta_list");
 }
+
+// ----- v2.0 per-Bot computer (file browser) -----
+
+/** One entry from an SFTP directory listing on a per-Bot VM. */
+export interface SftpEntry {
+  /** Bare filename (no path prefix). */
+  name: string;
+  /** True for directories, false for regular files. */
+  is_dir: boolean;
+  /** Size in bytes. 0 for directories. */
+  size: number;
+}
+
+/** List a directory on a per-Bot VM via SFTP. */
+export async function computerFileList(
+  botId: string,
+  path: string,
+): Promise<SftpEntry[]> {
+  return invoke<SftpEntry[]>("computer_file_list", { botId, path });
+}
+
+/** Read a text file from a per-Bot VM via SFTP. The Rust side
+ * caps the read at 256 KiB; binary files will be returned as
+ * lossy UTF-8 (sufficient for `/etc/hosts`, source files, logs). */
+export async function computerFileRead(
+  botId: string,
+  path: string,
+): Promise<string> {
+  return invoke<string>("computer_file_read", { botId, path });
+}
+
+/** Write a text file on a per-Bot VM via SFTP. The Rust side
+ * writes atomically (write to `path.tmp`, rename) and creates
+ * parent directories if they don't exist. */
+export async function computerFileWrite(
+  botId: string,
+  path: string,
+  content: string,
+): Promise<void> {
+  await invoke("computer_file_write", { botId, path, content });
+}

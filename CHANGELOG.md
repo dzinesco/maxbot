@@ -4,6 +4,38 @@ All notable changes to MaxBot are documented in this file. The format
 follows [Keep a Changelog](https://keepachangelog.com/) and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## v2.0.4 — 2026-09-09
+
+### Added
+- **ComputerPanel Files tab** (read-only SFTP browser). The
+  per-Bot VM Files tab lists `/home/bot` (default) and
+  navigates into subdirectories. Click a file to view
+  its contents in a monospace viewer pane. The
+  `computer_file_list` / `computer_file_read` Tauri
+  commands have been wrapped in
+  `src/lib/tauri.ts` and `src/lib/api.ts`; the underlying
+  SFTP path was previously unwired on the React side.
+  Write support (`computerFileWrite`) is also wrapped
+  and ready for the next slice's "Save" affordance.
+
+### Fixed
+- **Per-Bot SFTP / SSH connected directly to the libvirt
+  NAT IP**, which is unroutable from the Mac. Every
+  per-Bot SFTP call failed with "Network is unreachable"
+  the moment the VM got a DHCP lease. The fix routes
+  every per-Bot SFTP/SSH through the MaxBot server
+  using `ProxyJump`. `VmEndpoint` now carries
+  `proxy_host` / `proxy_user` (populated from
+  `Settings.computer_server_host` / `_ssh_user` at
+  provision time). The Rust `run_sftp_batch`,
+  `run_sftp_capture`, `run_sftp_write`, and
+  `run_ssh_with_key` all now add
+  `-o ProxyJump={user}@{host}` so the per-Bot key
+  authenticates the destination and the OS keychain
+  authenticates the proxy hop. v2.0.0–v2.0.3 had the
+  same latent bug; nobody hit it because the
+  FileBrowser didn't exist yet.
+
 ## v2.0.3 — 2026-09-09
 
 ### Fixed

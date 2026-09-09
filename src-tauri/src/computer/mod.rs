@@ -717,6 +717,64 @@ mod tests {
         let domain = row.vm_name.clone();
         eprintln!("[smoke] provisioned: domain={domain} ip={ip} vnc_port={vnc_port}");
 
+        // 5b. SFTP path. Cloud-init writes the SSH host
+        // keys early (well before it installs xfce / x11vnc /
+        // qemu-guest-agent), so the SFTP endpoint should be
+        // reachable within ~30s of the IP lease showing up.
+        // On a cold libvirt + cold caches, however, the
+        // qemu-guest-agent + cloud-init meta-data fetch
+        // itself can take 60-120s before sshd is up. We
+        // poll the per-Bot SFTP `file_list` for up to 180s
+        // and assert we can read `/home/bot/.bashrc` and
+        // round-trip a write to `/home/bot/maxbot-smoke.txt`.
+        eprintln!("[smoke] waiting for SFTP (up to 180s)...");
+        let sftp_deadline = std::time::Instant::now()
+            + std::time::Duration::from_secs(180);
+        let mut sftp_ok = false;
+        while std::time::Instant::now() < sftp_deadline {
+            match mgr.file_list(&db, &bot_id, "/home/bot").await {
+                Ok(entries) => {
+                    eprintln!(
+                        "[smoke] sftp /home/bot ok ({} entries)",
+                        entries.len()
+                    );
+                    sftp_ok = true;
+                    break;
+                }
+                Err(e) => {
+                    eprintln!("[smoke] sftp not ready yet: {e}");
+                    tokio::time::sleep(std::time::Duration::from_secs(3))
+                        .await;
+                }
+            }
+        }
+        assert!(sftp_ok, "SFTP never became reachable in 60s");
+        // Read /home/bot/.bashrc — present on every Ubuntu
+        // cloud image. If this returns the standard
+        // shell-init preamble, the round-trip is working.
+        let bashrc = mgr
+            .file_read(&db, &bot_id, "/home/bot/.bashrc")
+            .await
+            .expect("read .bashrc");
+        assert!(
+            bashrc.contains("# ~/.bashrc") || bashrc.contains("~/.bashrc"),
+            ".bashrc doesn't look like the Ubuntu default; got: {}",
+            &bashrc[..bashrc.len().min(120)]
+        );
+        // Write a marker file, read it back, delete it.
+        let marker = "/home/bot/maxbot-smoke.txt";
+        mgr.file_write(&db, &bot_id, marker, "smoke-ok\n")
+            .await
+            .expect("write marker");
+        let round_trip = mgr
+            .file_read(&db, &bot_id, marker)
+            .await
+            .expect("read marker back");
+        assert_eq!(round_trip, "smoke-ok\n");
+        // The Rust side doesn't ship an unlink command, so
+        // leave the marker file in place — the VM is about
+        // to be torn down anyway.
+
         // 6. Tear down. Destroy the libvirt domain and its
         // pool so the test can run again without manual
         // cleanup. The ssh pool is wrapped in Arc; we use a

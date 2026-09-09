@@ -250,6 +250,14 @@ pub struct SshPool {
 pub struct VmEndpoint {
     pub ip: String,
     pub ssh_user: String,
+    /// MaxBot server host (e.g. `192.168.0.49`). Used as
+    /// the SSH ProxyJump target for per-Bot connections —
+    /// the Mac can't route to the libvirt NAT network
+    /// (192.168.122.0/24) directly.
+    pub proxy_host: String,
+    /// MaxBot server SSH user (e.g. `tyler`). Same use as
+    /// `proxy_host`.
+    pub proxy_user: String,
 }
 
 impl SshPool {
@@ -295,13 +303,18 @@ impl SshPool {
     /// Record a Bot's VM endpoint (IP + SSH user). Called by
     /// the ComputerManager after `provision_vm` polls for an
     /// IP. Without an endpoint, `vm_exec` returns
-    /// `VmNotReady`.
+    /// `VmNotReady`. The proxy host/user are filled in
+    /// from `self.server` so the per-Bot SFTP / SSH path
+    /// can `-J user@host` through the MaxBot server — the
+    /// Mac can't route to 192.168.122.0/24 directly.
     pub async fn set_vm_endpoint(&self, bot_id: &str, ip: String, ssh_user: String) {
         self.vm_endpoints.lock().await.insert(
             bot_id.to_string(),
             VmEndpoint {
                 ip,
                 ssh_user,
+                proxy_host: self.server.host.clone(),
+                proxy_user: self.server.user.clone(),
             },
         );
     }
@@ -558,6 +571,11 @@ async fn run_ssh_with_key(
     c.arg("-o").arg("StrictHostKeyChecking=no");
     c.arg("-o").arg("ConnectTimeout=10");
     c.arg("-o").arg("UserKnownHostsFile=/dev/null");
+    // See run_sftp_batch for the ProxyJump rationale.
+    c.arg("-o").arg(format!(
+        "ProxyJump={}@{}",
+        endpoint.proxy_user, endpoint.proxy_host
+    ));
     c.arg("-i").arg(keyfile.path());
     c.arg("-o").arg("IdentitiesOnly=yes");
     c.arg(format!("{}@{}", endpoint.ssh_user, endpoint.ip));
@@ -646,6 +664,13 @@ async fn run_sftp_write(
     c.arg("-o").arg("LogLevel=ERROR");
     c.arg("-o").arg("StrictHostKeyChecking=no");
     c.arg("-o").arg("UserKnownHostsFile=/dev/null");
+    // See run_sftp_batch for the ProxyJump rationale. Both
+    // the read (`get`) and write (`put`) batches need the
+    // same hop because they go to the same per-Bot VM.
+    c.arg("-o").arg(format!(
+        "ProxyJump={}@{}",
+        endpoint.proxy_user, endpoint.proxy_host
+    ));
     c.arg("-i").arg(keyfile.path());
     c.arg("-o").arg("IdentitiesOnly=yes");
     c.arg("-b").arg("-");

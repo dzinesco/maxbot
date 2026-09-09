@@ -2741,6 +2741,51 @@ button.link:hover {
   overflow: hidden;
 }
 
+.computer-panel__tabs {
+  flex: 0 0 auto;
+  display: flex;
+  gap: 4px;
+  padding: 6px 8px 0 8px;
+  border-bottom: 1px solid var(--border-1, #27272a);
+  background: var(--bg-0);
+}
+
+.computer-panel__tab {
+  appearance: none;
+  background: transparent;
+  border: 1px solid transparent;
+  border-bottom: none;
+  color: var(--text-2, #a1a1aa);
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  padding: 6px 12px;
+  border-radius: 4px 4px 0 0;
+  cursor: pointer;
+}
+
+.computer-panel__tab:hover {
+  color: var(--text-0, #fafafa);
+  background: var(--bg-1, #18181b);
+}
+
+.computer-panel__tab--active {
+  color: var(--text-0, #fafafa);
+  background: var(--bg-1, #18181b);
+  border-color: var(--border-1, #27272a);
+  border-bottom-color: var(--bg-1, #18181b);
+  position: relative;
+  z-index: 1;
+  margin-bottom: -1px;
+}
+
+.computer-panel__body-pane {
+  flex: 1 1 auto;
+  min-height: 0;
+  position: relative;
+  overflow: hidden;
+}
+
 .computer-panel__body--loading,
 .computer-panel__body--empty,
 .computer-panel__body--error {
@@ -3897,4 +3942,200 @@ button.link:hover {
 
 .main-empty-cta:active {
   transform: scale(0.98);
+}
+
+/* ----- v2.0.4 ComputerFileBrowser (SFTP-backed file browser) ----- */
+
+.cfb {
+  display: grid;
+  grid-template-columns: minmax(220px, 38%) 1fr;
+  width: 100%;
+  height: 100%;
+  background: var(--bg-0);
+  color: var(--text-0, #fafafa);
+}
+
+.cfb__pane {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.cfb__pane--left {
+  border-right: 1px solid var(--border-1, #27272a);
+}
+
+.cfb__pane--right {
+  background: var(--bg-0);
+}
+
+.cfb__path {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border-1, #27272a);
+  background: var(--bg-1, #18181b);
+}
+
+.cfb__up-btn,
+.cfb__refresh-btn {
+  flex: 0 0 auto;
+  appearance: none;
+  background: transparent;
+  border: 1px solid var(--border-1, #27272a);
+  border-radius: 4px;
+  color: var(--text-1, #d4d4d8);
+  font-family: inherit;
+  font-size: 12px;
+  width: 24px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+
+.cfb__up-btn:hover:not(:disabled),
+.cfb__refresh-btn:hover:not(:disabled) {
+  background: var(--bg-2, #27272a);
+  color: var(--text-0, #fafafa);
+}
+
+.cfb__up-btn:disabled,
+.cfb__refresh-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.cfb__path-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  color: var(--text-1, #d4d4d8);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  direction: rtl; /* show the right-hand side of long paths */
+  text-align: left;
+}
+
+.cfb__list {
+  flex: 1 1 auto;
+  margin: 0;
+  padding: 4px 0;
+  list-style: none;
+  overflow: auto;
+}
+
+.cfb__item {
+  margin: 0;
+  padding: 0;
+}
+
+.cfb__item-btn {
+  width: 100%;
+  appearance: none;
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  text-align: left;
+  font-family: inherit;
+  font-size: 13px;
+  color: var(--text-0, #fafafa);
+  padding: 4px 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+}
+
+.cfb__item-btn:hover:not(:disabled) {
+  background: var(--bg-1, #18181b);
+}
+
+.cfb__item-btn--active {
+  background: var(--bg-2, #27272a);
+  color: var(--text-0, #fafafa);
+}
+
+.cfb__item-btn--dir {
+  font-weight: 500;
+  color: var(--text-0, #fafafa);
+}
+
+.cfb__item-icon {
+  flex: 0 0 12px;
+  color: var(--text-2, #a1a1aa);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.cfb__item-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.cfb__item-size {
+  flex: 0 0 auto;
+  color: var(--text-2, #a1a1aa);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.cfb__empty,
+.cfb__loading,
+.cfb__viewer-empty,
+.cfb__viewer-loading {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-2, #a1a1aa);
+  font-size: 13px;
+  padding: 24px;
+  text-align: center;
+}
+
+.cfb__error {
+  margin: 8px;
+  padding: 8px 10px;
+  background: rgba(248, 113, 113, 0.1);
+  border: 1px solid var(--danger, #f87171);
+  border-radius: 4px;
+  color: var(--danger, #f87171);
+  font-size: 12px;
+  white-space: pre-wrap;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.cfb__viewer-header {
+  flex: 0 0 auto;
+  padding: 6px 12px;
+  background: var(--bg-1, #18181b);
+  border-bottom: 1px solid var(--border-1, #27272a);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  color: var(--text-1, #d4d4d8);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.cfb__viewer-content {
+  flex: 1 1 auto;
+  margin: 0;
+  padding: 12px 16px;
+  background: var(--bg-0);
+  color: var(--text-0, #fafafa);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre;
+  overflow: auto;
 }

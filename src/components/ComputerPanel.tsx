@@ -44,6 +44,7 @@ import {
   onComputerStateChanged,
 } from "../lib/tauri";
 import { NoVncViewer } from "./noVncViewer";
+import { ComputerFileBrowser } from "./ComputerFileBrowser";
 
 export type ComputerMode = "status" | "preview" | "takeover";
 
@@ -175,6 +176,12 @@ function FullComputerPanel({
   const [viewerError, setViewerError] = useState<string | null>(null);
   const [actionPending, setActionPending] = useState(false);
   const [uptime, setUptime] = useState<number | null>(null);
+  // Body tab: "console" (noVNC viewer) vs "files" (SFTP
+  // browser). The Files tab only does real work when the
+  // VM has an SSH endpoint and a known ssh_key row, but
+  // the browser is mounted regardless and shows its own
+  // error if the listing fails.
+  const [bodyTab, setBodyTab] = useState<"console" | "files">("console");
   // `lastSeenAt` is an ISO string; we tick once a second to
   // refresh the displayed uptime in status / preview modes.
   const lastSeenAt = computer?.last_seen_at ?? null;
@@ -462,21 +469,55 @@ function FullComputerPanel({
         disabled={actionPending}
       />
       <div className="computer-panel__body">
-        {consoleUrl ? (
-          <NoVncViewer
-            wsUrl={consoleUrl}
-            viewOnly={viewOnly}
-            scaleViewport
-            onError={(e) => setViewerError(e)}
-            onConnect={() => setViewerError(null)}
-          />
-        ) : (
-          <div className="computer-panel__body--loading">
-            <div className="computer-panel__spinner" />
-            <div>Opening console…</div>
-          </div>
-        )}
-        {consoleUrl && viewerError ? (
+        <div className="computer-panel__tabs" role="tablist">
+          <button
+            type="button"
+            role="tab"
+            aria-selected={bodyTab === "console"}
+            className={
+              "computer-panel__tab" +
+              (bodyTab === "console" ? " computer-panel__tab--active" : "")
+            }
+            onClick={() => setBodyTab("console")}
+            data-testid="computer-tab-console"
+          >
+            Console
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={bodyTab === "files"}
+            className={
+              "computer-panel__tab" +
+              (bodyTab === "files" ? " computer-panel__tab--active" : "")
+            }
+            onClick={() => setBodyTab("files")}
+            data-testid="computer-tab-files"
+          >
+            Files
+          </button>
+        </div>
+        <div className="computer-panel__body-pane">
+          {bodyTab === "console" ? (
+            consoleUrl ? (
+              <NoVncViewer
+                wsUrl={consoleUrl}
+                viewOnly={viewOnly}
+                scaleViewport
+                onError={(e) => setViewerError(e)}
+                onConnect={() => setViewerError(null)}
+              />
+            ) : (
+              <div className="computer-panel__body--loading">
+                <div className="computer-panel__spinner" />
+                <div>Opening console…</div>
+              </div>
+            )
+          ) : (
+            <ComputerFileBrowser botId={botId} />
+          )}
+        </div>
+        {bodyTab === "console" && consoleUrl && viewerError ? (
           <div className="computer-panel__viewer-error" data-testid="viewer-error">
             <div className="computer-panel__error-title">Console error</div>
             <div className="computer-panel__error-detail">{viewerError}</div>

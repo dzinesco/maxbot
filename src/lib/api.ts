@@ -454,6 +454,13 @@ export interface Computer {
   created_at: string;
 }
 
+/** One entry in a per-Bot VM directory listing. */
+export interface SftpEntry {
+  name: string;
+  is_dir: boolean;
+  size: number;
+}
+
 /** Payload emitted on the `computer://state-changed` Tauri event. */
 export interface ComputerStateChangedEvent {
   bot_id: string;
