@@ -37,7 +37,22 @@ var __generator = (this && this.__generator) || function (thisArg, body) {
 /// <reference types="vitest" />
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
+import { execSync } from "node:child_process";
 var host = process.env.TAURI_DEV_HOST;
+// Build-time constants injected via `define`. The ErrorBoundary
+// fallback surfaces these so the user can confirm what build
+// they're running when reporting a v2.0 black-screen bug.
+var gitCommit = (function () {
+    try {
+        return execSync("git rev-parse --short HEAD", { stdio: ["ignore", "pipe", "ignore"] })
+            .toString()
+            .trim();
+    }
+    catch (_a) {
+        return "unknown";
+    }
+})();
+var buildTime = new Date().toISOString();
 // Vite config tuned for Tauri: fixed dev port, no opening a browser, HMR over
 // the Tauri-side webview socket.
 export default defineConfig(function () { return __awaiter(void 0, void 0, void 0, function () {
@@ -45,6 +60,11 @@ export default defineConfig(function () { return __awaiter(void 0, void 0, void 
         return [2 /*return*/, ({
                 plugins: [react()],
                 clearScreen: false,
+                define: {
+                    __APP_VERSION__: JSON.stringify("2.0.0"),
+                    __GIT_COMMIT__: JSON.stringify(gitCommit),
+                    __BUILD_TIME__: JSON.stringify(buildTime),
+                },
                 server: {
                     port: 1420,
                     strictPort: true,
