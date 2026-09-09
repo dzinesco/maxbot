@@ -163,15 +163,6 @@ impl ComputerState {
             Self::Error => "error",
         }
     }
-    pub fn parse(s: &str) -> Self {
-        match s {
-            "provisioning" => Self::Provisioning,
-            "running" => Self::Running,
-            "stopped" => Self::Stopped,
-            "error" => Self::Error,
-            _ => Self::Error,
-        }
-    }
 }
 
 pub struct ComputerManager {
@@ -594,17 +585,14 @@ mod tests {
     }
 
     #[test]
-    fn computer_state_round_trips_via_string() {
-        for s in [
-            ComputerState::Provisioning,
-            ComputerState::Running,
-            ComputerState::Stopped,
-            ComputerState::Error,
-        ] {
-            assert_eq!(ComputerState::parse(s.as_str()), s);
-        }
-        // Unknown strings map to error.
-        assert_eq!(ComputerState::parse("????"), ComputerState::Error);
+    fn computer_state_serializes_to_snake_case() {
+        // JSON shape is part of the public Tauri API. The
+        // frontend's `ComputerPanel` reads it as
+        // `state === 'provisioning' | 'running' | 'stopped' | 'error'`.
+        assert_eq!(ComputerState::Provisioning.as_str(), "provisioning");
+        assert_eq!(ComputerState::Running.as_str(), "running");
+        assert_eq!(ComputerState::Stopped.as_str(), "stopped");
+        assert_eq!(ComputerState::Error.as_str(), "error");
     }
 
     // ----- v2.0.2 smoke test: end-to-end provision against the

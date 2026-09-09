@@ -22,11 +22,11 @@ use std::time::Duration;
 use futures_util::StreamExt;
 use serde::Serialize;
 use tauri::async_runtime::Mutex as AsyncMutex;
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, Emitter, State};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use tokio_util::sync::CancellationToken;
 
-use crate::llm::provider::{provider_for_settings, ChatMessage, ChatRequest, Provider, ToolDefinition};
+use crate::llm::provider::{provider_for_settings, ChatMessage, ChatRequest, Provider};
 use crate::llm::stream::{StreamChunk, StreamError};
 use crate::storage::{Database, MessageRole, PersistedToolCall};
 use crate::tools::tool::{ToolContext, ToolInvocation};

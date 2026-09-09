@@ -68,13 +68,16 @@ pub enum SessionEvent {
     Chunk(String),
     /// The agent invoked a tool. Surfaced for the UI to show a
     /// progress line; the text result still comes through chunks.
+    /// The name/args are part of the event but no current consumer
+    /// reads them (the tool dispatcher is a separate `ToolUse`
+    /// channel on the `GrokSession` itself).
+    #[allow(dead_code)]
     ToolUse { name: String, args: Value },
-    /// The prompt finished cleanly. `text` is the final message;
-    /// `stop_reason` is the agent's reported reason.
-    Done { text: String, stop_reason: String },
     /// Something went wrong inside the agent (network blip, model
     /// refusal, EOF). `prompt` prefers a non-empty chunk buffer
-    /// over this when both are present.
+    /// over this when both are present. The string payload is the
+    /// human-readable message and is logged at warn level by the
+    /// receiving side.
     Error(String),
 }
 
@@ -363,26 +366,18 @@ impl GrokSession {
         );
         tokio::pin!(prompt_fut);
         let mut text = String::new();
-        let mut stop_reason: Option<String> = None;
         loop {
             tokio::select! {
                 biased;
                 res = &mut prompt_fut => {
-                    let result = res?;
-                    stop_reason = result.get("stopReason")
-                        .and_then(|v| v.as_str())
-                        .map(String::from);
-                    // Result is in. Drain any remaining chunks for
+                    // Drain any remaining chunks for
                     // POST_RESULT_DRAIN before returning.
+                    let _result = res?;
                     let drain_until = tokio::time::Instant::now() + POST_RESULT_DRAIN;
                     loop {
                         tokio::select! {
                             ev = events.recv() => match ev {
                                 Ok(SessionEvent::Chunk(s)) => text.push_str(&s),
-                                Ok(SessionEvent::Done { text: t, stop_reason: sr }) => {
-                                    if !t.is_empty() { text = t; }
-                                    if stop_reason.is_none() { stop_reason = Some(sr); }
-                                }
                                 Ok(_) => {}
                                 Err(broadcast::error::RecvError::Lagged(_)) => continue,
                                 Err(broadcast::error::RecvError::Closed) => break,
@@ -394,14 +389,19 @@ impl GrokSession {
                 }
                 ev = events.recv() => match ev {
                     Ok(SessionEvent::Chunk(s)) => text.push_str(&s),
-                    Ok(SessionEvent::Done { text: t, stop_reason: sr }) => {
-                        if !t.is_empty() { text = t; }
-                        if stop_reason.is_none() { stop_reason = Some(sr); }
+                    Ok(SessionEvent::ToolUse { .. }) => {
+                        // Tool uses are silent. The final
+                        // prompt result decides the text.
                     }
-                    Ok(SessionEvent::ToolUse { .. } | SessionEvent::Error(_)) => {
-                        // Tool uses and pre-result errors are
-                        // logged but don't change the text. The
-                        // final result decides.
+                    Ok(SessionEvent::Error(msg)) => {
+                        // Pre-result errors get logged so
+                        // debugging is possible without
+                        // surfacing them to the model;
+                        // the final prompt result decides
+                        // the text.
+                        if !msg.is_empty() {
+                            log::warn!("grok session pre-result error: {msg}");
+                        }
                     }
                     Err(broadcast::error::RecvError::Lagged(_)) => continue,
                     Err(broadcast::error::RecvError::Closed) => {
@@ -436,7 +436,7 @@ where
 {
     while let Some(cmd) = rx.recv().await {
         match cmd {
-            WriteCommand::WriteBytes(mut bytes) => {
+            WriteCommand::WriteBytes(bytes) => {
                 if let Err(e) = writer.write_all(&bytes).await {
                     log::warn!("grok writer: write_all failed: {e}");
                     break;

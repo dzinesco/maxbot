@@ -21,7 +21,6 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use serde_json::{json, Value};
-use tauri::Manager;
 
 use super::registry::truncate_for_model;
 use super::system::require_string;

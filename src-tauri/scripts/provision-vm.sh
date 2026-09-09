@@ -22,6 +22,41 @@
 # MaxBot process ever has SSH access there, so the security model
 # is unchanged. The 5th positional argument is preserved (and
 # ignored) for API compatibility with the Rust side.
+#
+# v2.1: ensure sshd is up + the bot user is authorized BEFORE
+# the long packages: install runs. Without this, the cold-cache
+# smoke test (provision_e2e_against_crispy) saw port 22 refuse
+# connections for 2+ minutes after the IP lease. Root cause: the
+# noble cloud image ships /etc/ssh/sshd_config but NO host keys.
+# cc_ssh normally generates them, but it runs AFTER bootcmd --
+# so when our bootcmd does systemctl enable --now ssh, sshd's
+# ExecStartPre (sshd -t) aborts with "no hostkeys available",
+# and because ssh.service is Type=notify, systemctl then
+# blocks forever waiting for READY=1. We tried a host-key
+# pre-generation, but the underlying deadlock with Type=notify
+# still bites when the apt-get install of xfce4 / x11vnc
+# races with the systemd notification. The fix:
+#   1. bootcmd generates host keys with ssh-keygen -A BEFORE
+#      trying to start sshd, so sshd -t passes.
+#   2. bootcmd pre-creates bot + drops the authorized_keys
+#      so SSH works the moment sshd binds port 22 (no wait for
+#      cc_users_groups, which is in cloud_config_modules and
+#      gets stuck behind the apt install of xfce4 / x11vnc).
+#   3. bootcmd starts /usr/sbin/sshd DIRECTLY (no systemd
+#      Type=notify, no systemctl --now). Port 22 binds in
+#      milliseconds, independent of how long the apt install
+#      of xfce4 / x11vnc / openssh-server takes.
+#   4. The original users: block is kept (cc_users_groups is
+#      idempotent and re-confirms the same key).
+#   5. runcmd: ends with systemctl enable ssh (so systemd
+#      owns it on the next reboot) and systemctl try-restart
+#      ssh (safety net for if the openssh-server package
+#      install ever disrupts the manually-started sshd).
+#
+# Implementation note: the user-data heredoc uses plain <<EOF
+# (NOT <<'EOF') so $SSH_PUB and $VM_NAME still expand, but
+# that means backticks in comments would be evaluated as
+# command substitution. Don't add any.
 
 set -euo pipefail
 
@@ -51,6 +86,38 @@ USER_DATA="$VM_DIR/user-data"
 META_DATA="$VM_DIR/meta-data"
 cat > "$USER_DATA" <<EOF
 #cloud-config
+bootcmd:
+  # Pre-create the "bot" user with sudo + the SSH key so SSH
+  # is authorized as soon as sshd binds port 22. bootcmd
+  # runs before any cloud_init_modules entry, so this is done
+  # well before cc_ssh / cc_users_groups / package install.
+  # The downstream users: block is idempotent and just
+  # re-confirms the same key.
+  - id bot >/dev/null 2>&1 || useradd -m -s /bin/bash -G sudo,adm bot
+  - mkdir -p /home/bot/.ssh
+  - chmod 700 /home/bot/.ssh
+  - echo '$SSH_PUB' > /home/bot/.ssh/authorized_keys
+  - chmod 600 /home/bot/.ssh/authorized_keys
+  - chown -R bot:bot /home/bot/.ssh
+  # Generate host keys BEFORE trying to start sshd. The noble
+  # cloud image ships /etc/ssh/sshd_config but NO host keys
+  # (ssh-keygen -A normally runs inside cc_ssh, but that
+  # module comes after this bootcmd). Without host keys,
+  # sshd -t (ExecStartPre) refuses to start.
+  - if [ ! -f /etc/ssh/ssh_host_ed25519_key ]; then ssh-keygen -A; fi
+  # Make sure the privsep dir systemd will create is in place
+  # (ssh.service RuntimeDirectory=sshd would create it
+  # later, but we start sshd before that).
+  - mkdir -p /run/sshd && chmod 0755 /run/sshd
+  # Start sshd directly. systemctl enable --now ssh deadlocks
+  # in this image because ssh.service is Type=notify and
+  # systemd's notify machinery races with the apt-get install
+  # of xfce4 / x11vnc that the packages: block kicks off
+  # right after bootcmd returns. Starting the binary
+  # directly (no systemd notification) gives us a working
+  # port 22 within milliseconds, independent of how long
+  # the apt install takes.
+  - /usr/sbin/sshd
 users:
   - name: bot
     groups: [sudo, adm]
@@ -71,6 +138,15 @@ runcmd:
   - sudo -u bot mkdir -p /home/bot/.vnc
   - sudo -u bot bash -c 'echo "x11vnc -display :1 -forever -nopw -bg -o /home/bot/.vnc/x11vnc.log" > /home/bot/.vnc/xstartup'
   - sudo -u bot bash -c '( crontab -l 2>/dev/null | grep -v x11vnc; echo "@reboot x11vnc -display :1 -forever -nopw -bg -o /home/bot/.vnc/x11vnc.log" ) | crontab -'
+  # Safety net: re-start sshd in case the openssh-server
+  # package upgrade in the packages: block (or any other
+  # service install) left it in a bad state. systemctl
+  # enable ssh (without --now) wires it up for future
+  # reboots; the systemd unit will then take over from
+  # the manually-started sshd via ExecStartPre on a
+  # normal start.
+  - systemctl enable ssh
+  - systemctl try-restart ssh
 EOF
 # Minimal NoCloud meta-data (required by cloud-init).
 cat > "$META_DATA" <<EOF

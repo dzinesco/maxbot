@@ -6,7 +6,6 @@
 use serde::Serialize;
 use tauri::State;
 
-use crate::storage::Database;
 use crate::tools::tts::{self, DEFAULT_TTS_VOICE};
 use crate::AppState;
 

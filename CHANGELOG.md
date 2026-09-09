@@ -4,6 +4,47 @@ All notable changes to MaxBot are documented in this file. The format
 follows [Keep a Changelog](https://keepachangelog.com/) and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## v2.1.0 — 2026-09-09
+
+### Added
+- **Edit / Save / Cancel in the ComputerPanel Files tab.** A
+  user can now edit any file on a per-Bot VM and save it back.
+  Save calls the existing `computer_file_write` Tauri command
+  (atomic temp+rename). The Save flow ships with a new
+  vitest that round-trips through the file-write mock.
+
+### Fixed
+- **Cold-cache SSH delay in the per-Bot provision script.**
+  On a cold libvirt cache, sshd refused port-22 connections
+  for 2+ minutes after the IP lease appeared. Root cause:
+  Ubuntu 24.10's cloud image ships `/etc/ssh/sshd_config`
+  but no host keys, and `cc_ssh` (which would generate them)
+  runs *after* the `bootcmd` phase. When our bootcmd did
+  `systemctl enable --now ssh`, sshd's ExecStartPre
+  (`sshd -t`) failed with "no hostkeys available" and
+  because `ssh.service` is `Type=notify`, systemctl blocked
+  waiting for READY=1. The fix in `provision-vm.sh` adds a
+  `bootcmd:` block that generates host keys with
+  `ssh-keygen -A`, pre-creates the bot user + drops the
+  authorized_keys, and `systemctl enable --now ssh` —
+  all before any package install. End-to-end: sshd binds
+  port 22 within ~30s of the IP lease. The
+  `provision_e2e_against_crispy` smoke test's SFTP wait
+  is back to 60s; the 180s fallback is removed.
+
+### Changed
+- **Cleaned up 35 dead-code warnings.** Unused imports
+  in `bots/`, `grok_build/`, `tools/`, `llm/`, and
+  `computer/` were deleted. Three genuinely dead helpers
+  (`build_user_data`, `build_meta_data` in `provision.rs`,
+  `list_bots_with_schedule` in `bots/filesystem.rs`) were
+  removed entirely. Eight unnecessary `mut` qualifiers
+  were dropped. `cargo build --release` now shows 4
+  pre-existing `#[allow(dead_code)]` items and 0 new
+  warnings. The total Rust test count dropped from 128
+  to 125 — the three removed tests covered the deleted
+  helpers.
+
 ## v2.0.4 — 2026-09-09
 
 ### Added

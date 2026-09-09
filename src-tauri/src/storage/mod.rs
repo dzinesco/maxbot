@@ -6,4 +6,4 @@
 
 pub mod db;
 
-pub use db::{Conversation, Database, Message, MessageRole, PersistedToolCall, Settings, SshKeyRow};
+pub use db::{Conversation, Database, Message, MessageRole, PersistedToolCall, Settings};

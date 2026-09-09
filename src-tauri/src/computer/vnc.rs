@@ -58,9 +58,6 @@ pub enum VncError {
 /// bridging is spawned per-WS-connection; this struct owns
 /// the lifetime.
 pub struct VncProxy {
-    /// Local TCP port the WebSocket server is bound to. The
-    /// URL we return is `ws://localhost:<port>/`.
-    pub local_port: u16,
     /// The SSH tunnel child. Dropped (and `start_kill`-ed)
     /// when `VncProxy` is dropped, which closes the tunnel
     /// and the local port.
@@ -73,9 +70,6 @@ pub struct VncProxy {
     /// `127.0.0.1:<port>` and is what we return to the
     /// renderer.
     pub local_addr: SocketAddr,
-    /// Range we allocated from. Stored so the caller can
-    /// log the configured range on errors.
-    pub port_range: (u16, u16),
 }
 
 impl VncProxy {
@@ -213,11 +207,9 @@ pub async fn start(
         .map_err(|e| VncError::Bind(e.to_string()))?;
     let tunnel = spawn_tunnel(pool, actual.port(), remote_vnc_port).await?;
     Ok(VncProxy {
-        local_port: actual.port(),
         tunnel: Arc::new(Mutex::new(Some(tunnel))),
         listener: Some(listener),
         local_addr: actual,
-        port_range,
     })
 }
 
@@ -349,11 +341,9 @@ mod tests {
         // returns a VNC console URL to the renderer may
         // point at anything other than localhost.
         let proxy = VncProxy {
-            local_port: 5942,
             tunnel: Arc::new(Mutex::new(None)),
             listener: None,
             local_addr: "127.0.0.1:5942".parse().unwrap(),
-            port_range: (5900, 5999),
         };
         let url = proxy.console_url();
         assert!(url.starts_with("ws://localhost:"), "got {url}");

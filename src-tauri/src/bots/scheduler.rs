@@ -21,12 +21,11 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::{DateTime, Local, TimeZone, Utc};
+use chrono::{DateTime, Local, Utc};
 use cron::Schedule;
 use tauri::{AppHandle, Manager};
 
 use crate::bots::executor::run_bot_once;
-use crate::bots::Bot;
 use crate::AppState;
 
 const TICK_SECONDS: u64 = 30;
@@ -223,24 +222,4 @@ mod tests {
         let s = sched("", 0);
         assert!(!is_due(&s, now));
     }
-}
-
-/// Convenience for tests and the future `/api/v1/...` path: list all
-/// bots, with their schedule and the last run summary.
-pub fn list_bots_with_schedule(
-    state: &AppState,
-) -> Vec<(Bot, Option<crate::bots::BotSchedule>, Option<crate::bots::BotRun>)> {
-    let mut out = Vec::new();
-    if let Ok(bots) = state.db.list_bots() {
-        for bot in bots {
-            let schedule = state.db.get_schedule(&bot.id).ok().flatten();
-            let last_run = state
-                .db
-                .list_bot_runs(&bot.id, 1)
-                .ok()
-                .and_then(|mut r| r.pop());
-            out.push((bot, schedule, last_run));
-        }
-    }
-    out
 }

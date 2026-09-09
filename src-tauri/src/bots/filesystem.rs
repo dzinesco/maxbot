@@ -17,11 +17,6 @@ use std::path::{Path, PathBuf};
 
 use tauri::Manager;
 
-/// Marker for what we consider a valid bot id: 36 chars, hex+dashes in
-/// the standard UUID layout. Anything else is rejected to prevent path
-/// traversal in case a non-UUID id ever sneaks in.
-const UUID_RE: &str = r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$";
-
 /// Returns the bot's directory, creating `bots/<id>/` and
 /// `bots/<id>/outputs/` if missing. The data dir is resolved via
 /// Tauri's `app.path().app_data_dir()` so it matches the SQLite path

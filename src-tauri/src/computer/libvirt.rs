@@ -77,24 +77,15 @@ impl DomainState {
             _ => Self::Other,
         }
     }
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Running => "running",
-            Self::Stopped => "stopped",
-            Self::Paused => "paused",
-            Self::Crashed => "crashed",
-            Self::Other => "other",
-        }
-    }
 }
 
-/// One row from `virsh net-dhcp-leases default`. We only use
-/// `ipaddr` and `mac`, but parsing the full table means we can
-/// disambiguate when a net has multiple VMs.
+/// One row from `virsh net-dhcp-leases default`. The consumer
+/// (provision-vm) matches by `ipaddr` + `hostname`; `mac` is
+/// dropped because the protocol gives it but the IP-poll only
+/// needs the IP+hostname pair.
 #[derive(Debug, Clone)]
 pub struct DhcpLease {
     pub ipaddr: String,
-    pub mac: String,
     pub hostname: String,
 }
 
@@ -143,13 +134,6 @@ impl LibvirtClient {
         Ok(out_v)
     }
 
-    /// `virsh domstate <name>` — returns the parsed state.
-    /// Strips the trailing newline virsh always adds.
-    pub async fn domstate(&self, pool: &SshPool, name: &str) -> Result<DomainState, LibvirtError> {
-        let out = run_virsh(pool, &["domstate", name]).await?;
-        Ok(DomainState::from_libvirt(out.trim()))
-    }
-
     /// `virsh start <name>` — bring a defined domain up.
     pub async fn start(&self, pool: &SshPool, name: &str) -> Result<(), LibvirtError> {
         run_virsh(pool, &["start", name]).await.map(|_| ())
@@ -157,7 +141,7 @@ impl LibvirtClient {
 
     /// `virsh shutdown <name>` — graceful ACPI shutdown. The VM
     /// may take a few seconds to actually power off; the caller
-    /// polls `domstate` to confirm.
+    /// polls `virsh list --state` to confirm.
     pub async fn shutdown(&self, pool: &SshPool, name: &str) -> Result<(), LibvirtError> {
         run_virsh(pool, &["shutdown", name]).await.map(|_| ())
     }
@@ -219,12 +203,6 @@ impl LibvirtClient {
         Ok(parse_dhcp_leases(&out))
     }
 
-    /// Run an arbitrary virsh command and return its stdout.
-    /// Used as a fallback for commands the typed methods above
-    /// don't cover (e.g. ad-hoc debugging).
-    pub async fn raw(&self, pool: &SshPool, args: &[&str]) -> Result<String, LibvirtError> {
-        run_virsh(pool, args).await
-    }
 }
 
 impl Default for LibvirtClient {
@@ -308,11 +286,6 @@ pub(crate) fn parse_dhcp_leases(raw: &str) -> Vec<DhcpLease> {
             Some(i) => i,
             None => continue,
         };
-        // MAC is the token immediately before the protocol.
-        if proto_idx < 1 {
-            continue;
-        }
-        let mac = parts[proto_idx - 1].to_string();
         // IP is the token immediately after the protocol.
         let ip_idx = proto_idx + 1;
         if ip_idx >= parts.len() {
@@ -326,11 +299,7 @@ pub(crate) fn parse_dhcp_leases(raw: &str) -> Vec<DhcpLease> {
             .get(ip_idx + 1)
             .map(|s| s.to_string())
             .unwrap_or_default();
-        out.push(DhcpLease {
-            ipaddr,
-            mac,
-            hostname,
-        });
+        out.push(DhcpLease { ipaddr, hostname });
     }
     out
 }
@@ -350,7 +319,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_dhcp_leases_extracts_ip_and_mac() {
+    fn parse_dhcp_leases_extracts_ip_and_hostname() {
         let raw = "\
  Expiry Time           MAC address         Protocol   IP address                Hostname       Client ID or DUID
 ---------------------------------------------------------------------------------------------------------------------
@@ -360,7 +329,6 @@ mod tests {
         let leases = parse_dhcp_leases(raw);
         assert_eq!(leases.len(), 2);
         assert_eq!(leases[0].ipaddr, "192.168.122.173");
-        assert_eq!(leases[0].mac, "52:54:00:3a:c1:ca");
         assert_eq!(leases[0].hostname, "maxbot-foo");
         assert_eq!(leases[1].ipaddr, "192.168.122.50");
         assert_eq!(leases[1].hostname, "another-bot");
@@ -391,10 +359,8 @@ mod tests {
         let leases = parse_dhcp_leases(raw);
         assert_eq!(leases.len(), 2);
         assert_eq!(leases[0].ipaddr, "192.168.122.65");
-        assert_eq!(leases[0].mac, "52:54:00:d6:7e:ea");
         assert_eq!(leases[0].hostname, "maxbot-bot-smoke-39a1fede");
         assert_eq!(leases[1].ipaddr, "192.168.122.238");
-        assert_eq!(leases[1].mac, "52:54:00:f3:4c:e6");
         assert_eq!(leases[1].hostname, "maxbot-bot-0a0538fb-f1f4-42f0-83de-eec858cf9288");
     }
 

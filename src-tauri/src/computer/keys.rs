@@ -30,7 +30,7 @@
 use argon2::{Algorithm, Argon2, Params, Version};
 use chacha20poly1305::aead::{Aead, KeyInit};
 use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
-use ed25519_dalek::pkcs8::{DecodePrivateKey, EncodePrivateKey};
+use ed25519_dalek::pkcs8::EncodePrivateKey;
 use ed25519_dalek::SigningKey;
 use rand::rngs::OsRng;
 use sha2::{Digest, Sha256};
@@ -81,13 +81,6 @@ pub fn generate_keypair() -> Result<(Vec<u8>, String), KeyError> {
         .map_err(|e| KeyError::Generate(e.to_string()))?;
     let public = format_openssh_public(&signing);
     Ok((pkcs8.as_bytes().to_vec(), public))
-}
-
-/// Re-derive an Ed25519 secret key from PKCS#8 DER bytes (the
-/// inverse of the generation step). Used when decrypting a stored
-/// key so we can hand the raw `SigningKey` to `russh`.
-pub fn decode_pkcs8(der: &[u8]) -> Result<SigningKey, KeyError> {
-    SigningKey::from_pkcs8_der(der).map_err(|e| KeyError::Decode(e.to_string()))
 }
 
 /// Encrypt a PKCS#8 private key blob with a passphrase. Output

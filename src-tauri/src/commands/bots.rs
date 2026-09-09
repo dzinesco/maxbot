@@ -417,7 +417,6 @@ pub async fn reveal_bot_folder(
 pub async fn list_mcp_servers(
     state: State<'_, AppState>,
 ) -> Result<Vec<McpServerInfo>, String> {
-    use crate::tools::Tool;
     let mut grouped: std::collections::BTreeMap<String, Vec<String>> =
         std::collections::BTreeMap::new();
     for adapter in state.mcp.tool_adapters() {

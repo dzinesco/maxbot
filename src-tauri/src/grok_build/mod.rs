@@ -16,7 +16,7 @@
 
 pub mod session;
 
-pub use session::{GrokSession, SessionEvent};
+pub use session::GrokSession;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -24,6 +24,7 @@ use std::sync::Arc;
 use tauri::{AppHandle, Manager};
 use tokio::sync::OnceCell;
 
+#[cfg(test)]
 use crate::storage::db::Settings;
 
 /// Process-wide singleton. Resolved on first use; survives across
@@ -34,9 +35,9 @@ use crate::storage::db::Settings;
 static SESSION: OnceCell<Arc<GrokSession>> = OnceCell::const_new();
 
 /// Get the running session, or spawn one. The first call after
-/// process start (or after a manual `close_session()`) brings up
-/// the subprocess, runs the handshake, and persists the new
-/// `session_id` to SQLite so the next launch can resume.
+/// process start brings up the subprocess, runs the handshake,
+/// and persists the new `session_id` to SQLite so the next
+/// launch can resume.
 pub async fn get_or_init_session(app: &AppHandle) -> Result<Arc<GrokSession>, String> {
     SESSION
         .get_or_try_init(|| async {
@@ -52,18 +53,6 @@ pub async fn get_or_init_session(app: &AppHandle) -> Result<Arc<GrokSession>, St
         })
         .await
         .cloned()
-}
-
-/// Drop the cached session. The next `get_or_init_session` call
-/// will spawn a fresh subprocess. Not currently wired to a UI
-/// control — kept for tests and future "reset" flows.
-pub async fn close_session() {
-    if let Some(s) = SESSION.get() {
-        s.close();
-    }
-    // OnceCell doesn't have a `take`; we replace the static by
-    // relying on the process to be short-lived for tests. In
-    // production, the session lives for the whole app lifetime.
 }
 
 /// True if a session has been brought up in this process. Cheap
@@ -140,6 +129,7 @@ async fn persist_session_id(app: &AppHandle, session_id: &str) -> Result<(), Str
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::grok_build::session::SessionEvent;
 
     #[test]
     fn session_event_clone_is_cheap() {

@@ -499,38 +499,6 @@ async fn run_ssh_command(
     })
 }
 
-/// Build the `ssh` argv for a server-side command. No
-/// `-i` — we want the OS keychain / ssh-agent to pick the
-/// key. The inline config file (`-F /dev/stdin`) carries our
-/// accept-new and timeouts.
-fn build_server_command(
-    cfg: &ServerConfig,
-    cmd: &str,
-) -> Result<Command, SshError> {
-    let mut c = Command::new("ssh");
-    // We use a literal heredoc on the cmdline to inject our
-    // ssh_config. The trick: `-F <file>` where `<file>` is
-    // `/dev/stdin` and we pipe the config in. This is the
-    // documented way to ship per-process ssh config without
-    // touching `~/.ssh/config`.
-    let config = cfg.ssh_config.clone();
-    c.arg("-F").arg("/dev/stdin");
-    c.arg("-o").arg("BatchMode=yes");
-    c.arg("-o").arg("LogLevel=ERROR");
-    if !cfg.identity_file.is_empty() {
-        c.arg("-i").arg(&cfg.identity_file);
-    }
-    c.arg(format!("{}@{}", cfg.user, cfg.host));
-    c.arg(cmd);
-    // Pipe the config to stdin.
-    c.stdin(Stdio::piped());
-    // We have to set stdin before spawning — this is awkward
-    // in async; do it via the closure below. For now, callers
-    // will need to feed stdin themselves. (See `run_ssh`.)
-    let _ = config; // silence unused; we use the simpler path below
-    Ok(c)
-}
-
 /// Server-side exec: run `cmd` on the server using the OS
 /// keychain. We avoid `-F /dev/stdin` complexity by passing
 /// the options as `-o` flags inline.
@@ -727,7 +695,6 @@ pub struct KeyTempFile {
 
 impl KeyTempFile {
     pub async fn new(bytes: &[u8]) -> Result<Self, SshError> {
-        use std::os::unix::fs::OpenOptionsExt;
         let mut path = std::env::temp_dir();
         path.push(format!("maxbot-key-{}.pem", uuid::Uuid::new_v4()));
         let mut f = tokio::fs::OpenOptions::new()

@@ -206,9 +206,9 @@ fn seed_settings_from_env(db: &Database) {
     let mut changed = false;
 
     // Helper: if the SQLite field is empty, take from .env.
-    let mut seed_optional_string = |field: &mut Option<String>,
-                                    key: &str,
-                                    log_label: &str|
+    let seed_optional_string = |field: &mut Option<String>,
+                                key: &str,
+                                log_label: &str|
      -> bool {
         if field.as_deref().map_or(true, str::is_empty) {
             if let Some(v) = env.get(key) {
@@ -221,7 +221,7 @@ fn seed_settings_from_env(db: &Database) {
         }
         false
     };
-    let mut seed_string = |field: &mut String, key: &str, log_label: &str| -> bool {
+    let seed_string = |field: &mut String, key: &str, log_label: &str| -> bool {
         if field.is_empty() {
             if let Some(v) = env.get(key) {
                 if !v.is_empty() {

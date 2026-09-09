@@ -137,12 +137,6 @@ impl ToolRegistry {
         Self { by_name }
     }
 
-    /// Backwards-compatible: build the registry with the built-in
-    /// defaults and no dynamic tools.
-    pub fn default_set() -> Self {
-        Self::default_with_extras(Vec::new())
-    }
-
     /// All tool declarations to send to the model.
     pub fn definitions(&self) -> Vec<ToolDefinition> {
         let mut out: Vec<ToolDefinition> = self

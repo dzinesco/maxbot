@@ -33,4 +33,3 @@ pub mod web_search;
 pub mod window;
 
 pub use registry::ToolRegistry;
-pub use tool::{Tool, ToolContext, ToolError, ToolResult};

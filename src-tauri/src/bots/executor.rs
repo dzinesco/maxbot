@@ -378,7 +378,6 @@ pub async fn run_bot_once(
         };
         futures_util::pin_mut!(stream);
         let mut full_text = String::new();
-        let mut finish_reason = "stop".to_string();
         let mut stream_error: Option<StreamError> = None;
         let mut by_id: std::collections::HashMap<String, PersistedToolCall> =
             std::collections::HashMap::new();
@@ -387,7 +386,6 @@ pub async fn run_bot_once(
             tokio::select! {
                 biased;
                 _ = cancel.cancelled() => {
-                    finish_reason = "cancelled".to_string();
                     break;
                 }
                 // Per-chunk timeout — mirrors the chat command so a
@@ -437,8 +435,7 @@ pub async fn run_bot_once(
                                 },
                             );
                         }
-                        Ok(StreamChunk::Done { finish_reason: reason }) => {
-                            finish_reason = reason;
+                        Ok(StreamChunk::Done { .. }) => {
                             break;
                         }
                         Err(e) => {
@@ -680,40 +677,6 @@ fn first_line(text: &str, max: usize) -> String {
         out.push('…');
         out
     }
-}
-
-/// Public convenience used by the "Run now" command. Returns once the
-/// run is done; emits events along the way for the UI to render.
-pub async fn run_now(
-    app: AppHandle,
-    state: Arc<AppState>,
-    bot_id: String,
-) -> BotRunOutput {
-    let bot = match state.db.get_bot(&bot_id) {
-        Ok(Some(b)) => b,
-        Ok(None) => {
-            return BotRunOutput {
-                run_id: Uuid::new_v4().to_string(),
-                conversation_id: String::new(),
-                status: BotRunStatus::Failed,
-                result_summary: format!("no bot found with id {bot_id}"),
-            };
-        }
-        Err(e) => {
-            return BotRunOutput {
-                run_id: Uuid::new_v4().to_string(),
-                conversation_id: String::new(),
-                status: BotRunStatus::Failed,
-                result_summary: format!("db error: {e}"),
-            };
-        }
-    };
-    let cancel = CancellationToken::new();
-    // Bots run to completion by default; we don't yet surface a per-run
-    // cancel from the UI. The handle is returned via the future for
-    // future use.
-    let _ = cancel; // suppress unused warning until UI exposes a Stop button
-    run_bot_once(app, state, bot, CancellationToken::new()).await
 }
 
 /// `timeout_secs` keeps the run from hanging forever on a misbehaving
