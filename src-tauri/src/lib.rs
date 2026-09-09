@@ -26,6 +26,7 @@ use tauri::async_runtime::Mutex as AsyncMutex;
 pub struct AppState {
     pub db: Arc<Database>,
     pub mcp: mcp::McpRegistry,
+    pub bot_runs: bots::registry::SharedBotRunRegistry,
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -73,6 +74,7 @@ pub fn run() {
             app.manage(AppState {
                 db: Arc::new(db),
                 mcp: mcp_registry,
+                bot_runs: std::sync::Arc::new(bots::registry::BotRunRegistry::new()),
             });
             app.manage(Arc::new(AsyncMutex::new(StreamRegistry::default())));
             // Start the bot scheduler. It runs in a background tokio task
@@ -109,6 +111,8 @@ pub fn run() {
             commands::bots::run_bot_now,
             commands::bots::send_to_bot,
             commands::bots::list_mcp_servers,
+            commands::bots::stop_bot_run,
+            commands::bots::list_active_bot_runs,
             commands::tcc::list_controllable_apps,
             commands::tcc::request_tcc_for,
             commands::tcc::open_automation_settings,

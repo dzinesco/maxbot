@@ -70,6 +70,12 @@ pub struct BotRunOutput {
 /// Run a bot once. Used by both the "Run now" UI command and the
 /// scheduler. Returns once the bot has finished or failed; the caller
 /// can wait on the returned `BotRunOutput` to know the outcome.
+///
+/// Cancellation: the executor registers the `cancel` parameter with
+/// the `state.bot_runs` registry, keyed by the freshly-generated
+/// `run_id`. External callers (the UI Stop button via `stop_bot_run`)
+/// fire that same token by run_id. The token is unregistered on
+/// completion so the registry doesn't grow unbounded.
 pub async fn run_bot_once(
     app: AppHandle,
     state: Arc<AppState>,
@@ -77,6 +83,7 @@ pub async fn run_bot_once(
     cancel: CancellationToken,
 ) -> BotRunOutput {
     let run_id = Uuid::new_v4().to_string();
+    state.bot_runs.register(run_id.clone(), cancel.clone()).await;
     let started_at = Utc::now();
     // Build the full registry (built-in tools + MCP tools) and then
     // apply the bot's allowed_tools filter so the bot only sees the
@@ -465,7 +472,17 @@ pub async fn run_bot_once(
     }
 
     let result_summary = if let Some(err) = hit_error {
-        fail_run(&app, &state, &mut run, err.clone()).result_summary
+        // If we were cancelled, mark the run as Cancelled rather than
+        // Failed — different status surfaces differently in the UI.
+        if cancel.is_cancelled() {
+            run.status = BotRunStatus::Cancelled;
+            run.finished_at = Some(Utc::now());
+            run.result_summary = first_line(&err, 200);
+            let _ = state.db.upsert_bot_run(&run);
+            err
+        } else {
+            fail_run(&app, &state, &mut run, err.clone()).result_summary
+        }
     } else {
         // Successful run: write a one-line summary.
         let summary = first_line(&final_text, 200);
@@ -475,6 +492,11 @@ pub async fn run_bot_once(
         let _ = state.db.upsert_bot_run(&run);
         summary
     };
+
+    // Drop the cancel token from the registry so the next call to
+    // stop_bot_run for this id is a no-op. The token itself is
+    // dropped at the end of the function.
+    state.bot_runs.unregister(&run_id).await;
 
     // Update the schedule's last_run_at + last_conversation_id so
     // recurring runs continue in the same thread.

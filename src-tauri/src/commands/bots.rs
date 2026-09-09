@@ -205,6 +205,7 @@ pub async fn run_bot_now(
     let state_arc: Arc<AppState> = Arc::new(AppState {
         db: state.db.clone(),
         mcp: crate::mcp::McpRegistry::default(),
+        bot_runs: state.bot_runs.clone(),
     });
     // The bot runs to completion here; cancel is a no-op for now (UI
     // doesn't yet expose a per-run Stop button).
@@ -228,6 +229,35 @@ pub async fn run_bot_now(
         status: last.status,
         result_summary: last.result_summary,
     })
+}
+
+/// Cancel a running bot by id. Returns true if a run was found and
+/// cancelled, false if no run is active with that id (e.g. it
+/// finished between the UI rendering "running" and the user
+/// clicking Stop). The cancellation is best-effort: the executor
+/// checks between iterations and during tool calls, so a bot in the
+/// middle of a tool call will be cancelled when the tool returns.
+#[tauri::command]
+pub async fn stop_bot_run(
+    state: State<'_, AppState>,
+    run_id: String,
+) -> Result<bool, String> {
+    Ok(state.bot_runs.cancel(&run_id).await)
+}
+
+/// List run ids that are currently active (i.e. cancellable). The UI
+/// uses this to know which bot rows in the panel have a live run
+/// that a Stop button can fire against.
+#[tauri::command]
+pub async fn list_active_bot_runs(
+    state: State<'_, AppState>,
+) -> Result<Vec<String>, String> {
+    let _ = &state.bot_runs; // future: cross-reference
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || db.list_active_run_ids())
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())
 }
 
 /// Sentinel from_bot_id used by user-sent messages in the bot inbox.
@@ -273,6 +303,7 @@ pub async fn send_to_bot(
         let state_arc: Arc<AppState> = Arc::new(AppState {
             db: state.db.clone(),
             mcp: crate::mcp::McpRegistry::default(),
+            bot_runs: state.bot_runs.clone(),
         });
         let db_for_lookup = state.db.clone();
         let id_for_lookup = to_bot_id.clone();

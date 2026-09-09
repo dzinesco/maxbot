@@ -20,6 +20,7 @@ import {
   listAvailableTools,
   listBots,
   listBotRuns,
+  listActiveBotRuns,
   listConversations,
   listInbox,
   markInboxRead,
@@ -35,6 +36,7 @@ import {
   saveSettings,
   sendMessage,
   sendToBot,
+  stopBotRun,
   stopMessage,
   upsertBot,
   upsertBotSchedule,
@@ -99,6 +101,13 @@ export default function App() {
   >([]);
   const [botsCollapsed, setBotsCollapsed] = useState(false);
   const [runningBotId, setRunningBotId] = useState<string | null>(null);
+  /** Map of active bot run id → bot id. Populated by runBotNow /
+   * sendToBot (which return the run id) and pruned by the bot-done
+   * event listener. Polled from the DB every 2s as a fallback in
+   * case an event is missed (e.g. the app was relaunched mid-run). */
+  const [activeRunByBot, setActiveRunByBot] = useState<Record<string, string>>(
+    {},
+  );
   /** Map of assistantId -> accumulated streaming state. Cleared on done. */
   const pendingRef = useRef<PendingTurn | null>(null);
   /** Same as `pendingRef` but for bot runs (assistantMessageId keyed). */
@@ -299,6 +308,12 @@ export default function App() {
         }
         botPendingRef.current = null;
         setRunningBotId(null);
+        setActiveRunByBot((prev) => {
+          if (!(event.bot_id in prev)) return prev;
+          const next = { ...prev };
+          delete next[event.bot_id];
+          return next;
+        });
         setLastBotFinish({
           botId: event.bot_id,
           runId: event.bot_run_id,
@@ -326,6 +341,12 @@ export default function App() {
         });
         botPendingRef.current = null;
         setRunningBotId(null);
+        setActiveRunByBot((prev) => {
+          if (!(event.bot_id in prev)) return prev;
+          const next = { ...prev };
+          delete next[event.bot_id];
+          return next;
+        });
       });
       if (cancelled) {
         u1();
@@ -580,6 +601,10 @@ export default function App() {
       setLastBotFinish(null);
       try {
         const out = await runBotNow(id);
+        // Track the active run so the BotsPanel can show a Stop
+        // button. The run is removed from this map when the bot-done
+        // or bot-error event fires.
+        setActiveRunByBot((prev) => ({ ...prev, [id]: out.run_id }));
         // Switch the active view to the bot's conversation so the user
         // sees the streaming output. Refresh conversations first so
         // any newly-created bot thread is in the sidebar.
@@ -594,6 +619,21 @@ export default function App() {
     },
     [refreshConversations],
   );
+
+  const handleStopBot = useCallback(async (botId: string) => {
+    const runId = activeRunByBot[botId];
+    if (!runId) return;
+    try {
+      await stopBotRun(runId);
+      // The bot-done or bot-error event will fire and clear the
+      // activeRunByBot entry. As a UX nicety, optimistically clear
+      // the "running" state immediately so the button hides right
+      // away.
+      setRunningBotId((cur) => (cur === botId ? null : cur));
+    } catch (e) {
+      console.error("stop_bot_run failed:", e);
+    }
+  }, [activeRunByBot]);
 
   const handleOpenInbox = useCallback(
     async (id: string) => {
@@ -792,6 +832,8 @@ export default function App() {
             schedules={botSchedules}
             runs={botLastRuns}
             unreadCounts={unreadCounts}
+            activeRuns={activeRunByBot}
+            onStopBot={handleStopBot}
             onNewBot={handleNewBot}
             onEditBot={handleEditBot}
             onDeleteBot={handleDeleteBot}

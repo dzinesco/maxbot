@@ -6,10 +6,13 @@ interface BotsPanelProps {
   schedules: Record<string, BotSchedule | undefined>;
   runs: Record<string, BotRun | undefined>;
   unreadCounts: Record<string, number>;
+  /** Map of bot id → currently active run id (cancellable). */
+  activeRuns: Record<string, string>;
   onNewBot: () => void;
   onEditBot: (id: string) => void;
   onDeleteBot: (id: string) => void;
   onRunBot: (id: string) => void;
+  onStopBot: (id: string) => void;
   onOpenInbox: (id: string) => void;
   /** Bot id currently being executed (shows a small spinner). */
   runningBotId: string | null;
@@ -28,10 +31,12 @@ export function BotsPanel({
   schedules,
   runs,
   unreadCounts,
+  activeRuns,
   onNewBot,
   onEditBot,
   onDeleteBot,
   onRunBot,
+  onStopBot,
   onOpenInbox,
   runningBotId,
   collapsed,
@@ -73,9 +78,11 @@ export function BotsPanel({
               lastRun={runs[bot.id]}
               unread={unreadCounts[bot.id] ?? 0}
               running={runningBotId === bot.id}
+              hasActiveRun={bot.id in activeRuns}
               onEdit={() => onEditBot(bot.id)}
               onDelete={() => onDeleteBot(bot.id)}
               onRun={() => onRunBot(bot.id)}
+              onStop={() => onStopBot(bot.id)}
               onOpenInbox={() => onOpenInbox(bot.id)}
             />
           ))}
@@ -91,9 +98,11 @@ interface BotRowProps {
   lastRun?: BotRun;
   unread: number;
   running: boolean;
+  hasActiveRun: boolean;
   onEdit: () => void;
   onDelete: () => void;
   onRun: () => void;
+  onStop: () => void;
   onOpenInbox: () => void;
 }
 
@@ -103,9 +112,11 @@ function BotRow({
   lastRun,
   unread,
   running,
+  hasActiveRun,
   onEdit,
   onDelete,
   onRun,
+  onStop,
   onOpenInbox,
 }: BotRowProps) {
   const [menuOpen, setMenuOpen] = useState(false);
@@ -153,14 +164,24 @@ function BotRow({
           </div>
         </div>
         <div className="bot-actions">
-          <button
-            onClick={onRun}
-            disabled={running}
-            className="primary small"
-            title="Run this bot now"
-          >
-            {running ? "Running…" : "Run"}
-          </button>
+          {hasActiveRun ? (
+            <button
+              onClick={onStop}
+              className="danger small"
+              title="Stop the current run"
+            >
+              ◼ Stop
+            </button>
+          ) : (
+            <button
+              onClick={onRun}
+              disabled={running}
+              className="primary small"
+              title="Run this bot now"
+            >
+              {running ? "Running…" : "Run"}
+            </button>
+          )}
           <button
             className="ghost small"
             onClick={() => setMenuOpen((v) => !v)}

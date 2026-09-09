@@ -755,6 +755,28 @@ impl Database {
         Ok(out)
     }
 
+    /// Return the run ids of every bot run currently in the
+    /// "running" state. Used by the UI to know which bots have a
+    /// live run that a Stop button can fire against. The actual
+    /// cancellation goes through the in-process `BotRunRegistry`,
+    /// not the DB — the DB is the source of truth for display, the
+    /// registry is the mechanism for cancellation.
+    pub fn list_active_run_ids(&self) -> rusqlite::Result<Vec<String>> {
+        let conn = self.conn.lock().expect("db lock poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT id FROM bot_runs
+             WHERE status = 'running'
+             ORDER BY started_at DESC
+             LIMIT 50",
+        )?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
     // ----- inter-agent messages -----
 
     pub fn enqueue_bot_message(&self, msg: &crate::bots::BotMessage) -> rusqlite::Result<()> {

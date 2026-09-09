@@ -229,3 +229,11 @@ export async function openAutomationSettings(): Promise<void> {
 export async function listMcpServers(): Promise<McpServerInfo[]> {
   return invoke<McpServerInfo[]>("list_mcp_servers");
 }
+
+export async function stopBotRun(runId: string): Promise<boolean> {
+  return invoke<boolean>("stop_bot_run", { runId });
+}
+
+export async function listActiveBotRuns(): Promise<string[]> {
+  return invoke<string[]>("list_active_bot_runs");
+}
