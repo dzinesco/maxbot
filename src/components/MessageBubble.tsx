@@ -132,6 +132,44 @@ function ToolCallCard({ call }: { call: PersistedToolCall }) {
     }
   }, [call.arguments]);
 
+  // Categorize the tool by name. The category drives the
+  // left-edge accent strip and the icon color so the user can
+  // scan a multi-call agent turn and tell at a glance which
+  // surface the agent is operating on (browser, code/CLI,
+  // filesystem, or neutral). Adding a new tool: drop its name
+  // in here. Unknown tools land in 'default'.
+  const category = useMemo<ToolCategory>(() => {
+    if (
+      call.name === "ego_browser" ||
+      call.name.startsWith("safari_") ||
+      call.name.startsWith("chrome_")
+    ) {
+      return "browser";
+    }
+    if (
+      call.name === "grok_prompt" ||
+      call.name === "shell_run" ||
+      call.name === "file_read" ||
+      call.name === "file_write" ||
+      call.name === "tts_speak" ||
+      call.name === "tts_stop" ||
+      call.name === "web_fetch" ||
+      call.name === "web_search"
+    ) {
+      return "code";
+    }
+    if (
+      call.name.startsWith("memory_") ||
+      call.name.startsWith("scratchpad_") ||
+      call.name.startsWith("outputs_") ||
+      call.name === "app_open" ||
+      call.name === "app_list"
+    ) {
+      return "fs";
+    }
+    return "default";
+  }, [call.name]);
+
   const preview = useMemo(() => {
     const trim = (s: string, n: number) =>
       s.length > n ? s.slice(0, n) + "…" : s;
@@ -150,10 +188,10 @@ function ToolCallCard({ call }: { call: PersistedToolCall }) {
   }, [parsed]);
 
   return (
-    <details className="tool-call-card">
+    <details className="tool-call-card" data-category={category}>
       <summary>
         <span className="tool-call-icon" aria-hidden>
-          ⚡
+          {TOOL_ICONS[category]}
         </span>
         <span className="tool-call-name">{call.name}</span>
         {preview && <span className="tool-call-preview">{preview}</span>}
@@ -164,6 +202,15 @@ function ToolCallCard({ call }: { call: PersistedToolCall }) {
     </details>
   );
 }
+
+type ToolCategory = "browser" | "code" | "fs" | "default";
+
+const TOOL_ICONS: Record<ToolCategory, string> = {
+  browser: "🌐",
+  code: "⚡",
+  fs: "📁",
+  default: "⚙",
+};
 
 /** Animated three-dot indicator, shown in place of a streaming
  * bubble's content while we're waiting for the first token. The

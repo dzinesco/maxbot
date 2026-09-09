@@ -18,6 +18,16 @@
   --accent-soft: rgba(124, 58, 237, 0.18);
   --danger: #ef4444;
   --success: #22c55e;
+  /* Tool category palette — used by the tool-call card's
+   * left-edge accent strip and the icon. Kept restrained:
+   * each category is a single hue, applied as a 3px strip
+   * on the left edge plus a matching icon color. The body
+   * of the card stays the same neutral so the chat scroll
+   * doesn't get noisy. */
+  --tool-browser: #06b6d4;
+  --tool-code: #f59e0b;
+  --tool-fs: #a78bfa;
+  --tool-default: var(--text-3);
   --radius-sm: 6px;
   --radius-md: 10px;
   --radius-lg: 14px;
@@ -551,13 +561,32 @@ textarea:focus {
 }
 
 /* A single tool call. Closed by default — the summary shows a
- * one-line preview, expanding reveals the full arg JSON. */
+ * one-line preview, expanding reveals the full arg JSON. The
+ * left-edge accent strip is colored by the tool's category
+ * (browser / code / fs / default) so a multi-call agent turn
+ * is scannable at a glance. */
 .message .tool-call-card {
   border: 1px solid var(--border);
+  border-left: 3px solid var(--tool-default);
   border-radius: var(--radius-md);
   background: var(--bg-1);
   overflow: hidden;
   transition: border-color 80ms ease;
+}
+
+.message .tool-call-card[data-category="browser"] {
+  --card-accent: var(--tool-browser);
+  border-left-color: var(--tool-browser);
+}
+
+.message .tool-call-card[data-category="code"] {
+  --card-accent: var(--tool-code);
+  border-left-color: var(--tool-code);
+}
+
+.message .tool-call-card[data-category="fs"] {
+  --card-accent: var(--tool-fs);
+  border-left-color: var(--tool-fs);
 }
 
 .message .tool-call-card[open] {
@@ -584,9 +613,11 @@ textarea:focus {
 }
 
 .message .tool-call-icon {
-  color: var(--accent);
+  color: var(--card-accent, var(--accent));
   font-size: 12px;
   flex-shrink: 0;
+  width: 14px;
+  text-align: center;
 }
 
 .message .tool-call-name {
