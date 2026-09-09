@@ -513,18 +513,58 @@ textarea:focus {
   padding: 22px;
   width: 480px;
   max-width: 92vw;
-  /* Keep the modal inside the viewport on short windows — without
-     these rules a long Settings form overflows and the bottom
-     fields (Save / Cancel) are unreachable. `min-height: 0` is
-     required on a flex column with overflow so the browser
-     doesn't fall back to the content's natural height. */
-  max-height: 90vh;
-  min-height: 0;
-  overflow-y: auto;
-  -webkit-overflow-scrolling: touch;
   display: flex;
   flex-direction: column;
   gap: 14px;
+}
+
+/* Stacked modal pattern: fixed header + scrolling body + fixed
+   footer. Used by Settings, which has a long form that overflows
+   most viewports. The body has min-height: 0 + overflow-y: auto
+   so the form scrolls even when the parent has a flex column. */
+.modal-stacked {
+  width: 660px;
+  max-width: 92vw;
+  max-height: 88vh;
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.modal-stacked-header {
+  padding: 18px 22px 12px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.modal-stacked-header h2 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.modal-stacked-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  padding: 18px 22px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.modal-stacked-footer {
+  padding: 12px 22px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-shrink: 0;
+  background: var(--bg-1);
 }
 
 .modal h2 {

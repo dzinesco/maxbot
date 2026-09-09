@@ -113,12 +113,14 @@ export function Settings({ initial, onClose, onSave }: SettingsProps) {
   return (
     <div className="modal-overlay" onClick={onClose}>
       <div
-        className="modal"
-        style={{ width: 660 }}
+        className="modal-stacked"
         onClick={(e) => e.stopPropagation()}
       >
-        <h2>Settings — MaxBot</h2>
+        <div className="modal-stacked-header">
+          <h2>Settings — MaxBot</h2>
+        </div>
 
+        <div className="modal-stacked-body">
         <div className="field">
           <label>LLM provider</label>
           <select
@@ -293,8 +295,9 @@ export function Settings({ initial, onClose, onSave }: SettingsProps) {
         </div>
 
         {error && <div className="error">{error}</div>}
+        </div>
 
-        <div className="actions">
+        <div className="modal-stacked-footer">
           <button onClick={onClose} disabled={saving}>
             Cancel
           </button>
