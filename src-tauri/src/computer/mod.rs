@@ -514,15 +514,124 @@ impl ComputerManager {
         Ok(())
     }
 
+    /// v2.3.5: bootstrap-install the user's default SSH
+    /// public key into the VM's `authorized_keys` so an
+    /// existing VM (provisioned with a per-Bot key) can
+    /// switch to the default-key path without Destroy.
+    ///
+    /// We send the install via the QEMU guest agent so we
+    /// don't need SSH access — the chicken-and-egg case
+    /// for a user whose passphrase is empty. The QGA
+    /// command is idempotent (`grep -qxF` short-circuits
+    /// when the key line already exists), so multiple
+    /// clicks are safe.
+    ///
+    /// Returns the QGA's JSON response on success.
+    pub async fn install_default_key(
+        &self,
+        db: &Database,
+        bot_id: &str,
+    ) -> Result<String, ComputerError> {
+        // 1. Find the public key on the Mac. Prefer ed25519,
+        //    fall back to rsa / ecdsa. The OS keychain is
+        //    not used here — we read the file directly so
+        //    the same key the user uses in their terminal
+        //    gets installed on the VM.
+        let home = std::env::var_os("HOME")
+            .ok_or_else(|| ComputerError::Ssh("HOME not set".into()))?;
+        let home = std::path::PathBuf::from(home);
+        let pub_path = ["id_ed25519.pub", "id_rsa.pub", "id_ecdsa.pub"]
+            .iter()
+            .map(|name| home.join(".ssh").join(name))
+            .find(|p| p.exists())
+            .ok_or_else(|| {
+                ComputerError::Ssh(
+                    "no default SSH public key found (looked for id_ed25519.pub, id_rsa.pub, id_ecdsa.pub in ~/.ssh/)".into(),
+                )
+            })?;
+        let pub_key = std::fs::read_to_string(&pub_path).map_err(|e| {
+            ComputerError::Ssh(format!("reading {}: {e}", pub_path.display()))
+        })?;
+        let pub_key = pub_key.trim();
+        if pub_key.is_empty() {
+            return Err(ComputerError::Ssh(format!(
+                "{} is empty",
+                pub_path.display()
+            )));
+        }
+
+        // 2. Look up the VM domain name from the computers
+        //    table so we know which qemu-agent-command to
+        //    address.
+        let computer = db
+            .get_computer(bot_id)?
+            .ok_or_else(|| ComputerError::NoComputer(bot_id.into()))?;
+        if computer.vm_name.is_empty() {
+            return Err(ComputerError::NoComputer(bot_id.into()));
+        }
+
+        // 3. Build the QGA guest-exec command. The shell
+        //    pipeline is idempotent: `grep -qxF` returns
+        //    true when the key line is already present, so
+        //    the `|| echo … >>` only appends on the first
+        //    run.
+        let script = format!(
+            "mkdir -p /home/bot/.ssh && \
+             chmod 700 /home/bot/.ssh && \
+             grep -qxF \"{pub_key}\" /home/bot/.ssh/authorized_keys || \
+             echo \"{pub_key}\" >> /home/bot/.ssh/authorized_keys ; \
+             chmod 600 /home/bot/.ssh/authorized_keys ; \
+             chown -R bot:bot /home/bot/.ssh"
+        );
+        let cmd_json = serde_json::json!({
+            "execute": "guest-exec",
+            "arguments": {
+                "path": "/bin/sh",
+                "arg": ["-c", script],
+            }
+        })
+        .to_string();
+        let response = self
+            .libvirt
+            .qemu_agent_command(&*self.pool, &computer.vm_name, &cmd_json)
+            .await?;
+        Ok(response)
+    }
+
     /// Ensure the per-Bot key is decrypted + cached in
     /// the pool. Called before every `vm_sftp_*` and
     /// `vm_exec`. Idempotent — if the key is already
     /// cached, this is a no-op.
+    ///
+    /// v2.3.5: when `computer_use_default_ssh_key` is on,
+    /// the SSH path uses the user's default key so we
+    /// skip the per-Bot key fetch entirely. The VM endpoint
+    /// is still populated (so `vm_sftp_*` and `vm_exec`
+    /// can route to the right IP), but we never read
+    /// `ssh_keys` on the hot path. Legacy users with the
+    /// flag off keep the original behavior.
     async fn ensure_bot_unlocked(
         &self,
         db: &Database,
         bot_id: &str,
     ) -> Result<(), ComputerError> {
+        // v2.3.5: when the default-key flag is on, skip the
+        // per-Bot key fetch. We still need the VM endpoint
+        // cached so subsequent `vm_sftp_*` calls route to
+        // the right IP, but the per-Bot key is never read.
+        let settings = db.load_settings()?;
+        if settings.computer_use_default_ssh_key {
+            if let Ok(row) = db.get_computer(bot_id) {
+                if let Some(c) = row {
+                    if let Some(ip) = c.vm_ip.clone() {
+                        self.pool
+                            .set_vm_endpoint(bot_id, ip, "bot".into())
+                            .await;
+                    }
+                }
+            }
+            return Ok(());
+        }
         // Fast path: key is already cached.
         if self.pool.key_blob_for(bot_id).await.is_ok() {
             return Ok(());

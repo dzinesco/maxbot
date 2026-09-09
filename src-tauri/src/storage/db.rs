@@ -196,6 +196,18 @@ pub struct Settings {
     /// `PassphraseMissing`.
     #[serde(default)]
     pub computer_passphrase: String,
+    /// When true, MaxBot's SSH path leaves `identity_file`
+    /// empty so ssh falls back to the user's default key
+    /// (`~/.ssh/id_ed25519` / `~/.ssh/id_rsa` / ssh-agent).
+    /// When false (legacy default), per-Bot SSH keys are
+    /// decrypted on every call using `computer_passphrase`.
+    /// Introduced in v2.3.5 to drop the passphrase gate —
+    /// MaxBot is a personal tool, the per-Bot key model was
+    /// over-engineered. Default true so new installs skip
+    /// the passphrase field entirely; the per-Bot key path
+    /// still works for legacy users who haven't switched.
+    #[serde(default = "default_computer_use_default_ssh_key")]
+    pub computer_use_default_ssh_key: bool,
     /// Default disk size (GiB) for a newly-provisioned Bot
     /// VM. The Bot editor lets the user override this. Plan
     /// default is 10 GB; we use 10 here for parity.
@@ -215,6 +227,13 @@ fn default_computer_disk() -> u32 {
 }
 fn default_computer_ram() -> u32 {
     2048
+}
+/// v2.3.5: when true, MaxBot's SSH path leaves
+/// `identity_file` empty so ssh falls back to the user's
+/// default key. New installs default to on so the
+/// passphrase field can stay empty.
+fn default_computer_use_default_ssh_key() -> bool {
+    true
 }
 
 /// One row in the `ssh_keys` table. Returned by
@@ -424,6 +443,18 @@ impl Database {
             "bot_schedules",
             "skill_id",
             "TEXT",
+        )?;
+        // v2.3.5 — drop the per-Bot passphrase gate by using
+        // the user's default SSH key. Existing DBs get upgraded
+        // to the "on" state via the column DEFAULT. The legacy
+        // `computer_passphrase` field stays around for users
+        // who haven't switched yet, but the SSH hot path now
+        // skips the per-Bot key fetch when this flag is on.
+        add_column_if_missing(
+            &conn,
+            "settings",
+            "computer_use_default_ssh_key",
+            "INTEGER NOT NULL DEFAULT 1",
         )?;
         Ok(())
     }
@@ -1887,6 +1918,10 @@ mod tests {
         assert_eq!(s.openai_base_url, "");
         assert_eq!(s.anthropic_base_url, "");
         assert_eq!(s.xai_base_url, "");
+        // v2.3.5: the default-key flag must default to on so
+        // existing DBs that haven't seen the field get the
+        // new behavior (no passphrase gate).
+        assert!(s.computer_use_default_ssh_key, "default-key flag must default to true");
     }
 
     #[test]

@@ -34,14 +34,17 @@
 // shutdown doesn't race with the shutdown.
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { Computer } from "../lib/api";
+import type { Computer, Settings } from "../lib/api";
 import {
   computerConsoleUrl,
   computerDestroy,
   computerGet,
+  computerInstallDefaultKey,
   computerStart,
   computerStop,
+  getSettings,
   onComputerStateChanged,
+  saveSettings,
 } from "../lib/tauri";
 import { NoVncViewer } from "./noVncViewer";
 import { ComputerFileBrowser } from "./ComputerFileBrowser";
@@ -189,6 +192,15 @@ function FullComputerPanel({
   // the browser is mounted regardless and shows its own
   // error if the listing fails.
   const [bodyTab, setBodyTab] = useState<"console" | "files">("console");
+  // v2.3.5: settings snapshot. Used to decide whether to
+  // show the "Use my default key" button in the toolbar.
+  // The flip happens after a successful install so the
+  // button disappears the next render.
+  const [settings, setSettings] = useState<Settings | null>(null);
+  // v2.3.5: short-lived confirmation banner after a
+  // successful install — "Default key installed — restart
+  // MaxBot to apply the new auth path".
+  const [installConfirm, setInstallConfirm] = useState<string | null>(null);
   // `lastSeenAt` is an ISO string; we tick once a second to
   // refresh the displayed uptime in status / preview modes.
   const lastSeenAt = computer?.last_seen_at ?? null;
@@ -253,6 +265,25 @@ function FullComputerPanel({
       clearInterval(interval);
     };
   }, [loadComputer, pollIntervalMs]);
+
+  // v2.3.5: load the settings snapshot once so the toolbar
+  // can decide whether to show the "Use my default key"
+  // button. The button is hidden when the default-key
+  // flag is already on.
+  useEffect(() => {
+    let cancelled = false;
+    getSettings()
+      .then((s) => {
+        if (!cancelled) setSettings(s);
+      })
+      .catch(() => {
+        // Tauri bridge unavailable (e.g. in tests) —
+        // leave settings null and the button stays hidden.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // Event subscription: react to the Rust side's
   // `computer://state-changed` emissions so the panel
@@ -368,6 +399,40 @@ function FullComputerPanel({
     }
   }, [botId, loadComputer]);
 
+  // v2.3.5: install the user's default SSH public key into
+  // the VM via the QEMU guest agent, then flip the
+  // `computer_use_default_ssh_key` flag so the next
+  // Console click uses the default-key path. The Rust
+  // command is idempotent (the QGA pipeline uses
+  // `grep -qxF … || echo …`), so re-running is safe.
+  const handleInstallDefaultKey = useCallback(async () => {
+    setActionPending(true);
+    setInstallConfirm(null);
+    try {
+      await computerInstallDefaultKey(botId);
+      // Flip the setting so the next render hides the
+      // button. We only send the new value plus the
+      // minimum required fields; the Rust side's
+      // `Settings` struct has `#[serde(default)]` on
+      // every field, so a partial object round-trips
+      // correctly.
+      const current = settings ?? (await getSettings());
+      const next: Settings = {
+        ...current,
+        computer_use_default_ssh_key: true,
+      };
+      await saveSettings(next);
+      setSettings(next);
+      setInstallConfirm(
+        "Default key installed — restart MaxBot to apply the new auth path",
+      );
+    } catch (e) {
+      setErrorMsg(String(e));
+    } finally {
+      setActionPending(false);
+    }
+  }, [botId, settings]);
+
   // --- render ---
   const wrapClass =
     mode === "takeover"
@@ -480,6 +545,15 @@ function FullComputerPanel({
         onStop={handleStop}
         onRestart={handleRestart}
         onDestroy={handleDestroy}
+        // v2.3.5: only show the "Use my default key"
+        // button when the user is still on the per-Bot
+        // key path. After a successful install the
+        // setting flips and the next render hides it.
+        onInstallDefaultKey={
+          settings && !settings.computer_use_default_ssh_key
+            ? handleInstallDefaultKey
+            : undefined
+        }
         disabled={actionPending}
       />
       <div className="computer-panel__body">
@@ -563,6 +637,24 @@ function FullComputerPanel({
             </div>
           </div>
         ) : null}
+        {/* v2.3.5: small inline confirmation after a
+            successful "Use my default key" install. Sits
+            above the footer so it doesn't fight the
+            existing error banner for vertical space. */}
+        {installConfirm ? (
+          <div
+            className="computer-panel__install-confirm"
+            data-testid="computer-install-confirm"
+            style={{
+              padding: "6px 10px",
+              background: "var(--accent-bg, #1e3a5f)",
+              color: "var(--accent-fg, #cfe5ff)",
+              fontSize: 12,
+            }}
+          >
+            {installConfirm}
+          </div>
+        ) : null}
       </div>
       <ComputerFooter
         mode={mode}
@@ -582,6 +674,11 @@ interface ComputerToolbarProps {
   onStop: () => void;
   onRestart: () => void;
   onDestroy: () => void;
+  /** v2.3.5: show the "Use my default key" button when
+   * the user is still on the per-Bot key path. Clicking
+   * it installs the user's default public key into the
+   * VM via QGA and flips the setting. */
+  onInstallDefaultKey?: () => void;
   disabled?: boolean;
 }
 
@@ -593,6 +690,7 @@ function ComputerToolbar({
   onStop,
   onRestart,
   onDestroy,
+  onInstallDefaultKey,
   disabled,
 }: ComputerToolbarProps) {
   const state = computer?.state ?? null;
@@ -636,6 +734,22 @@ function ComputerToolbar({
       >
         Restart
       </button>
+      {/* v2.3.5: only show when the VM is running (so the
+        QGA is up) AND the user hasn't switched to the
+        default-key path yet. After the install completes,
+        the parent flips the setting and the button
+        disappears on the next render. */}
+      {onInstallDefaultKey && state === "running" && (
+        <button
+          className="ghost small"
+          onClick={onInstallDefaultKey}
+          disabled={stateDisabled}
+          title="Install ~/.ssh/id_ed25519.pub into the VM's authorized_keys (QEMU guest agent — no SSH required)"
+          data-testid="computer-install-default-key"
+        >
+          Use my default key
+        </button>
+      )}
       <button
         className="danger small"
         onClick={onDestroy}

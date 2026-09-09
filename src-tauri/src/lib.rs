@@ -193,6 +193,11 @@ pub fn run() {
             commands::computer::computer_file_list,
             commands::computer::computer_file_read,
             commands::computer::computer_file_write,
+            // v2.3.5 — bootstrap-install the user's default
+            // SSH public key into the VM via the QEMU guest
+            // agent. Lets existing VMs switch to the
+            // default-key path without Destroy.
+            commands::computer::computer_install_default_key,
             // v2.2.0 — Skills. List/get/create/delete a
             // Skill, run one against a Bot, and
             // start/stop a recording session.

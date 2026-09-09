@@ -467,6 +467,18 @@ export async function computerFileWrite(
   await invoke("computer_file_write", { botId, path, content });
 }
 
+// v2.3.5: install the user's default SSH public key into
+// the VM's `authorized_keys` via the QEMU guest agent.
+// Idempotent — safe to call multiple times. The
+// ComputerPanel shows this as a "Use my default key"
+// button next to the Start/Stop row, only when the
+// `computer_use_default_ssh_key` setting is off.
+export async function computerInstallDefaultKey(
+  botId: string,
+): Promise<string> {
+  return invoke<string>("computer_install_default_key", { botId });
+}
+
 // ---- v2.2.0 Skills ----
 //
 // IPC wrappers for the Rust commands in

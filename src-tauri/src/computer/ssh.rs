@@ -169,7 +169,16 @@ impl ServerConfig {
         } else {
             s.computer_server_ssh_user.clone()
         };
-        let identity_file = s.computer_server_ssh_key_id.clone();
+        // v2.3.5: when the default-key flag is on, leave
+        // `identity_file` empty so ssh falls back to
+        // `~/.ssh/id_ed25519` / `~/.ssh/id_rsa` / ssh-agent.
+        // The empty-string case is already handled correctly
+        // by `spawn_tunnel` (it skips the `-i` arg).
+        let identity_file = if s.computer_use_default_ssh_key {
+            String::new()
+        } else {
+            s.computer_server_ssh_key_id.clone()
+        };
         // Inline ssh config: silence the host-key prompt and
         // cap the connection setup at 10s. We don't persist this
         // to ~/.ssh/config because the per-call behavior is
@@ -380,8 +389,16 @@ impl SshExecutor for SshPool {
             .get(bot_id)
             .cloned()
             .ok_or_else(|| SshError::VmNotReady(format!("bot {bot_id} has no IP yet")))?;
-        let key = self.key_blob_for(bot_id).await?;
-        run_ssh_with_key(&endpoint, &key, cmd).await
+        // v2.3.5: when the default-key flag is on, skip the
+        // per-Bot key fetch and let ssh fall back to the user's
+        // default key (which was installed into the VM's
+        // `authorized_keys` via `computer_install_default_key`).
+        let key: Option<Arc<Vec<u8>>> = if self.server.identity_file.is_empty() {
+            None
+        } else {
+            Some(self.key_blob_for(bot_id).await?)
+        };
+        run_ssh_with_key(&endpoint, key.as_ref(), cmd).await
     }
 
     async fn vm_sftp_list(
@@ -396,8 +413,12 @@ impl SshExecutor for SshPool {
             .get(bot_id)
             .cloned()
             .ok_or_else(|| SshError::VmNotReady(format!("bot {bot_id} has no IP yet")))?;
-        let key = self.key_blob_for(bot_id).await?;
-        let out = run_sftp_batch(&endpoint, &key, &format!("ls -la {path}\nbye\n")).await?;
+        let key: Option<Arc<Vec<u8>>> = if self.server.identity_file.is_empty() {
+            None
+        } else {
+            Some(self.key_blob_for(bot_id).await?)
+        };
+        let out = run_sftp_batch(&endpoint, key.as_ref(), &format!("ls -la {path}\nbye\n")).await?;
         parse_sftp_ls(&out)
     }
 
@@ -413,12 +434,16 @@ impl SshExecutor for SshPool {
             .get(bot_id)
             .cloned()
             .ok_or_else(|| SshError::VmNotReady(format!("bot {bot_id} has no IP yet")))?;
-        let key = self.key_blob_for(bot_id).await?;
+        let key: Option<Arc<Vec<u8>>> = if self.server.identity_file.is_empty() {
+            None
+        } else {
+            Some(self.key_blob_for(bot_id).await?)
+        };
         // `sftp` batch mode: fetch a remote file to stdout via
         // /dev/stdout. The `-` trick works on OpenSSH's sftp;
         // older versions may need a tempfile dance.
         let batch = format!("get {path} -\nbye\n");
-        let out = run_sftp_capture(&endpoint, &key, &batch).await?;
+        let out = run_sftp_capture(&endpoint, key.as_ref(), &batch).await?;
         Ok(out)
     }
 
@@ -435,7 +460,11 @@ impl SshExecutor for SshPool {
             .get(bot_id)
             .cloned()
             .ok_or_else(|| SshError::VmNotReady(format!("bot {bot_id} has no IP yet")))?;
-        let key = self.key_blob_for(bot_id).await?;
+        let key: Option<Arc<Vec<u8>>> = if self.server.identity_file.is_empty() {
+            None
+        } else {
+            Some(self.key_blob_for(bot_id).await?)
+        };
         // Write to a unique temp path on the VM, then move
         // atomically. sftp's batch mode `put -` reads from
         // stdin, but we have to pipe `content` into it. We
@@ -444,7 +473,7 @@ impl SshExecutor for SshPool {
         let batch = format!(
             "put - {tmp_remote}\nrename {tmp_remote} {path}\nbye\n"
         );
-        run_sftp_write(&endpoint, &key, &batch, content).await?;
+        run_sftp_write(&endpoint, key.as_ref(), &batch, content).await?;
         Ok(())
     }
 }
@@ -526,13 +555,19 @@ async fn run_ssh(
 }
 
 /// Per-Bot exec: same as `run_ssh` but uses the per-Bot key
-/// and connects to the VM's IP directly.
+/// and connects to the VM's IP directly. v2.3.5: when `key`
+/// is `None` the call skips `-i` and lets ssh fall back to
+/// the user's default key — the VM's `authorized_keys` was
+/// populated with that key by `computer_install_default_key`.
 async fn run_ssh_with_key(
     endpoint: &VmEndpoint,
-    key: &Arc<Vec<u8>>,
+    key: Option<&Arc<Vec<u8>>>,
     cmd: &str,
 ) -> Result<RemoteCommandOutput, SshError> {
-    let keyfile = KeyTempFile::new(key.as_ref()).await?;
+    let keyfile = match key {
+        Some(k) => Some(KeyTempFile::new(k.as_ref()).await?),
+        None => None,
+    };
     let mut c = Command::new("ssh");
     c.arg("-o").arg("BatchMode=yes");
     c.arg("-o").arg("LogLevel=ERROR");
@@ -544,8 +579,10 @@ async fn run_ssh_with_key(
         "ProxyJump={}@{}",
         endpoint.proxy_user, endpoint.proxy_host
     ));
-    c.arg("-i").arg(keyfile.path());
-    c.arg("-o").arg("IdentitiesOnly=yes");
+    if let Some(kf) = &keyfile {
+        c.arg("-i").arg(kf.path());
+        c.arg("-o").arg("IdentitiesOnly=yes");
+    }
     c.arg(format!("{}@{}", endpoint.ssh_user, endpoint.ip));
     c.arg(cmd);
     let result = run_ssh_command(c).await;
@@ -554,20 +591,26 @@ async fn run_ssh_with_key(
 }
 
 /// SFTP batch run that just prints the batch output (used for
-/// `ls`).
+/// `ls`). v2.3.5: when `key` is `None` the call skips `-i`
+/// and lets sftp fall back to the user's default key.
 async fn run_sftp_batch(
     endpoint: &VmEndpoint,
-    key: &Arc<Vec<u8>>,
+    key: Option<&Arc<Vec<u8>>>,
     batch: &str,
 ) -> Result<String, SshError> {
-    let keyfile = KeyTempFile::new(key.as_ref()).await?;
+    let keyfile = match key {
+        Some(k) => Some(KeyTempFile::new(k.as_ref()).await?),
+        None => None,
+    };
     let mut c = Command::new("sftp");
     c.arg("-o").arg("BatchMode=yes");
     c.arg("-o").arg("LogLevel=ERROR");
     c.arg("-o").arg("StrictHostKeyChecking=no");
     c.arg("-o").arg("UserKnownHostsFile=/dev/null");
-    c.arg("-i").arg(keyfile.path());
-    c.arg("-o").arg("IdentitiesOnly=yes");
+    if let Some(kf) = &keyfile {
+        c.arg("-i").arg(kf.path());
+        c.arg("-o").arg("IdentitiesOnly=yes");
+    }
     c.arg("-b").arg("-");
     c.arg(format!("{}@{}", endpoint.ssh_user, endpoint.ip));
     c.stdin(Stdio::piped());
@@ -609,7 +652,7 @@ async fn run_sftp_batch(
 /// (`get <path> -`).
 async fn run_sftp_capture(
     endpoint: &VmEndpoint,
-    key: &Arc<Vec<u8>>,
+    key: Option<&Arc<Vec<u8>>>,
     batch: &str,
 ) -> Result<String, SshError> {
     // sftp's `get <path> -` writes the file's bytes to its
@@ -622,11 +665,14 @@ async fn run_sftp_capture(
 /// (i.e. we write a remote file).
 async fn run_sftp_write(
     endpoint: &VmEndpoint,
-    key: &Arc<Vec<u8>>,
+    key: Option<&Arc<Vec<u8>>>,
     batch: &str,
     content: &str,
 ) -> Result<(), SshError> {
-    let keyfile = KeyTempFile::new(key.as_ref()).await?;
+    let keyfile = match key {
+        Some(k) => Some(KeyTempFile::new(k.as_ref()).await?),
+        None => None,
+    };
     let mut c = Command::new("sftp");
     c.arg("-o").arg("BatchMode=yes");
     c.arg("-o").arg("LogLevel=ERROR");
@@ -639,8 +685,10 @@ async fn run_sftp_write(
         "ProxyJump={}@{}",
         endpoint.proxy_user, endpoint.proxy_host
     ));
-    c.arg("-i").arg(keyfile.path());
-    c.arg("-o").arg("IdentitiesOnly=yes");
+    if let Some(kf) = &keyfile {
+        c.arg("-i").arg(kf.path());
+        c.arg("-o").arg("IdentitiesOnly=yes");
+    }
     c.arg("-b").arg("-");
     c.arg(format!("{}@{}", endpoint.ssh_user, endpoint.ip));
     c.stdin(Stdio::piped());
@@ -812,6 +860,41 @@ mod tests {
         assert!(cfg.is_configured());
         assert_eq!(cfg.host, "192.168.0.49");
         assert_eq!(cfg.user, "tyler");
+    }
+
+    // ----- v2.3.5: default-key vs per-Bot-key path -----
+
+    #[test]
+    fn from_settings_uses_default_key_when_setting_on() {
+        // When `computer_use_default_ssh_key` is true, the
+        // server-config snapshot must leave `identity_file`
+        // empty even if `computer_server_ssh_key_id` was
+        // populated for legacy reasons. The empty string
+        // makes `spawn_tunnel` skip the `-i` arg, so ssh
+        // falls back to `~/.ssh/id_ed25519` / ssh-agent.
+        let mut s = crate::storage::Settings::default();
+        s.computer_server_host = "192.168.0.49".into();
+        s.computer_server_ssh_key_id = "legacy-key-id".into();
+        s.computer_use_default_ssh_key = true;
+        let cfg = ServerConfig::from_settings(&s);
+        assert_eq!(cfg.identity_file, "", "default-key on must zero out identity_file");
+    }
+
+    #[test]
+    fn from_settings_uses_per_bot_key_when_setting_off() {
+        // When `computer_use_default_ssh_key` is false,
+        // `identity_file` must mirror `computer_server_ssh_key_id`
+        // so the legacy per-Bot path still works for users
+        // who haven't switched.
+        let mut s = crate::storage::Settings::default();
+        s.computer_server_host = "192.168.0.49".into();
+        s.computer_server_ssh_key_id = "legacy-key-id".into();
+        s.computer_use_default_ssh_key = false;
+        let cfg = ServerConfig::from_settings(&s);
+        assert_eq!(
+            cfg.identity_file, "legacy-key-id",
+            "default-key off must pass computer_server_ssh_key_id through"
+        );
     }
 
     #[test]

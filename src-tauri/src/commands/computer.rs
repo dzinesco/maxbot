@@ -249,3 +249,21 @@ pub async fn computer_file_write(
         .await
         .map_err(|e| e.to_string())
 }
+
+/// v2.3.5: install the user's default SSH public key
+/// (`~/.ssh/id_ed25519.pub` / `id_rsa.pub` / `id_ecdsa.pub`)
+/// into the VM's `authorized_keys` via the QEMU guest
+/// agent. The install is idempotent — clicking the
+/// ComputerPanel button twice doesn't duplicate the key
+/// line. Returns the QGA's JSON response on success.
+#[tauri::command]
+pub async fn computer_install_default_key(
+    state: State<'_, AppState>,
+    bot_id: String,
+) -> Result<String, String> {
+    let db = state.db.clone();
+    let mgr = state.computer.clone();
+    mgr.install_default_key(&db, &bot_id)
+        .await
+        .map_err(|e| e.to_string())
+}

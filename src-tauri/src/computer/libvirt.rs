@@ -203,6 +203,28 @@ impl LibvirtClient {
         Ok(parse_dhcp_leases(&out))
     }
 
+    /// v2.3.5: send a raw QEMU guest agent (QGA) command
+    /// to a domain. Used by `computer_install_default_key`
+    /// to install the user's default SSH public key into
+    /// `/home/bot/.ssh/authorized_keys` without going through
+    /// SSH (the chicken-and-egg case for a user switching off
+    /// per-Bot keys on a VM that was provisioned with them).
+    ///
+    /// `cmd_json` is the QGA request body, e.g.
+    /// `{"execute":"guest-exec",...}`. Returned on success
+    /// is the QGA response (typically JSON). Errors come
+    /// from libvirt: if the QGA channel isn't open, virsh
+    /// returns `qemu-agent-command: Agent not available`.
+    pub async fn qemu_agent_command(
+        &self,
+        pool: &SshPool,
+        name: &str,
+        cmd_json: &str,
+    ) -> Result<String, LibvirtError> {
+        // The QGA command body is a single arg; we pass it
+        // quoted so the shell doesn't try to parse the JSON.
+        run_virsh(pool, &["qemu-agent-command", name, cmd_json]).await
+    }
 }
 
 impl Default for LibvirtClient {

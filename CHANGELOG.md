@@ -4,6 +4,72 @@ All notable changes to MaxBot are documented in this file. The format
 follows [Keep a Changelog](https://keepachangelog.com/) and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## v2.3.5 — 2026-09-09
+
+### Added
+- **`computer_use_default_ssh_key` setting (default
+  `true`).** When on, MaxBot's SSH path leaves
+  `identity_file` empty so ssh falls back to the user's
+  default key (`~/.ssh/id_ed25519` / `~/.ssh/id_rsa` /
+  ssh-agent). The per-Bot key + passphrase model was
+  overkill for a personal tool — if you forgot the
+  passphrase, your only path forward was Destroy +
+  re-provision. New installs skip the passphrase
+  field entirely.
+- **`computer_install_default_key` Tauri command.**
+  Installs the user's default SSH public key into an
+  existing VM's `authorized_keys` via the QEMU guest
+  agent (no SSH required — solves the chicken-and-egg
+  case for users with an empty passphrase). The QGA
+  pipeline uses `grep -qxF … || echo …`, so the
+  install is idempotent — re-running doesn't duplicate
+  the key line.
+- **"Use my default key" button on the ComputerPanel
+  toolbar.** Renders only when the VM is running AND
+  the per-Bot key path is still active. Clicking it
+  calls `computer_install_default_key`, flips the
+  setting via `saveSettings`, and shows a small inline
+  confirmation. The button disappears on the next
+  render.
+- **QEMU guest agent command on the
+  `LibvirtClient`.** A `qemu_agent_command(domain,
+  json)` wrapper over `virsh qemu-agent-command` so
+  future slices can run commands on the guest without
+  SSH.
+
+### Fixed
+- **Existing-VM bootstrap path.** A user with a
+  pre-v2.3.5 VM (per-Bot key in
+  `/home/bot/.ssh/authorized_keys`) can now click
+  "Use my default key" and the VM's auth path
+  switches over without Destroy.
+
+### Changed
+- **`ServerConfig::from_settings` zeros out
+  `identity_file` when the default-key flag is on.**
+  The existing `spawn_tunnel` already handles the
+  empty-string case (skips the `-i` arg), so the
+  VNC tunnel falls back to the user's default key.
+- **`ComputerManager::ensure_bot_unlocked` skips the
+  per-Bot key fetch when the default-key flag is
+  on.** The VM endpoint is still cached so `vm_sftp_*`
+  and `vm_exec` can route to the right IP, but
+  `ssh_keys` is never read on the hot path. Legacy
+  users with the flag off keep the original
+  behavior.
+- **VM-side ssh/sftp (`vm_exec`, `vm_sftp_*`) accepts
+  `Option<&Arc<Vec<u8>>>` for the per-Bot key.** When
+  `None` (the default-key path), the call skips `-i`
+  and lets ssh fall back to the user's default key —
+  which the install-default-key command put in the
+  VM's `authorized_keys`.
+- **`ssh_keys` table and the
+  `computer_unlock_keys` IPC path are still there.**
+  Legacy users who haven't switched yet still rely on
+  them; v2.3.5 just stops reading them on the hot
+  path. The provisioning flow continues to write them
+  for backwards compat.
+
 ## v2.3.0 — 2026-09-09
 
 ### Added

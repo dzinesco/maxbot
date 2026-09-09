@@ -21,6 +21,7 @@
 
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
+import type { Settings } from "../lib/api";
 
 // Mock the tauri module so the panel sees a controlled
 // `Computer` and we can spy on the console-URL call.
@@ -34,6 +35,13 @@ vi.mock("../lib/tauri", () => {
     computerFileList: vi.fn(),
     computerFileRead: vi.fn(),
     computerFileWrite: vi.fn(),
+    // v2.3.5: the panel reads Settings on mount to decide
+    // whether to show the "Use my default key" button, and
+    // installs the default key on click. Both need to be
+    // in the mock or the existing tests will reject.
+    computerInstallDefaultKey: vi.fn(),
+    getSettings: vi.fn(),
+    saveSettings: vi.fn(),
     onComputerStateChanged: vi.fn(() => Promise.resolve(() => {})),
   };
 });
@@ -52,6 +60,9 @@ import { ComputerPanel } from "./ComputerPanel";
 import {
   computerGet,
   computerConsoleUrl,
+  computerInstallDefaultKey,
+  getSettings,
+  saveSettings,
 } from "../lib/tauri";
 
 import type { Computer } from "../lib/api";
@@ -78,11 +89,53 @@ const stoppedComputer: Computer = {
   created_at: new Date().toISOString(),
 };
 
+// v2.3.5: a default settings blob. Tests can override
+// `computer_use_default_ssh_key` per-case.
+const defaultSettings: Settings = {
+  provider_kind: "minimax",
+  minimax_api_key: null,
+  openai_api_key: null,
+  anthropic_api_key: null,
+  xai_api_key: null,
+  default_model: "",
+  minimax_base_url: "",
+  tts_voice: "",
+  grok_build_binary: "",
+  grok_build_model: "",
+  grok_cwd: "",
+  ego_browser_path: "",
+  nodejs_path: "",
+  openai_base_url: "",
+  anthropic_base_url: "",
+  xai_base_url: "",
+  computer_server_host: "192.168.0.49",
+  computer_server_ssh_user: "tyler",
+  computer_server_ssh_key_id: "",
+  computer_vnc_local_port_range: "5900-5999",
+  computer_passphrase: "",
+  // Default off in the test fixture so the "Use my
+  // default key" button is visible — that's the
+  // migration case for existing VMs.
+  computer_use_default_ssh_key: false,
+  computer_default_disk_gb: 10,
+  computer_default_ram_mb: 2048,
+};
+
 beforeEach(() => {
   vi.mocked(computerGet).mockReset();
   vi.mocked(computerConsoleUrl).mockReset();
   vi.mocked(computerConsoleUrl).mockResolvedValue(
     "ws://localhost:5900/",
+  );
+  // v2.3.5: provide a default Settings response. Tests
+  // can override via `vi.mocked(getSettings).mockResolvedValueOnce(...)`.
+  vi.mocked(getSettings).mockReset();
+  vi.mocked(getSettings).mockResolvedValue(defaultSettings);
+  vi.mocked(saveSettings).mockReset();
+  vi.mocked(saveSettings).mockResolvedValue();
+  vi.mocked(computerInstallDefaultKey).mockReset();
+  vi.mocked(computerInstallDefaultKey).mockResolvedValue(
+    '{"return":{"pid":1234}}',
   );
 });
 
@@ -144,5 +197,92 @@ describe("ComputerPanel — preview mode", () => {
     expect(panel.className).toContain("computer-panel__preview");
     expect(panel.querySelector('[data-testid="novnc-stub"]')?.getAttribute("data-ws-url"))
       .toBe("ws://localhost:5900/");
+  });
+});
+
+// v2.3.5: the "Use my default key" toolbar button. Renders
+// when the per-Bot key path is still active (the migration
+// case for existing VMs) and hidden once the user has
+// switched. Clicking it must call `computer_install_default_key`
+// then `settings_update` with the flag flipped.
+describe("ComputerPanel — install-default-key button", () => {
+  it("renders the button when default-key is OFF and the VM is running", async () => {
+    vi.mocked(computerGet).mockResolvedValue(runningComputer);
+    vi.mocked(getSettings).mockResolvedValue({
+      ...defaultSettings,
+      computer_use_default_ssh_key: false,
+    });
+    render(
+      <ComputerPanel
+        botId="bot-1"
+        mode="preview"
+        pollIntervalMs={60000}
+      />,
+    );
+    // Wait for the settings effect to resolve and the
+    // button to render.
+    const button = await screen.findByTestId("computer-install-default-key");
+    expect(button).toBeInTheDocument();
+  });
+
+  it("hides the button when default-key is already ON", async () => {
+    vi.mocked(computerGet).mockResolvedValue(runningComputer);
+    vi.mocked(getSettings).mockResolvedValue({
+      ...defaultSettings,
+      computer_use_default_ssh_key: true,
+    });
+    render(
+      <ComputerPanel
+        botId="bot-1"
+        mode="preview"
+        pollIntervalMs={60000}
+      />,
+    );
+    // The button should never render. We give the panel
+    // a tick to settle the effect chain, then assert
+    // absence. `queryByTestId` returns null when not
+    // found (vs. `findBy*` which would time out).
+    await waitFor(() => {
+      expect(getSettings).toHaveBeenCalled();
+    });
+    expect(screen.queryByTestId("computer-install-default-key")).toBeNull();
+  });
+
+  it("clicking the button calls install then saveSettings with the flag flipped", async () => {
+    vi.mocked(computerGet).mockResolvedValue(runningComputer);
+    vi.mocked(getSettings).mockResolvedValue({
+      ...defaultSettings,
+      computer_use_default_ssh_key: false,
+    });
+    const user = (await import("@testing-library/user-event")).default;
+    render(
+      <ComputerPanel
+        botId="bot-1"
+        mode="preview"
+        pollIntervalMs={60000}
+      />,
+    );
+    const button = await screen.findByTestId("computer-install-default-key");
+    await user.click(button);
+    // 1. The Tauri install command fires.
+    await waitFor(() => {
+      expect(computerInstallDefaultKey).toHaveBeenCalledWith("bot-1");
+    });
+    // 2. After the install resolves, the panel flips the
+    //    setting via `saveSettings` and the new value
+    //    must be `true` for `computer_use_default_ssh_key`.
+    await waitFor(() => {
+      expect(saveSettings).toHaveBeenCalled();
+      const last = vi.mocked(saveSettings).mock.calls.at(-1)![0];
+      expect(last.computer_use_default_ssh_key).toBe(true);
+    });
+    // 3. The button disappears on the next render (the
+    //    setting is now true in local state).
+    await waitFor(() => {
+      expect(screen.queryByTestId("computer-install-default-key")).toBeNull();
+    });
+    // 4. The inline confirmation banner shows up.
+    const confirm = await screen.findByTestId("computer-install-confirm");
+    expect(confirm.textContent).toMatch(/Default key installed/i);
   });
 });

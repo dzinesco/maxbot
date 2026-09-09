@@ -105,6 +105,15 @@ export interface Settings {
   /** User-set passphrase. Used to derive the Argon2id key that
    * encrypts per-Bot SSH keypairs. */
   computer_passphrase: string;
+  /**
+   * v2.3.5: when true, MaxBot's SSH path leaves `identity_file`
+   * empty so ssh falls back to the user's default key
+   * (`~/.ssh/id_ed25519` / `~/.ssh/id_rsa` / ssh-agent).
+   * Default true — the per-Bot passphrase model was overkill
+   * for a personal tool. Legacy users with `false` still get
+   * the per-Bot key + passphrase path.
+   */
+  computer_use_default_ssh_key: boolean;
   /** Default disk size (GiB) for a newly-provisioned Bot VM. */
   computer_default_disk_gb: number;
   /** Default RAM (MiB) for a newly-provisioned Bot VM. */
@@ -236,6 +245,11 @@ export const DEFAULT_SETTINGS: Settings = {
   computer_server_ssh_key_id: "",
   computer_vnc_local_port_range: "5900-5999",
   computer_passphrase: "",
+  // v2.3.5: default-key path is on so new installs skip
+  // the passphrase field. Legacy installs round-trip with
+  // whatever they had — the field's `#[serde(default)]`
+  // makes "missing == true" the safe upgrade.
+  computer_use_default_ssh_key: true,
   computer_default_disk_gb: 10,
   computer_default_ram_mb: 2048,
 };

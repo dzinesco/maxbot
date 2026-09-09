@@ -114,6 +114,15 @@ export function Settings({ initial, onClose, onSave }: SettingsProps) {
   const [computerPassphrase, setComputerPassphrase] = useState(
     base.computer_passphrase ?? "",
   );
+  // v2.3.5: when true, the SSH path uses the user's
+  // default `~/.ssh/id_*` key. The passphrase field is
+  // hidden when this is on because the per-Bot key
+  // path is skipped entirely. New installs default
+  // to true (matches the Rust `default_computer_use_default_ssh_key`
+  // helper in `db.rs`).
+  const [computerUseDefaultSshKey, setComputerUseDefaultSshKey] = useState(
+    base.computer_use_default_ssh_key ?? true,
+  );
   const initialPortRange = base.computer_vnc_local_port_range || "5900-5999";
   const [computerPortLo, setComputerPortLo] = useState<number>(
     parsePortLo(initialPortRange),
@@ -217,6 +226,12 @@ export function Settings({ initial, onClose, onSave }: SettingsProps) {
         computer_server_ssh_key_id: computerServerSshKeyId.trim(),
         computer_vnc_local_port_range: `${safeLo}-${safeHi}`,
         computer_passphrase: computerPassphrase,
+        // v2.3.5: default-key flag. The Rust side
+        // serializes this into the JSON settings blob
+        // and `ServerConfig::from_settings` zeros out
+        // `identity_file` when it's on. Stored as a
+        // boolean so the React state round-trips cleanly.
+        computer_use_default_ssh_key: computerUseDefaultSshKey,
         computer_default_disk_gb: Math.max(
           1,
           Math.floor(computerDiskGb || 10),
@@ -287,6 +302,12 @@ export function Settings({ initial, onClose, onSave }: SettingsProps) {
         computer_server_ssh_key_id: computerServerSshKeyId.trim(),
         computer_vnc_local_port_range: `${safeLo}-${safeHi}`,
         computer_passphrase: computerPassphrase,
+        // v2.3.5: default-key flag. The Rust side
+        // serializes this into the JSON settings blob
+        // and `ServerConfig::from_settings` zeros out
+        // `identity_file` when it's on. Stored as a
+        // boolean so the React state round-trips cleanly.
+        computer_use_default_ssh_key: computerUseDefaultSshKey,
         computer_default_disk_gb: Math.max(
           1,
           Math.floor(computerDiskGb || 10),
@@ -769,21 +790,56 @@ export function Settings({ initial, onClose, onSave }: SettingsProps) {
                     </div>
                   </div>
 
+                  {/* v2.3.5: default-key toggle. The per-Bot
+                    key + passphrase model was overkill for a
+                    personal tool. When this is on, the Rust
+                    side's `ServerConfig::from_settings` leaves
+                    `identity_file` empty so ssh falls back to
+                    the user's default key. The passphrase
+                    field is hidden in that mode because the
+                    per-Bot key is never generated or stored. */}
                   <div className="field">
-                    <label>Passphrase</label>
-                    <input
-                      type="password"
-                      value={computerPassphrase}
-                      onChange={(e) => setComputerPassphrase(e.target.value)}
-                      placeholder="(set once; used to encrypt per-Bot SSH keys)"
-                    />
+                    <label>
+                      <input
+                        type="checkbox"
+                        checked={computerUseDefaultSshKey}
+                        onChange={(e) =>
+                          setComputerUseDefaultSshKey(e.target.checked)
+                        }
+                        data-testid="computer-use-default-ssh-key"
+                      />{" "}
+                      Use my default SSH key (<code>~/.ssh/id_*</code>)
+                      instead of a per-Bot key — no passphrase needed
+                    </label>
                     <div className="hint">
-                      Used to derive an Argon2id key that encrypts
-                      each Bot's SSH keypair. Set this once; if you
-                      forget it, every Bot's computer becomes
-                      inaccessible (recovery is a v2.8 feature).
+                      When checked, MaxBot's SSH path skips the
+                      per-Bot key model entirely. The
+                      <code>computer_install_default_key</code>{" "}
+                      button on the ComputerPanel adds your
+                      <code>~/.ssh/id_ed25519.pub</code> to a
+                      VM's <code>authorized_keys</code> via the
+                      QEMU guest agent, so existing VMs switch
+                      without Destroy.
                     </div>
                   </div>
+
+                  {!computerUseDefaultSshKey && (
+                    <div className="field">
+                      <label>Passphrase</label>
+                      <input
+                        type="password"
+                        value={computerPassphrase}
+                        onChange={(e) => setComputerPassphrase(e.target.value)}
+                        placeholder="(set once; used to encrypt per-Bot SSH keys)"
+                      />
+                      <div className="hint">
+                        Used to derive an Argon2id key that encrypts
+                        each Bot's SSH keypair. Set this once; if you
+                        forget it, every Bot's computer becomes
+                        inaccessible (recovery is a v2.8 feature).
+                      </div>
+                    </div>
+                  )}
 
                   <div className="field">
                     <label>VNC local port range</label>
