@@ -45,6 +45,7 @@ const sampleApproval = (id: string, overrides: Partial<Approval> = {}): Approval
   payload: { to: "user@example.com", subject: "hi" },
   result: null,
   bot_run_id: "run-1",
+  tool_call_id: "tc-1",
   created_at: "2026-09-09T16:00:00Z",
   decided_at: null,
   ...overrides,

@@ -89,13 +89,19 @@ impl Database {
 
 impl Database {
     /// Insert a new pending approval. Returns the
-    /// freshly-minted `id`.
+    /// freshly-minted `id`. `tool_call_id` is the
+    /// LLM-issued id for the tool call (used by the
+    /// v2.6.2 auto-resume path to match the synthetic
+    /// `role=tool` message against the model). Pass
+    /// `None` for callers that don't have the LLM's
+    /// id (back-compat with pre-v2.6.2 dispatchers).
     pub fn enqueue_approval(
         &self,
         bot_id: &str,
         tool_name: &str,
         payload: &Value,
         bot_run_id: Option<&str>,
+        tool_call_id: Option<&str>,
     ) -> rusqlite::Result<String> {
         let conn = self.conn.lock().expect("db lock poisoned");
         let id = Uuid::new_v4().to_string();
@@ -104,14 +110,16 @@ impl Database {
             .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
         conn.execute(
             "INSERT INTO approvals
-                (id, bot_id, tool_name, status, payload_json, bot_run_id, created_at)
-             VALUES (?, ?, ?, 'pending', ?, ?, ?)",
+                (id, bot_id, tool_name, status, payload_json,
+                 bot_run_id, tool_call_id, created_at)
+             VALUES (?, ?, ?, 'pending', ?, ?, ?, ?)",
             params![
                 id,
                 bot_id,
                 tool_name,
                 payload_json,
                 bot_run_id,
+                tool_call_id,
                 now.to_rfc3339(),
             ],
         )?;
@@ -124,7 +132,7 @@ impl Database {
         let conn = self.conn.lock().expect("db lock poisoned");
         let mut stmt = conn.prepare(
             "SELECT id, bot_id, tool_name, status, payload_json,
-                    result_json, bot_run_id, created_at, decided_at
+                    result_json, bot_run_id, tool_call_id, created_at, decided_at
              FROM approvals WHERE id = ?",
         )?;
         let mut rows = stmt.query(params![id])?;
@@ -145,7 +153,7 @@ impl Database {
         let (sql, params_vec): (&str, Vec<rusqlite::types::Value>) = match bot_id {
             Some(b) => (
                 "SELECT id, bot_id, tool_name, status, payload_json,
-                        result_json, bot_run_id, created_at, decided_at
+                        result_json, bot_run_id, tool_call_id, created_at, decided_at
                  FROM approvals
                  WHERE status = 'pending' AND bot_id = ?1
                  ORDER BY created_at DESC",
@@ -153,7 +161,7 @@ impl Database {
             ),
             None => (
                 "SELECT id, bot_id, tool_name, status, payload_json,
-                        result_json, bot_run_id, created_at, decided_at
+                        result_json, bot_run_id, tool_call_id, created_at, decided_at
                  FROM approvals
                  WHERE status = 'pending'
                  ORDER BY created_at DESC",
@@ -213,8 +221,9 @@ fn row_to_approval(row: &rusqlite::Row) -> rusqlite::Result<Approval> {
     let payload_str: String = row.get(4)?;
     let result_str: Option<String> = row.get(5)?;
     let bot_run_id: Option<String> = row.get(6)?;
-    let created_at: DateTime<Utc> = parse_dt_field(row.get(7)?)?;
-    let decided_at: Option<DateTime<Utc>> = match row.get::<_, Option<String>>(8)? {
+    let tool_call_id: Option<String> = row.get(7)?;
+    let created_at: DateTime<Utc> = parse_dt_field(row.get(8)?)?;
+    let decided_at: Option<DateTime<Utc>> = match row.get::<_, Option<String>>(9)? {
         Some(s) => Some(parse_dt_field(s)?),
         None => None,
     };
@@ -230,6 +239,7 @@ fn row_to_approval(row: &rusqlite::Row) -> rusqlite::Result<Approval> {
         payload,
         result,
         bot_run_id,
+        tool_call_id,
         created_at,
         decided_at,
     })
@@ -338,7 +348,7 @@ mod tests {
         let (db, _dir) = fresh_db();
         let payload = json!({ "to": "user@example.com", "subject": "hi" });
         let id = db
-            .enqueue_approval("bot-test-1", "mail_send", &payload, Some("run-1"))
+            .enqueue_approval("bot-test-1", "mail_send", &payload, Some("run-1"), Some("tc-7"))
             .expect("enqueue");
         let a = db
             .get_approval(&id)
@@ -348,8 +358,29 @@ mod tests {
         assert_eq!(a.bot_id, "bot-test-1");
         assert_eq!(a.tool_name, "mail_send");
         assert_eq!(a.bot_run_id.as_deref(), Some("run-1"));
+        assert_eq!(a.tool_call_id.as_deref(), Some("tc-7"));
         assert_eq!(a.payload, payload);
         assert!(a.decided_at.is_none());
+    }
+
+    #[test]
+    fn enqueue_approval_without_tool_call_id_round_trip() {
+        // Pre-v2.6.2 callers (or dispatchers that don't
+        // have the LLM tool_call id) pass `None` for
+        // `tool_call_id`. The column must accept NULL
+        // and round-trip as `None` so the auto-resume
+        // path's `tool_call_id` match falls back to
+        // positional matching.
+        let (db, _dir) = fresh_db();
+        let id = db
+            .enqueue_approval("bot-test-1", "shell_run", &json!({}), None, None)
+            .expect("enqueue");
+        let a = db
+            .get_approval(&id)
+            .expect("get_approval")
+            .expect("exists");
+        assert!(a.tool_call_id.is_none());
+        assert!(a.bot_run_id.is_none());
     }
 
     #[test]
@@ -360,6 +391,7 @@ mod tests {
                 "bot-test-1",
                 "mail_send",
                 &json!({ "to": "x" }),
+                None,
                 None,
             )
             .expect("enqueue");
@@ -380,10 +412,10 @@ mod tests {
         // Two pending + one approved. Pending should
         // surface all pending; the approved one is gone.
         let _ = db
-            .enqueue_approval("bot-test-1", "mail_send", &json!({}), None)
+            .enqueue_approval("bot-test-1", "mail_send", &json!({}), None, None)
             .expect("enqueue 1");
         let second = db
-            .enqueue_approval("bot-test-1", "file_write", &json!({}), None)
+            .enqueue_approval("bot-test-1", "file_write", &json!({}), None, None)
             .expect("enqueue 2");
         db.decide_approval(&second, "rejected", None)
             .expect("decide");
@@ -404,13 +436,13 @@ mod tests {
     fn count_pending_approvals() {
         let (db, _dir) = fresh_db();
         let _ = db
-            .enqueue_approval("bot-test-1", "mail_send", &json!({}), None)
+            .enqueue_approval("bot-test-1", "mail_send", &json!({}), None, None)
             .expect("enqueue a");
         let _ = db
-            .enqueue_approval("bot-test-1", "file_write", &json!({}), None)
+            .enqueue_approval("bot-test-1", "file_write", &json!({}), None, None)
             .expect("enqueue b");
         let decided = db
-            .enqueue_approval("bot-test-1", "shell_run", &json!({}), None)
+            .enqueue_approval("bot-test-1", "shell_run", &json!({}), None, None)
             .expect("enqueue c");
         db.decide_approval(&decided, "approved", Some("\"ok\""))
             .expect("decide c");

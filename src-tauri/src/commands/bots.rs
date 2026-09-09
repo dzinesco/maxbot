@@ -277,6 +277,7 @@ pub async fn run_bot_now(
         bot,
         CancellationToken::new(),
         None,
+        None,
     )
     .await;
     // `run_bot_once` always returns the real run id and conversation
@@ -391,6 +392,7 @@ pub async fn send_to_bot(
                     state_arc,
                     bot,
                     CancellationToken::new(),
+                    None,
                     None,
                 )
                 .await;

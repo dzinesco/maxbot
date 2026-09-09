@@ -430,6 +430,15 @@ export interface Approval {
   payload: unknown;
   result: unknown | null;
   bot_run_id: string | null;
+  /**
+   * v2.6.2 — The LLM-issued tool_call id for the
+   * gated call. Used by the auto-resume path to
+   * match the synthetic `role=tool` message back
+   * to the model's outstanding `tool_calls`
+   * block. `null` for pre-v2.6.2 rows and for
+   * tools that pre-date the id plumbing.
+   */
+  tool_call_id: string | null;
   created_at: string;
   decided_at: string | null;
 }

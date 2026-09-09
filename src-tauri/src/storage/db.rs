@@ -541,6 +541,23 @@ impl Database {
             "cron_expression",
             "TEXT NOT NULL DEFAULT ''",
         )?;
+        // v2.6.2 — wire the LLM's tool_call_id into the
+        // `approvals` row so the auto-resume path can
+        // append a synthetic `role=tool` message with
+        // the right `tool_call_id` to match the model
+        // expectation. NULL is fine for pre-v2.6.2
+        // rows: the resume still appends a tool message,
+        // it just matches by position. Backfill from
+        // `bot_runs` would be brittle (the LLM's
+        // streaming tool_call id is not persisted
+        // anywhere we can recover it), so we leave
+        // older rows as NULL.
+        add_column_if_missing(
+            &conn,
+            "approvals",
+            "tool_call_id",
+            "TEXT",
+        )?;
         // v0.7.6: error_message on `messages` — friendly description
         // of a stream error, surfaced by the chat command when the
         // assistant turn ends in a wire-protocol / network / auth
@@ -1264,6 +1281,44 @@ impl Database {
             ],
         )?;
         Ok(())
+    }
+
+    /// v2.6.2 — Fetch a single bot_run by id. Used by
+    /// the approval auto-resume path to recover the
+    /// `conversation_id` (which we don't store on the
+    /// approval row) so the synthetic tool message
+    /// lands in the right conversation. Returns
+    /// `Ok(None)` if the run id is unknown — callers
+    /// treat that as a soft error (the original run
+    /// may have been GC'd; we just skip the resume).
+    pub fn get_bot_run(&self, run_id: &str) -> rusqlite::Result<Option<crate::bots::BotRun>> {
+        let conn = self.conn.lock().expect("db lock poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT id, bot_id, conversation_id, status, started_at, finished_at, result_summary
+             FROM bot_runs WHERE id = ?",
+        )?;
+        let mut rows = stmt.query(params![run_id])?;
+        let row = match rows.next()? {
+            Some(r) => r,
+            None => return Ok(None),
+        };
+        let status_str: String = row.get(3)?;
+        let finished_str: Option<String> = row.get(5)?;
+        let status = match status_str.as_str() {
+            "running" => crate::bots::BotRunStatus::Running,
+            "failed" => crate::bots::BotRunStatus::Failed,
+            "cancelled" => crate::bots::BotRunStatus::Cancelled,
+            _ => crate::bots::BotRunStatus::Succeeded,
+        };
+        Ok(Some(crate::bots::BotRun {
+            id: row.get(0)?,
+            bot_id: row.get(1)?,
+            conversation_id: row.get(2)?,
+            status,
+            started_at: parse_dt(row.get::<_, String>(4)?),
+            finished_at: finished_str.map(parse_dt),
+            result_summary: row.get(6)?,
+        }))
     }
 
     pub fn list_bot_runs(&self, bot_id: &str, limit: u32) -> rusqlite::Result<Vec<crate::bots::BotRun>> {

@@ -148,7 +148,7 @@ pub async fn dispatch_due_schedule(
         schedule.cron_expression,
         schedule.interval_seconds
     );
-    let _ = run_bot_once(app, state, bot, cancel, None).await;
+    let _ = run_bot_once(app, state, bot, cancel, None, None).await;
 }
 
 /// Decide whether a schedule is due right now. Cron takes precedence

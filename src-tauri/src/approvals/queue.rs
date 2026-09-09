@@ -47,6 +47,7 @@ pub async fn enqueue_if_ask_rule(
     tool_name: &str,
     payload: &Value,
     bot_run_id: Option<&str>,
+    tool_call_id: Option<&str>,
 ) -> Result<Option<String>, String> {
     // Look up the rule. `get_approval_rule` defaults
     // to `Auto` when no row exists, which is the
@@ -61,7 +62,13 @@ pub async fn enqueue_if_ask_rule(
         Rule::Ask => {
             let id = state
                 .db
-                .enqueue_approval(bot_id, tool_name, payload, bot_run_id)
+                .enqueue_approval(
+                    bot_id,
+                    tool_name,
+                    payload,
+                    bot_run_id,
+                    tool_call_id,
+                )
                 .map_err(|e| format!("enqueue approval failed: {e}"))?;
             Ok(Some(id))
         }
@@ -153,6 +160,7 @@ mod tests {
             "any_tool",
             &json!({}),
             None,
+            None,
         )
         .await
         .expect("auto rule returns Ok");
@@ -172,6 +180,7 @@ mod tests {
             "mail_send",
             &json!({ "to": "x@y" }),
             Some("run-99"),
+            Some("tc-99"),
         )
         .await
         .expect("ask rule returns Ok");
@@ -187,6 +196,11 @@ mod tests {
         assert_eq!(approval.status, "pending");
         assert_eq!(approval.tool_name, "mail_send");
         assert_eq!(approval.bot_run_id.as_deref(), Some("run-99"));
+        // v2.6.2 — the LLM's tool_call id is now
+        // threaded through so the auto-resume can
+        // match the synthetic tool message back to
+        // the model's outstanding `tool_calls`.
+        assert_eq!(approval.tool_call_id.as_deref(), Some("tc-99"));
     }
 
     #[tokio::test]
@@ -201,6 +215,7 @@ mod tests {
             "bot-queue-1",
             "shell_run",
             &json!({ "cmd": "rm -rf /" }),
+            None,
             None,
         )
         .await;

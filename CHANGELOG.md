@@ -4,6 +4,74 @@ All notable changes to MaxBot are documented in this file. The format
 follows [Keep a Changelog](https://keepachangelog.com/) and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## v2.6.2 — 2026-09-09
+
+### Fixed
+- **Approval auto-resume.** The v2.6.0 approval queue
+  let the user click Approve / Reject / Edit & send,
+  but the Bot did not auto-resume after a decision —
+  the user had to send a follow-up message to keep
+  the loop going (caveat #1 from the v2.6.0 report).
+  `approval_decide` now appends a synthetic
+  `role=tool` message to the bot's conversation
+  with the tool's result (or a `{"error":"denied
+  by user"}` payload on Reject) and re-triggers the
+  Bot against the same conversation via
+  `run_bot_once` with a new optional
+  `existing_conversation_id` parameter. The
+  existing `bot://chunk` / `bot://done` /
+  `bot://error` event surface drives the UI — no
+  React changes required. Approve and Reject now
+  feel like a single continuous turn instead of
+  two.
+
+### Added
+- **`approvals.tool_call_id` column.** The LLM's
+  tool_call id is now persisted on the approval
+  row at enqueue time, so the auto-resume path can
+  thread it through the synthetic `role=tool`
+  message and the LLM can match it back to the
+  outstanding `tool_calls` block. Pre-v2.6.2 rows
+  stay `NULL` and fall back to positional matching.
+- **`Database::get_bot_run(id)`.** Single-row
+  lookup helper used by the auto-resume path to
+  recover the `conversation_id` from
+  `approvals.bot_run_id`. Mirrors the existing
+  `list_bot_runs` shape; the resume is best-effort
+  if the run vanished (e.g. a DB re-init between
+  enqueue and decide).
+- **`run_bot_once` `existing_conversation_id`
+  parameter.** When `Some`, the executor pins the
+  run to that conversation (verifying it still
+  exists) and skips the "Run tick" kickoff so the
+  LLM picks up from the synthetic tool message
+  instead of seeing a brand-new turn inserted on
+  top. `None` preserves the pre-v2.6.2 behavior
+  for `run_bot_now`, `send_to_bot`, and the
+  scheduler.
+
+### Changed
+- **`enqueue_approval` and `enqueue_if_ask_rule`
+  signatures** now take a `tool_call_id:
+  Option<&str>`. `None` is acceptable for
+  back-compat with callers that don't have the
+  LLM id (the column allows NULL).
+- **`Approval` struct** gains a
+  `pub tool_call_id: Option<String>` field with
+  `#[serde(default)]` so the existing React
+  `Approval` type round-trips without a breaking
+  change. The renderer surfaces the field in
+  `src/lib/api.ts` as `tool_call_id: string |
+  null`; the existing `ApprovalQueue` test mock
+  was updated to set it.
+- **`approval_decide` signature** now takes
+  `app: AppHandle` as the first parameter (Tauri
+  injects it automatically — the React call site
+  is unchanged). The new `AppHandle` is used to
+  re-emit the existing `bot://chunk` /
+  `bot://done` / `bot://error` events from the
+  resumed run.
+
 ## v2.4.0 — 2026-09-09
 
 ### Added

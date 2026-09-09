@@ -280,6 +280,7 @@ pub async fn run_group_turn(
         bot.clone(),
         CancellationToken::new(),
         None,
+        None,
     )
     .await;
     // 9. Pull the bot's last assistant message from

@@ -83,12 +83,21 @@ pub struct BotRunOutput {
 /// so the caller can later `recorder.stop(recording_id)` to drain
 /// the captured tool calls into a candidate Skill. Passing `None`
 /// preserves the pre-v2.2 behavior exactly.
+///
+/// `existing_conversation_id` (v2.6.2) lets the caller pin the run
+/// to a specific conversation instead of letting the executor
+/// create a new one (or reuse a scheduled bot's last conversation).
+/// `None` preserves the pre-v2.6.2 behavior. `Some(id)` is the
+/// v2.6.2 auto-resume path: after the user Approves a tool call,
+/// the Bot picks up where it left off in the same conversation —
+/// no new chat tab, no lost history.
 pub async fn run_bot_once(
     app: AppHandle,
     state: Arc<AppState>,
     bot: Bot,
     cancel: CancellationToken,
     recording_id: Option<String>,
+    existing_conversation_id: Option<String>,
 ) -> BotRunOutput {
     let run_id = Uuid::new_v4().to_string();
     state.bot_runs.register(run_id.clone(), cancel.clone()).await;
@@ -101,8 +110,40 @@ pub async fn run_bot_once(
     ));
 
     // 1. Reuse the previous conversation for recurring bots, or create
-    //    a fresh one for one-off runs.
-    let conversation = if let Some(schedule) = state
+    //    a fresh one for one-off runs. v2.6.2: if the caller pinned us
+    //    to a specific conversation (the auto-resume path), honor
+    //    that — verify it still exists, otherwise fall through to
+    //    the default behavior.
+    let conversation = if let Some(pinned) = existing_conversation_id.clone() {
+        let exists = state
+            .db
+            .list_conversations()
+            .ok()
+            .map(|list| list.iter().any(|c| c.id == pinned))
+            .unwrap_or(false);
+        if exists {
+            let _ = state.db.touch_conversation(&pinned);
+            ConversationRef::Existing(pinned)
+        } else {
+            // Pinned id vanished between the approval-decide
+            // call and now. Fall through to "create fresh" so
+            // the user still gets a result rather than a silent
+            // failure. The synthetic tool message they just
+            // appended is in the (now orphan) conversation —
+            // it'll be visible in the history but unreachable
+            // from the new conversation. Best-effort.
+            let convo = state
+                .db
+                .create_bot_conversation(&bot.id, Some(format!("{} — run", bot.name)))
+                .unwrap_or_else(|_| {
+                    state
+                        .db
+                        .create_conversation(Some(format!("{} — run", bot.name)), Some(&bot.id))
+                        .unwrap()
+                });
+            ConversationRef::Fresh(convo)
+        }
+    } else if let Some(schedule) = state
         .db
         .get_schedule(&bot.id)
         .ok()
@@ -318,11 +359,19 @@ pub async fn run_bot_once(
     let _ = state.db.mark_bot_messages_read(&bot.id);
 
     // 6. Insert the user-style kickoff message (the "what to do" prompt).
-    let kickoff = "Run tick — proceed with your task.";
-    let kickoff_msg = ChatMessage::User {
-        content: kickoff.to_string(),
-    };
-    persist_message(&state, &conversation_id, MessageRole::User, &kickoff_msg);
+    //    v2.6.2 — skip the kickoff on the auto-resume path: the
+    //    caller just appended a synthetic `role=tool` message and
+    //    wants the LLM to continue from there, not to see another
+    //    "Run tick — proceed with your task." line interrupting
+    //    the flow.
+    let is_auto_resume = existing_conversation_id.is_some();
+    if !is_auto_resume {
+        let kickoff = "Run tick — proceed with your task.";
+        let kickoff_msg = ChatMessage::User {
+            content: kickoff.to_string(),
+        };
+        persist_message(&state, &conversation_id, MessageRole::User, &kickoff_msg);
+    }
 
     // 7. Build the conversation history for the first turn.
     let history = state
@@ -524,6 +573,7 @@ pub async fn run_bot_once(
                 &tc.name,
                 &resolved_args,
                 Some(&run_id),
+                Some(&tc.id),
             )
             .await
             {
@@ -989,6 +1039,7 @@ pub async fn run_with_timeout(
             state_for_task,
             bot_for_task,
             cancel_for_timeout,
+            None,
             None,
         )
         .await

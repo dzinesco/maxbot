@@ -83,6 +83,14 @@ pub struct Approval {
     /// The tool's result string. `None` until decided.
     pub result: Option<Value>,
     pub bot_run_id: Option<String>,
+    /// v2.6.2 — The LLM-issued tool_call id (so the
+    /// auto-resume can append a synthetic `role=tool`
+    /// message that the LLM will match against its
+    /// outstanding `tool_calls` block). `None` for
+    /// pre-v2.6.2 rows or for tools that pre-date the
+    /// `tc.id` plumbing.
+    #[serde(default)]
+    pub tool_call_id: Option<String>,
     pub created_at: DateTime<Utc>,
     pub decided_at: Option<DateTime<Utc>>,
 }
