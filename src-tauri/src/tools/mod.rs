@@ -24,6 +24,7 @@ pub mod mail;
 pub mod notes;
 pub mod registry;
 pub mod reminders;
+pub mod run_skill;
 pub mod shell_run;
 pub mod system;
 pub mod tool;

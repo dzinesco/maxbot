@@ -262,10 +262,23 @@ pub async fn run_bot_now(
         mcp: crate::mcp::McpRegistry::default(),
         bot_runs: state.bot_runs.clone(),
         computer: state.computer.clone(),
+        // v2.2.0: share the recorder with the main AppState
+        // so the executor's tool loop can push into the
+        // same instance the commands see. `run_bot_now` is
+        // not a recording path so this is a no-op for
+        // normal runs.
+        recorder: state.recorder.clone(),
     });
     // The bot runs to completion here; cancel is a no-op for now (UI
     // doesn't yet expose a per-run Stop button).
-    run_bot_once(app.clone(), state_arc, bot, CancellationToken::new()).await;
+    run_bot_once(
+        app.clone(),
+        state_arc,
+        bot,
+        CancellationToken::new(),
+        None,
+    )
+    .await;
     // `run_bot_once` always returns the real run id and conversation
     // id, even on success. Re-fetch the latest run for this bot so the
     // UI gets a consistent snapshot.
@@ -361,6 +374,7 @@ pub async fn send_to_bot(
             mcp: crate::mcp::McpRegistry::default(),
             bot_runs: state.bot_runs.clone(),
             computer: state.computer.clone(),
+            recorder: state.recorder.clone(),
         });
         let db_for_lookup = state.db.clone();
         let id_for_lookup = to_bot_id.clone();
@@ -377,6 +391,7 @@ pub async fn send_to_bot(
                     state_arc,
                     bot,
                     CancellationToken::new(),
+                    None,
                 )
                 .await;
             });

@@ -340,7 +340,39 @@ impl Database {
                 public_key            TEXT NOT NULL,
                 private_key_encrypted BLOB NOT NULL,
                 created_at            TEXT NOT NULL
-             );",
+             );
+             -- v2.2.0 — Skills: reusable multi-step procedures.
+             -- A Skill is a saved, named list of (tool, args) steps the
+             -- user can invoke on demand. The shape is intentionally
+             -- flat JSON so the file is diffable and grep-friendly.
+             -- `inputs_json` is a JSON array of Param{name,kind,default,choices};
+             -- `steps_json` is a JSON array of Step{tool,args,output_var}.
+             CREATE TABLE IF NOT EXISTS skills (
+                id          TEXT PRIMARY KEY,
+                name        TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                inputs_json TEXT NOT NULL DEFAULT '[]',
+                steps_json  TEXT NOT NULL DEFAULT '[]',
+                created_at  TEXT NOT NULL,
+                updated_at  TEXT NOT NULL
+             );
+             -- v2.2.0 — Skill runs: every invocation of a Skill persists
+             -- a row here for the renderer's run-history view. Steps are
+             -- kept in-memory in the AppState registry; this table
+             -- stores the durable summary (status, started/finished,
+             -- result summary, inputs).
+             CREATE TABLE IF NOT EXISTS skill_runs (
+                id              TEXT PRIMARY KEY,
+                skill_id        TEXT NOT NULL REFERENCES skills(id) ON DELETE CASCADE,
+                bot_id          TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+                inputs_json     TEXT NOT NULL DEFAULT '{}',
+                status          TEXT NOT NULL,
+                started_at      TEXT NOT NULL,
+                finished_at     TEXT,
+                result_summary  TEXT NOT NULL DEFAULT ''
+             );
+             CREATE INDEX IF NOT EXISTS skill_runs_by_skill
+                 ON skill_runs(skill_id, started_at DESC);",
         )?;
         // Idempotent column additions for older databases. SQLite
         // doesn't have IF NOT EXISTS for columns, so we probe
@@ -379,6 +411,19 @@ impl Database {
             "bots",
             "state",
             "TEXT NOT NULL DEFAULT 'idle'",
+        )?;
+        // v2.2.0 — forward-compat for v2.3 schedules. v2.2 doesn't
+        // wire the schedules UI to Skills, but adding the column now
+        // means a future migration doesn't have to ALTER an
+        // already-populated `bot_schedules` table. No FOREIGN KEY
+        // here on purpose: we don't want a v2.2 install that
+        // somehow loses the Skills table (e.g. test fixture) to
+        // fail loading schedules.
+        add_column_if_missing(
+            &conn,
+            "bot_schedules",
+            "skill_id",
+            "TEXT",
         )?;
         Ok(())
     }
@@ -1456,6 +1501,241 @@ fn add_column_if_missing(
         )?;
     }
     Ok(())
+}
+
+// ----- v2.2.0 Skills -----
+//
+// The DB layer for Skills is defined here (alongside the
+// other `impl Database` blocks) so it can access the
+// private `conn` field. The pure-Rust shapes (`Skill`,
+// `Step`, `Param`, `SkillRun`) live in
+// `crate::skills`; the JSON-blob columns (`inputs_json`,
+// `steps_json`) round-trip them.
+
+impl Database {
+    /// Insert or replace a Skill row. `inputs` and `steps`
+    /// are JSON-serialized into the table; everything else
+    /// is a scalar column. ON CONFLICT(id) refreshes the
+    /// editable fields — used by both `skill_create` (new
+    /// id) and the future "rename / edit" path.
+    pub fn upsert_skill(&self, skill: &crate::skills::Skill) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().expect("db lock poisoned");
+        let inputs_json =
+            serde_json::to_string(&skill.inputs).unwrap_or_else(|_| "[]".to_string());
+        let steps_json =
+            serde_json::to_string(&skill.steps).unwrap_or_else(|_| "[]".to_string());
+        conn.execute(
+            "INSERT INTO skills (id, name, description, inputs_json, steps_json, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(id) DO UPDATE SET
+                name = excluded.name,
+                description = excluded.description,
+                inputs_json = excluded.inputs_json,
+                steps_json = excluded.steps_json,
+                updated_at = excluded.updated_at",
+            params![
+                skill.id,
+                skill.name,
+                skill.description,
+                inputs_json,
+                steps_json,
+                skill.created_at.to_rfc3339(),
+                skill.updated_at.to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_skill(&self, id: &str) -> rusqlite::Result<Option<crate::skills::Skill>> {
+        let conn = self.conn.lock().expect("db lock poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT id, name, description, inputs_json, steps_json, created_at, updated_at
+             FROM skills WHERE id = ?",
+        )?;
+        let mut rows = stmt.query(params![id])?;
+        let row = match rows.next()? {
+            Some(r) => r,
+            None => return Ok(None),
+        };
+        Ok(Some(parse_skill_row(&row)?))
+    }
+
+    /// All skills, most-recently-updated first. The renderer
+    /// uses this to populate the Skills tab. No pagination
+    /// — the typical install has tens, not thousands.
+    pub fn list_skills(&self) -> rusqlite::Result<Vec<crate::skills::Skill>> {
+        let conn = self.conn.lock().expect("db lock poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT id, name, description, inputs_json, steps_json, created_at, updated_at
+             FROM skills
+             ORDER BY updated_at DESC",
+        )?;
+        let rows = stmt.query_map([], parse_skill_row)?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    pub fn delete_skill(&self, id: &str) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().expect("db lock poisoned");
+        // CASCADE on `skill_runs.skill_id` removes the
+        // runs automatically.
+        conn.execute("DELETE FROM skills WHERE id = ?", params![id])?;
+        Ok(())
+    }
+
+    /// Insert a fresh `skill_runs` row. The caller fills
+    /// in id, status, started_at; finished_at and
+    /// result_summary are blanked and updated later via
+    /// `update_skill_run`.
+    pub fn insert_skill_run(&self, run: &crate::skills::SkillRun) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().expect("db lock poisoned");
+        let inputs_json =
+            serde_json::to_string(&run.inputs).unwrap_or_else(|_| "{}".to_string());
+        conn.execute(
+            "INSERT INTO skill_runs (id, skill_id, bot_id, inputs_json, status, started_at, finished_at, result_summary)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            params![
+                run.id,
+                run.skill_id,
+                run.bot_id,
+                inputs_json,
+                run.status.as_str(),
+                run.started_at.to_rfc3339(),
+                run.finished_at.as_ref().map(|d| d.to_rfc3339()),
+                run.result_summary,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Patch a run with the latest status, finished_at,
+    /// and result_summary. The `inputs_json` is set on
+    /// insert and never updated — the user's inputs are
+    /// an immutable record of how the run started.
+    pub fn update_skill_run(&self, run: &crate::skills::SkillRun) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().expect("db lock poisoned");
+        conn.execute(
+            "UPDATE skill_runs SET
+                status = ?,
+                finished_at = ?,
+                result_summary = ?
+             WHERE id = ?",
+            params![
+                run.status.as_str(),
+                run.finished_at.as_ref().map(|d| d.to_rfc3339()),
+                run.result_summary,
+                run.id,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Most-recent runs for a Skill, used by the
+    /// run-history panel under each Skill. `limit` is
+    /// `None` for "give me all of them" (the typical
+    /// case — few runs per Skill).
+    pub fn list_skill_runs(
+        &self,
+        skill_id: &str,
+        limit: Option<u32>,
+    ) -> rusqlite::Result<Vec<crate::skills::SkillRun>> {
+        let conn = self.conn.lock().expect("db lock poisoned");
+        let query = if let Some(n) = limit {
+            format!(
+                "SELECT id, skill_id, bot_id, inputs_json, status, started_at, finished_at, result_summary
+                 FROM skill_runs WHERE skill_id = ?
+                 ORDER BY started_at DESC LIMIT {}",
+                n as i64
+            )
+        } else {
+            "SELECT id, skill_id, bot_id, inputs_json, status, started_at, finished_at, result_summary
+             FROM skill_runs WHERE skill_id = ?
+             ORDER BY started_at DESC"
+                .to_string()
+        };
+        let mut stmt = conn.prepare(&query)?;
+        let rows = stmt.query_map(params![skill_id], parse_skill_run_row)?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    /// Single-run lookup. Used by the run-progress card
+    /// on the Skills panel: the renderer keeps a `run_id`
+    /// it got from `skill_run` and polls this every
+    /// second while the run is in progress.
+    pub fn get_skill_run(&self, run_id: &str) -> rusqlite::Result<Option<crate::skills::SkillRun>> {
+        let conn = self.conn.lock().expect("db lock poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT id, skill_id, bot_id, inputs_json, status, started_at, finished_at, result_summary
+             FROM skill_runs WHERE id = ?",
+        )?;
+        let mut rows = stmt.query(params![run_id])?;
+        let row = match rows.next()? {
+            Some(r) => r,
+            None => return Ok(None),
+        };
+        Ok(Some(parse_skill_run_row(&row)?))
+    }
+}
+
+fn parse_skill_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<crate::skills::Skill> {
+    let inputs_json: String = row.get(3)?;
+    let steps_json: String = row.get(4)?;
+    let inputs: Vec<crate::skills::Param> = serde_json::from_str(&inputs_json).map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(
+            3,
+            rusqlite::types::Type::Text,
+            Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())),
+        )
+    })?;
+    let steps: Vec<crate::skills::Step> = serde_json::from_str(&steps_json).map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(
+            4,
+            rusqlite::types::Type::Text,
+            Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())),
+        )
+    })?;
+    Ok(crate::skills::Skill {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        description: row.get(2)?,
+        inputs,
+        steps,
+        created_at: parse_dt(row.get::<_, String>(5)?),
+        updated_at: parse_dt(row.get::<_, String>(6)?),
+    })
+}
+
+fn parse_skill_run_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<crate::skills::SkillRun> {
+    let inputs_json: String = row.get(3)?;
+    let status_str: String = row.get(4)?;
+    let finished_str: Option<String> = row.get(6)?;
+    let inputs: serde_json::Value = serde_json::from_str(&inputs_json)
+        .unwrap_or(serde_json::Value::Object(Default::default()));
+    Ok(crate::skills::SkillRun {
+        id: row.get(0)?,
+        skill_id: row.get(1)?,
+        bot_id: row.get(2)?,
+        inputs,
+        status: match status_str.as_str() {
+            "running" => crate::skills::SkillRunStatus::Running,
+            "failed" => crate::skills::SkillRunStatus::Failed,
+            "cancelled" => crate::skills::SkillRunStatus::Cancelled,
+            _ => crate::skills::SkillRunStatus::Succeeded,
+        },
+        started_at: parse_dt(row.get::<_, String>(5)?),
+        finished_at: finished_str.map(parse_dt),
+        result_summary: row.get(7)?,
+        // Per-step progress is in-memory only; the DB row
+        // does not persist it.
+        steps: Vec::new(),
+    })
 }
 
 #[cfg(test)]

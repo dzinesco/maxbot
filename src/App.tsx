@@ -12,6 +12,8 @@ import { Settings } from "./components/Settings";
 import { BotEditor } from "./components/BotEditor";
 import { BotInbox } from "./components/BotInbox";
 import { ComputerPanel } from "./components/ComputerPanel";
+import { RecordSkillDialog } from "./components/RecordSkillDialog";
+import { SkillsPanel } from "./components/SkillsPanel";
 import { SendToBotModal } from "./components/SendToBotModal";
 import { Welcome } from "./components/Welcome";
 import {
@@ -136,6 +138,16 @@ export default function App() {
   const [computerPanelBotId, setComputerPanelBotId] = useState<string | null>(
     null,
   );
+  // v2.2.0 — top-level view switcher. The Sidebar shows
+  // two top-level tabs: "Bots" (the chat UI, the default)
+  // and "Skills" (the Skills panel). Skills gets its own
+  // tab so a user can browse and run Skills without first
+  // picking a Bot / conversation.
+  const [mainView, setMainView] = useState<"chat" | "skills">("chat");
+  // v2.2.0 — when the user clicks "Record" in the Skills
+  // panel, App.tsx mounts the RecordSkillDialog. State
+  // holds the dialog open/closed.
+  const [recordSkillOpen, setRecordSkillOpen] = useState(false);
   /** Map of active bot run id → bot id. Populated by runBotNow /
    * sendToBot (which return the run id) and pruned by the bot-done
    * event listener. Polled from the DB every 2s as a fallback in
@@ -1210,9 +1222,17 @@ export default function App() {
         onOpenComputer={(botId) => setComputerPanelBotId(botId)}
         status={status}
         onOpenSettings={() => setSettingsOpen(true)}
+        mainView={mainView}
+        onSelectView={setMainView}
       />
       <main className="main">
-        {bots.length === 0 ? (
+        {mainView === "skills" ? (
+          <SkillsPanel
+            bots={bots}
+            defaultBotId={selectedBotId}
+            onOpenRecord={() => setRecordSkillOpen(true)}
+          />
+        ) : bots.length === 0 ? (
           // v2.0 Slice E: brand-new user with no Bots.
           // The chat area shows a single, focused "Create
           // your first Bot" prompt instead of an empty
@@ -1340,6 +1360,14 @@ export default function App() {
             />
           </div>
         </div>
+      )}
+      {recordSkillOpen && (
+        <RecordSkillDialog
+          bots={bots}
+          defaultBotId={selectedBotId}
+          onClose={() => setRecordSkillOpen(false)}
+          onSaved={() => setRecordSkillOpen(false)}
+        />
       )}
     </div>
   );

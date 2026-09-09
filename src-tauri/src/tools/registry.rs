@@ -29,6 +29,7 @@ use super::file_write::FileWriteTool;
 use super::mail::{MailDraftTool, MailInboxTool, MailSearchTool, MailSendTool};
 use super::notes::{NotesCreateTool, NotesReadTool, NotesSearchTool};
 use super::reminders::{RemindersAddTool, RemindersCompleteTool, RemindersListTool};
+use super::run_skill::RunSkillTool;
 use super::shell_run::ShellRunTool;
 use super::system::{
     SystemDarkModeGetTool, SystemDarkModeSetTool, SystemFrontAppTool, SystemNotifyTool,
@@ -128,6 +129,13 @@ impl ToolRegistry {
             Arc::new(OutputsListTool),
             Arc::new(OutputsReadTool),
             Arc::new(OutputsWriteTool),
+            // v2.2.0 — run a saved Skill from the agent loop.
+            // The model calls this with a `skill_id` and the
+            // Skill's `inputs`; the registry handles
+            // `output_var` chaining and per-step error
+            // handling. Consent is implicit because the bot's
+            // allowlist already gates tool use.
+            Arc::new(RunSkillTool),
         ];
         tools.extend(extra);
         let mut by_name: HashMap<String, Arc<dyn Tool>> = HashMap::new();

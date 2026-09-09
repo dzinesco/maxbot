@@ -78,6 +78,16 @@ export interface SidebarProps {
   onOpenSettings: () => void;
 
   /**
+   * v2.2.0 — the currently-active top-level view. The
+   * sidebar renders a tab row with "Bots" and "Skills";
+   * this prop tells the row which one is highlighted.
+   * Callbacks fire on click. The parent owns the state
+   * because the main view area switches based on it.
+   */
+  mainView: "chat" | "skills";
+  onSelectView: (view: "chat" | "skills") => void;
+
+  /**
    * Legacy slot — previously the sidebar mounted the
    * `BotsPanel` here. Slice E makes the roster the
    * sidebar itself, so this slot is unused but kept so
@@ -97,6 +107,8 @@ export function Sidebar({
   onOpenComputer,
   status,
   onOpenSettings,
+  mainView,
+  onSelectView,
   botPanel,
 }: SidebarProps) {
   // Same defensive computer-row hydration as the
@@ -167,6 +179,29 @@ export function Sidebar({
           // call lives in the chat area to keep the Bot
           // scoping obvious.)
         />
+      </div>
+
+      {/* v2.2.0 — top-level view switcher. Two tabs: Bots
+         (the chat UI) and Skills (the Skills panel). The
+         parent owns which view is active; this just
+         dispatches the click. */}
+      <div className="sidebar-tabs" role="tablist">
+        <button
+          className={`sidebar-tab ${mainView === "chat" ? "sidebar-tab--active" : ""}`}
+          onClick={() => onSelectView("chat")}
+          role="tab"
+          aria-selected={mainView === "chat"}
+        >
+          Bots
+        </button>
+        <button
+          className={`sidebar-tab ${mainView === "skills" ? "sidebar-tab--active" : ""}`}
+          onClick={() => onSelectView("skills")}
+          role="tab"
+          aria-selected={mainView === "skills"}
+        >
+          Skills
+        </button>
       </div>
 
       <BotRoster

@@ -7,5 +7,6 @@ pub mod computer;
 pub mod conversations;
 pub mod meta;
 pub mod settings;
+pub mod skills;
 pub mod tcc;
 pub mod tts;

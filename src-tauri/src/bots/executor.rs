@@ -75,11 +75,19 @@ pub struct BotRunOutput {
 /// `run_id`. External callers (the UI Stop button via `stop_bot_run`)
 /// fire that same token by run_id. The token is unregistered on
 /// completion so the registry doesn't grow unbounded.
+///
+/// `recording_id` is an optional v2.2 Skill-recording hook. When
+/// `Some`, every tool call dispatched inside the agent loop is
+/// pushed into the shared `RecorderState` (keyed by `recording_id`)
+/// so the caller can later `recorder.stop(recording_id)` to drain
+/// the captured tool calls into a candidate Skill. Passing `None`
+/// preserves the pre-v2.2 behavior exactly.
 pub async fn run_bot_once(
     app: AppHandle,
     state: Arc<AppState>,
     bot: Bot,
     cancel: CancellationToken,
+    recording_id: Option<String>,
 ) -> BotRunOutput {
     let run_id = Uuid::new_v4().to_string();
     state.bot_runs.register(run_id.clone(), cancel.clone()).await;
@@ -475,6 +483,7 @@ pub async fn run_bot_once(
             if cancel.is_cancelled() {
                 break;
             }
+            let resolved_args = parse_tool_args(&tc.arguments);
             let (content, is_error) = if tc.name == "message_bot" {
                 handle_message_bot(&state, &bot, tc)
             } else {
@@ -483,7 +492,7 @@ pub async fn run_bot_once(
                         ToolInvocation {
                             name: tc.name.clone(),
                             id: tc.id.clone(),
-                            arguments: parse_tool_args(&tc.arguments),
+                            arguments: resolved_args.clone(),
                             bot_id: Some(bot.id.clone()),
                         },
                         ToolContext {
@@ -498,6 +507,21 @@ pub async fn run_bot_once(
                     Err(e) => (format!("[error] {}", e), true),
                 }
             };
+            // v2.2.0 — Skill recording. When a recording is
+            // active, push this tool dispatch into the
+            // recorder. We capture the resolved args (after
+            // any model-side synthesis, before the tool
+            // mutated them) so the recorded Skill is
+            // replayable. A `None` `recording_id` is a no-op.
+            state.recorder.record(
+                recording_id.as_deref(),
+                crate::skills::recorder::make_recorded_step(
+                    tc.name.clone(),
+                    resolved_args,
+                    content.clone(),
+                    is_error,
+                ),
+            );
             // Persist the tool result as a `tool` message.
             let _ = state.db.insert_message(
                 &conversation_id,
@@ -714,7 +738,14 @@ pub async fn run_with_timeout(
     let app_for_task = app.clone();
     let state_for_task = state.clone();
     let task = tokio::spawn(async move {
-        run_bot_once(app_for_task, state_for_task, bot_for_task, cancel_for_timeout).await
+        run_bot_once(
+            app_for_task,
+            state_for_task,
+            bot_for_task,
+            cancel_for_timeout,
+            None,
+        )
+        .await
     });
     match tokio::time::timeout(Duration::from_secs(timeout_secs), task).await {
         Ok(Ok(out)) => out,

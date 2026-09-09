@@ -25,6 +25,10 @@ import type {
   Message,
   SendMessageResponse,
   Settings,
+  Skill,
+  SkillRecordStart,
+  SkillRecordStop,
+  SkillRun,
   TccProbeResult,
   ToolSummary,
   TtsSpeakResponse,
@@ -461,4 +465,79 @@ export async function computerFileWrite(
   content: string,
 ): Promise<void> {
   await invoke("computer_file_write", { botId, path, content });
+}
+
+// ---- v2.2.0 Skills ----
+//
+// IPC wrappers for the Rust commands in
+// `src-tauri/src/commands/skills.rs`. The names match the
+// `#[tauri::command]` functions 1:1. Argument names match
+// the Rust parameter names (Tauri auto-serializes to JSON
+// using serde — Rust side reads as `skill_id`, JS side
+// passes `{ skill_id: "..." }`).
+
+/** List all saved Skills, most-recently-updated first. */
+export async function listSkills(): Promise<Skill[]> {
+  return invoke<Skill[]>("skill_list");
+}
+
+/** Look up a single Skill by id. Returns null if not found. */
+export async function getSkill(id: string): Promise<Skill | null> {
+  return invoke<Skill | null>("skill_get", { id });
+}
+
+/** Persist a Skill (new or updated). The renderer passes a
+ *  full `Skill` shape; if `id` is empty the Rust side
+ *  generates one. */
+export async function createSkill(skill: Skill): Promise<Skill> {
+  return invoke<Skill>("skill_create", { skill });
+}
+
+/** Delete a Skill by id. CASCADE removes its `skill_runs`. */
+export async function deleteSkill(id: string): Promise<void> {
+  await invoke("skill_delete", { id });
+}
+
+/** Run a Skill against a Bot. Returns the populated run
+ *  (with per-step `steps`); the run is also persisted in
+ *  the `skill_runs` table for the run-history view. */
+export async function runSkill(
+  botId: string,
+  skillId: string,
+  inputs: Record<string, unknown> = {},
+): Promise<SkillRun> {
+  return invoke<SkillRun>("skill_run", { botId, skillId, inputs });
+}
+
+/** Most-recent runs for a Skill. Used by the run-history
+ *  panel under each Skill in the UI. */
+export async function skillRunHistory(
+  skillId: string,
+  limit?: number,
+): Promise<SkillRun[]> {
+  return invoke<SkillRun[]>("skill_run_history", { skillId, limit });
+}
+
+/** Get the current durable status of a run. v2.2 doesn't
+ *  expose per-step progress here; the renderer keeps
+ *  per-step state in-memory for the run it just kicked
+ *  off. */
+export async function skillRunStatus(runId: string): Promise<SkillRun | null> {
+  return invoke<SkillRun | null>("skill_run_status", { runId });
+}
+
+/** Start a recording session. The Rust side allocates a
+ *  `recording_id`, kicks off a Bot run with that id (so
+ *  the executor pushes into the recorder), and returns
+ *  both ids. */
+export async function skillRecordStart(botId: string): Promise<SkillRecordStart> {
+  return invoke<SkillRecordStart>("skill_record_start", { botId });
+}
+
+/** Stop a recording session. Drains the recorder's
+ *  captured tool calls into a candidate Skill (with empty
+ *  name/description) for the UI to fill in before
+ *  `createSkill` persists the final version. */
+export async function skillRecordStop(recordingId: string): Promise<SkillRecordStop | null> {
+  return invoke<SkillRecordStop | null>("skill_record_stop", { recordingId });
 }

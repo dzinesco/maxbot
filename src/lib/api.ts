@@ -479,3 +479,81 @@ export interface McpServerInfo {
   tool_count: number;
   tool_names: string[];
 }
+
+// ---- v2.2.0 Skills ----
+//
+// A Skill is a saved, named list of (tool, args) steps the user
+// can invoke against a Bot. Shapes mirror the Rust types in
+// `src-tauri/src/skills/mod.rs` and the IPC commands in
+// `src-tauri/src/commands/skills.rs`. Timestamps are RFC3339
+// strings (the Rust side uses `chrono::DateTime<Utc>`).
+
+/** One input parameter the Skill collects from the user. */
+export interface SkillInput {
+  name: string;
+  /** "string" | "number" | "path" | "choice" */
+  kind: string;
+  default?: string | null;
+  choices?: string[] | null;
+}
+
+/** One tool call inside a Skill. */
+export interface SkillStep {
+  tool: string;
+  args: Record<string, unknown>;
+  /** If set, the tool's output is bound to this name and
+   *  later steps' `args` may reference it as `"{{name}}"`. */
+  output_var?: string | null;
+}
+
+export interface Skill {
+  id: string;
+  name: string;
+  description: string;
+  inputs: SkillInput[];
+  steps: SkillStep[];
+  created_at: string;
+  updated_at: string;
+}
+
+export type SkillRunStatus = "running" | "succeeded" | "failed" | "cancelled";
+
+/** Per-step progress inside a live Skill run. Only present
+ *  on the in-memory `SkillRun` returned by `skill_run`; the
+ *  DB-backed run returned by `skill_run_status` has `steps =
+ *  []` (per-step detail is in-memory only). */
+export interface SkillRunStep {
+  tool: string;
+  args: Record<string, unknown>;
+  status: "running" | "succeeded" | "failed" | "skipped";
+  output?: string | null;
+  started_at: string;
+  finished_at?: string | null;
+  output_var?: string | null;
+}
+
+export interface SkillRun {
+  id: string;
+  skill_id: string;
+  bot_id: string;
+  inputs: Record<string, unknown>;
+  status: SkillRunStatus;
+  started_at: string;
+  finished_at?: string | null;
+  result_summary: string;
+  steps: SkillRunStep[];
+}
+
+/** Returned by `skill_record_start`. */
+export interface SkillRecordStart {
+  recording_id: string;
+  /** Currently always empty — recording dialogs don't
+   *  correlate to `bot://done` events in v2.2. The
+   *  `recording_id` is the canonical handle. */
+  bot_run_id: string;
+}
+
+/** Returned by `skill_record_stop`. */
+export interface SkillRecordStop {
+  skill: Skill;
+}

@@ -12,6 +12,7 @@ mod env_loader;
 mod grok_build;
 mod llm;
 mod mcp;
+mod skills;
 mod storage;
 mod tools;
 
@@ -19,6 +20,7 @@ use std::sync::Arc;
 
 use commands::chat::StreamRegistry;
 use computer::ComputerManager;
+use skills::recorder::RecorderState;
 use storage::Database;
 use tauri::Manager;
 use tauri::async_runtime::Mutex as AsyncMutex;
@@ -34,6 +36,11 @@ pub struct AppState {
     /// once from `Settings` on first use so a missing
     /// passphrase / host doesn't block startup.
     pub computer: Arc<ComputerManager>,
+    /// v2.2.0 — Skill recorder. The Bot executor pushes
+    /// every tool call into this state when a recording
+    /// session is active; `skill_record_stop` drains the
+    /// captured calls into a candidate Skill.
+    pub recorder: Arc<RecorderState>,
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -97,6 +104,10 @@ pub fn run() {
                 computer: std::sync::Arc::new(ComputerManager::new(
                     &initial_settings,
                 )),
+                // v2.2.0 — Skill recorder. Empty by default;
+                // `skill_record_start` allocates a session id
+                // on demand.
+                recorder: std::sync::Arc::new(RecorderState::new()),
             });
             app.manage(Arc::new(AsyncMutex::new(StreamRegistry::default())));
             // Start the bot scheduler. It runs in a background tokio task
@@ -170,6 +181,19 @@ pub fn run() {
             commands::computer::computer_file_list,
             commands::computer::computer_file_read,
             commands::computer::computer_file_write,
+            // v2.2.0 — Skills. List/get/create/delete a
+            // Skill, run one against a Bot, and
+            // start/stop a recording session.
+            commands::skills::skill_list,
+            commands::skills::skill_get,
+            commands::skills::skill_create,
+            commands::skills::skill_delete,
+            commands::skills::skill_run,
+            commands::skills::skill_run_cancel,
+            commands::skills::skill_run_status,
+            commands::skills::skill_run_history,
+            commands::skills::skill_record_start,
+            commands::skills::skill_record_stop,
         ])
         .run(tauri::generate_context!())
         .expect("error while running MaxBot");

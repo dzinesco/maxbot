@@ -4,6 +4,74 @@ All notable changes to MaxBot are documented in this file. The format
 follows [Keep a Changelog](https://keepachangelog.com/) and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## v2.2.0 — 2026-09-09
+
+### Added
+- **Skills.** A Skill is a saved, named list of
+  `(tool, args)` steps the user can invoke on demand
+  against any Bot. The Skill file is plain JSON — diffable,
+  grep-friendly, no DSL — and lives in a new `skills` SQLite
+  table plus a `skill_runs` table for the durable
+  run-history. Three ways to create a Skill: paste JSON,
+  "Import" a `.skill.json` file, or "Record" a live Bot run
+  and let the executor's tool-dispatch hook capture every
+  tool call into a candidate Skill that the user
+  name-and-saves.
+- **`output_var` substitution.** A step may set
+  `output_var: "name"` to bind its output, and a later
+  step's `args` may reference `"{{name}}"` to receive it.
+  Substitution is whole-string only (no partial-string
+  patching) so a placeholder never accidentally rewrites a
+  URL or a SQL fragment. Missing-binding references fail
+  the run with a friendly error and the failing step is
+  highlighted in the run card.
+- **`run_skill` tool for the LLM.** A Bot's agent loop
+  can now call `run_skill({ skill_id, args })` to invoke
+  a Skill from inside a longer task. The tool uses the
+  shared `ToolRegistry` (no parallel tool path), runs
+  autonomously (no consent dialog — the bot's
+  `allowed_tools` allowlist is the chat-time guardrail),
+  and returns a short summary; the full per-step trace is
+  in the run history.
+- **Skills panel UI.** A top-level "Skills" tab in the
+  sidebar shows the saved skills with "Run" / "Record" /
+  "Import" / "Delete" affordances. The Run dialog
+  builds its form from the Skill's `inputs` schema. The
+  Record dialog drives the configure → recording →
+  editing → save flow with the captured steps
+  editable in a JSON textarea before persistence.
+- **Run history.** Each skill shows its last 5 runs
+  inline (status, timestamp, summary). A future v2.3
+  schedules table can wire a Skill to a Bot's schedule
+  via the new `bot_schedules.skill_id` column (added
+  forward-compat in this slice).
+
+### Changed
+- **Bot executor signature.** `run_bot_once` now takes
+  an optional `recording_id: Option<String>` so the
+  Skill recorder can hook in. Passing `None` preserves
+  the v2.1 behavior exactly; the Bot scheduler and the
+  `bot_run` / `send_to_bot` command paths all pass
+  `None` and are unchanged. The recorder hook fires
+  after every `bot_registry.execute(...)` inside the
+  agent loop, capturing the resolved args, the tool
+  output, and an `is_error` flag.
+- **`AppState` gained a `recorder: Arc<RecorderState>`
+  field.** The recorder is a `Mutex<HashMap<recording_id,
+  Vec<RecordedStep>>>`; `skill_record_start` allocates a
+  session id, `skill_record_stop` drains it into a
+  candidate `Skill`. The recorder hook is the only
+  consumer of this state on the executor side.
+
+### Fixed
+- **Skill step reference resolves a missing
+  `output_var` binding with a friendly error.** Before
+  this slice, a `{{ name }}` placeholder that no earlier
+  step bound would crash the Skill at the tool call;
+  v2.2 surfaces "step references `{{ name }}` but no
+  earlier step bound that variable" and halts the run
+  with the failed step highlighted.
+
 ## v2.1.0 — 2026-09-09
 
 ### Added

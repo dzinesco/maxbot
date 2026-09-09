@@ -78,7 +78,14 @@ async fn scheduler_loop(app: AppHandle) {
                     schedule.interval_seconds
                 );
                 let cancel = tokio_util::sync::CancellationToken::new();
-                let _ = run_bot_once(app_for_run, state_for_run, bot_clone, cancel).await;
+                let _ = run_bot_once(
+                    app_for_run,
+                    state_for_run,
+                    bot_clone,
+                    cancel,
+                    None,
+                )
+                .await;
             });
         }
     }
