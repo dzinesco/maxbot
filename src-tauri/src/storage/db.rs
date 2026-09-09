@@ -364,6 +364,22 @@ impl Database {
             "error_message",
             "TEXT",
         )?;
+        // v2.0 Slice E: per-Bot presence columns. The sidebar's
+        // `BotRoster` shows a 6-state avatar per Bot, derived from
+        // `state` (set by the bot executor) plus the most-recent
+        // `bot_run.status` and `computers.state` (the renderer
+        // factors those in client-side). `avatar_color` is an
+        // optional second color for the avatar gradient. `state`
+        // defaults to `idle` for older rows that pre-date the
+        // column.
+        add_column_if_missing(&conn, "bots", "avatar_color", "TEXT")?;
+        add_column_if_missing(&conn, "bots", "last_active_at", "TEXT")?;
+        add_column_if_missing(
+            &conn,
+            "bots",
+            "state",
+            "TEXT NOT NULL DEFAULT 'idle'",
+        )?;
         Ok(())
     }
 
@@ -730,13 +746,15 @@ impl Database {
     pub fn list_bots(&self) -> rusqlite::Result<Vec<crate::bots::Bot>> {
         let conn = self.conn.lock().expect("db lock poisoned");
         let mut stmt = conn.prepare(
-            "SELECT id, name, description, system_prompt, default_model, allowed_tools, icon, color, created_at, updated_at
+            "SELECT id, name, description, system_prompt, default_model, allowed_tools, icon, color, avatar_color, last_active_at, state, created_at, updated_at
              FROM bots ORDER BY name COLLATE NOCASE ASC",
         )?;
         let rows = stmt.query_map([], |row| {
             let allowed_tools_json: String = row.get(5)?;
             let allowed_tools: Vec<String> =
                 serde_json::from_str(&allowed_tools_json).unwrap_or_default();
+            let last_active_str: Option<String> = row.get(9)?;
+            let state_str: String = row.get(10)?;
             Ok(crate::bots::Bot {
                 id: row.get(0)?,
                 name: row.get(1)?,
@@ -746,8 +764,11 @@ impl Database {
                 allowed_tools,
                 icon: row.get(6)?,
                 color: row.get(7)?,
-                created_at: parse_dt(row.get::<_, String>(8)?),
-                updated_at: parse_dt(row.get::<_, String>(9)?),
+                avatar_color: row.get(8)?,
+                last_active_at: last_active_str.map(parse_dt),
+                state: crate::bots::BotState::parse(&state_str),
+                created_at: parse_dt(row.get::<_, String>(11)?),
+                updated_at: parse_dt(row.get::<_, String>(12)?),
             })
         })?;
         let mut out = Vec::new();
@@ -760,7 +781,7 @@ impl Database {
     pub fn get_bot(&self, id: &str) -> rusqlite::Result<Option<crate::bots::Bot>> {
         let conn = self.conn.lock().expect("db lock poisoned");
         let mut stmt = conn.prepare(
-            "SELECT id, name, description, system_prompt, default_model, allowed_tools, icon, color, created_at, updated_at
+            "SELECT id, name, description, system_prompt, default_model, allowed_tools, icon, color, avatar_color, last_active_at, state, created_at, updated_at
              FROM bots WHERE id = ?",
         )?;
         let mut rows = stmt.query(params![id])?;
@@ -771,6 +792,8 @@ impl Database {
         let allowed_tools_json: String = row.get(5)?;
         let allowed_tools: Vec<String> =
             serde_json::from_str(&allowed_tools_json).unwrap_or_default();
+        let last_active_str: Option<String> = row.get(9)?;
+        let state_str: String = row.get(10)?;
         Ok(Some(crate::bots::Bot {
             id: row.get(0)?,
             name: row.get(1)?,
@@ -780,8 +803,11 @@ impl Database {
             allowed_tools,
             icon: row.get(6)?,
             color: row.get(7)?,
-            created_at: parse_dt(row.get::<_, String>(8)?),
-            updated_at: parse_dt(row.get::<_, String>(9)?),
+            avatar_color: row.get(8)?,
+            last_active_at: last_active_str.map(parse_dt),
+            state: crate::bots::BotState::parse(&state_str),
+            created_at: parse_dt(row.get::<_, String>(11)?),
+            updated_at: parse_dt(row.get::<_, String>(12)?),
         }))
     }
 
@@ -789,9 +815,10 @@ impl Database {
         let conn = self.conn.lock().expect("db lock poisoned");
         let allowed_tools_json =
             serde_json::to_string(&bot.allowed_tools).unwrap_or_else(|_| "[]".to_string());
+        let last_active = bot.last_active_at.as_ref().map(|d| d.to_rfc3339());
         conn.execute(
-            "INSERT INTO bots (id, name, description, system_prompt, default_model, allowed_tools, icon, color, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            "INSERT INTO bots (id, name, description, system_prompt, default_model, allowed_tools, icon, color, avatar_color, last_active_at, state, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT(id) DO UPDATE SET
                 name = excluded.name,
                 description = excluded.description,
@@ -800,6 +827,9 @@ impl Database {
                 allowed_tools = excluded.allowed_tools,
                 icon = excluded.icon,
                 color = excluded.color,
+                avatar_color = excluded.avatar_color,
+                last_active_at = excluded.last_active_at,
+                state = excluded.state,
                 updated_at = excluded.updated_at",
             params![
                 bot.id,
@@ -810,6 +840,9 @@ impl Database {
                 allowed_tools_json,
                 bot.icon,
                 bot.color,
+                bot.avatar_color,
+                last_active,
+                bot.state.as_str(),
                 bot.created_at.to_rfc3339(),
                 bot.updated_at.to_rfc3339(),
             ],
@@ -821,6 +854,41 @@ impl Database {
         let conn = self.conn.lock().expect("db lock poisoned");
         conn.execute("DELETE FROM bots WHERE id = ?", params![id])?;
         Ok(())
+    }
+
+    /// v2.0 Slice E: light-touch update of just the `state` column
+    /// for a Bot. The bot executor calls this at run start
+    /// (`working`/`thinking`), at run end (`done`), and when the
+    /// Bot detects a user-input requirement (`blocked`).
+    /// Returns 0 if the bot id doesn't exist (caller can ignore
+    /// the count — the renderer never blocks on a stale state
+    /// write).
+    pub fn set_bot_state(
+        &self,
+        id: &str,
+        state: crate::bots::BotState,
+    ) -> rusqlite::Result<usize> {
+        let conn = self.conn.lock().expect("db lock poisoned");
+        let updated = conn.execute(
+            "UPDATE bots SET state = ? WHERE id = ?",
+            params![state.as_str(), id],
+        )?;
+        Ok(updated)
+    }
+
+    /// v2.0 Slice E: bump `last_active_at` to "now" for the
+    /// given bot. Called from the bot executor after a successful
+    /// run, and from the chat command when the user sends a
+    /// message to a bot. Used by the sidebar roster to show
+    /// "2m ago" timestamps.
+    pub fn touch_bot_last_active(&self, id: &str) -> rusqlite::Result<usize> {
+        let conn = self.conn.lock().expect("db lock poisoned");
+        let now = chrono::Utc::now().to_rfc3339();
+        let updated = conn.execute(
+            "UPDATE bots SET last_active_at = ? WHERE id = ?",
+            params![now, id],
+        )?;
+        Ok(updated)
     }
 
     pub fn get_schedule(&self, bot_id: &str) -> rusqlite::Result<Option<crate::bots::BotSchedule>> {
@@ -1567,5 +1635,117 @@ mod tests {
         assert_eq!(s.grok_build_binary, "");
         assert_eq!(s.grok_build_model, "");
         assert_eq!(s.grok_cwd, "");
+    }
+
+    // ----- v2.0 Slice E: Bot presence columns -----
+    //
+    // The `bots` table gained `avatar_color`, `last_active_at`,
+    // and `state` columns. Existing rows pre-dating the
+    // migration must still load with sensible defaults:
+    //   - avatar_color: empty string
+    //   - last_active_at: None
+    //   - state: Idle (the SQL DEFAULT 'idle')
+
+    fn seed_bot(db: &Database, id: &str, name: &str) {
+        let now = chrono::Utc::now();
+        let bot = crate::bots::Bot {
+            id: id.to_string(),
+            name: name.to_string(),
+            description: "".to_string(),
+            system_prompt: "".to_string(),
+            default_model: "MiniMax-M3".to_string(),
+            allowed_tools: vec![],
+            icon: "🤖".to_string(),
+            color: "".to_string(),
+            avatar_color: "".to_string(),
+            last_active_at: None,
+            state: crate::bots::BotState::Idle,
+            created_at: now,
+            updated_at: now,
+        };
+        db.upsert_bot(&bot).expect("upsert bot");
+    }
+
+    #[test]
+    fn bot_set_state_updates_the_persisted_column() {
+        let db = fresh_db();
+        seed_bot(&db, "b1", "Alpha");
+        // Default state is Idle.
+        let b = db.get_bot("b1").unwrap().expect("bot exists");
+        assert_eq!(b.state, crate::bots::BotState::Idle);
+        // Promote to Working.
+        let updated =
+            db.set_bot_state("b1", crate::bots::BotState::Working)
+                .expect("set state");
+        assert_eq!(updated, 1, "one row should be affected");
+        let b = db.get_bot("b1").unwrap().expect("bot exists");
+        assert_eq!(b.state, crate::bots::BotState::Working);
+        // Promote to Blocked (the most common post-run state).
+        db.set_bot_state("b1", crate::bots::BotState::Blocked)
+            .expect("set state");
+        let b = db.get_bot("b1").unwrap().expect("bot exists");
+        assert_eq!(b.state, crate::bots::BotState::Blocked);
+    }
+
+    #[test]
+    fn bot_set_state_returns_zero_for_unknown_id() {
+        let db = fresh_db();
+        // The renderer should never block on a stale state
+        // write; the count of 0 is a useful signal that the
+        // Bot no longer exists.
+        let updated =
+            db.set_bot_state("does-not-exist", crate::bots::BotState::Idle)
+                .expect("set state on missing id");
+        assert_eq!(updated, 0);
+    }
+
+    #[test]
+    fn bot_touch_last_active_records_a_timestamp() {
+        let db = fresh_db();
+        seed_bot(&db, "b1", "Alpha");
+        // Brand-new bot — no last_active_at.
+        let b = db.get_bot("b1").unwrap().expect("bot exists");
+        assert!(b.last_active_at.is_none());
+        // Touch it.
+        let updated = db.touch_bot_last_active("b1").expect("touch");
+        assert_eq!(updated, 1);
+        let b = db.get_bot("b1").unwrap().expect("bot exists");
+        let ts = b
+            .last_active_at
+            .expect("last_active_at should be set after touch");
+        let now = chrono::Utc::now();
+        // The timestamp is within a second of "now" — the
+        // touch writes the current UTC time.
+        let delta = (now - ts).num_seconds().abs();
+        assert!(
+            delta <= 1,
+            "last_active_at should be within 1s of now, got {delta}s"
+        );
+    }
+
+    #[test]
+    fn bot_round_trip_preserves_avatar_color_and_state() {
+        let db = fresh_db();
+        let now = chrono::Utc::now();
+        let bot = crate::bots::Bot {
+            id: "b1".to_string(),
+            name: "Alpha".to_string(),
+            description: "test".to_string(),
+            system_prompt: "".to_string(),
+            default_model: "MiniMax-M3".to_string(),
+            allowed_tools: vec![],
+            icon: "🤖".to_string(),
+            color: "#7c5cff".to_string(),
+            avatar_color: "#ff5c7c".to_string(),
+            last_active_at: Some(now),
+            state: crate::bots::BotState::Thinking,
+            created_at: now,
+            updated_at: now,
+        };
+        db.upsert_bot(&bot).expect("upsert bot");
+        let loaded = db.get_bot("b1").unwrap().expect("bot exists");
+        assert_eq!(loaded.avatar_color, "#ff5c7c");
+        assert_eq!(loaded.state, crate::bots::BotState::Thinking);
+        assert!(loaded.last_active_at.is_some());
     }
 }

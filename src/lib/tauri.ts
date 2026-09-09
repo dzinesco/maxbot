@@ -13,6 +13,7 @@ import type {
   BotRun,
   BotRunOutput,
   BotSchedule,
+  BotState,
   ChunkEvent,
   Computer,
   ComputerStateChangedEvent,
@@ -29,8 +30,18 @@ import type {
   TtsSpeakResponse,
 } from "./api";
 
-export async function listConversations(): Promise<Conversation[]> {
-  return invoke<Conversation[]>("list_conversations");
+export async function listConversations(
+  // v2.0 Slice E: per-Bot chat scoping. When set, the
+  // renderer only shows conversations associated with the
+  // given bot. The Rust side currently doesn't filter
+  // server-side (it returns the full list and we filter on
+  // the client), but the parameter is wired through so a
+  // future server-side filter can drop in without touching
+  // call sites. `null` / `undefined` = no filter (legacy
+  // behavior).
+  botId?: string | null,
+): Promise<Conversation[]> {
+  return invoke<Conversation[]>("list_conversations", { botId });
 }
 
 export async function createConversation(
@@ -153,6 +164,33 @@ export async function upsertBot(bot: Bot): Promise<Bot> {
 
 export async function deleteBot(id: string): Promise<void> {
   await invoke("delete_bot", { id });
+}
+
+// v2.0 Slice E: per-Bot presence. The bot executor writes
+// `working`/`thinking` at run start, `done` at run end, and
+// `blocked` when the run failed / user input is required. The
+// renderer can also call this defensively when it sees a
+// `bot_run.status` of `failed` in the run summary event before
+// the executor catches up. The Rust side rejects unknown
+// values with a clear error so a typo doesn't silently write
+// garbage.
+export async function botSetState(
+  botId: string,
+  state: BotState,
+): Promise<void> {
+  await invoke("bot_set_state", { botId, state });
+}
+
+// v2.0 Slice E: fetch a Bot with the new presence fields
+// populated. Functionally equivalent to `getBot` — kept as a
+// separate command so the renderer's roster code can ask for
+// the "full presence view" explicitly, and so future
+// presence-only fields can be added here without touching
+// the existing `getBot` surface.
+export async function botGetWithState(
+  botId: string,
+): Promise<Bot | null> {
+  return invoke<Bot | null>("bot_get_with_state", { botId });
 }
 
 export async function getBotSchedule(

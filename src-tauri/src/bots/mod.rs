@@ -13,6 +13,50 @@ use uuid::Uuid;
 
 use crate::tools::registry::ToolRegistry;
 
+/// v2.0 Slice E: the six states the renderer derives a presence
+/// indicator from. Persisted on the `bots` row by `bot_set_state`
+/// (called from the bot executor at run start / end / blocked). The
+/// `working` / `thinking` / `done` / `waiting` / `blocked` variants
+/// are short-lived; `idle` is the resting state.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum BotState {
+    #[default]
+    Idle,
+    Thinking,
+    Working,
+    Waiting,
+    Blocked,
+    Done,
+}
+
+impl BotState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            BotState::Idle => "idle",
+            BotState::Thinking => "thinking",
+            BotState::Working => "working",
+            BotState::Waiting => "waiting",
+            BotState::Blocked => "blocked",
+            BotState::Done => "done",
+        }
+    }
+
+    /// Parse a free-form string. Unknown values fall back to `Idle`
+    /// so a future enum addition on the renderer side (or a typo in
+    /// an old DB row) doesn't crash the read path.
+    pub fn parse(value: &str) -> Self {
+        match value {
+            "thinking" => Self::Thinking,
+            "working" => Self::Working,
+            "waiting" => Self::Waiting,
+            "blocked" => Self::Blocked,
+            "done" => Self::Done,
+            _ => Self::Idle,
+        }
+    }
+}
+
 /// One row in the `bots` table. Persisted across launches. Tools are
 /// referenced by name; the registry resolves them at run time.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -30,6 +74,22 @@ pub struct Bot {
     /// Color hint for the avatar (hex). Empty string falls back to the
     /// theme's accent.
     pub color: String,
+    /// v2.0 Slice E: a second color slot for the avatar gradient. The
+    /// `BotAvatar` mixes `color` + `avatar_color` to render a tinted
+    /// presence badge. Empty string → fall back to `color`.
+    #[serde(default)]
+    pub avatar_color: String,
+    /// v2.0 Slice E: last time the user (or the bot executor) touched
+    /// the bot — used by the sidebar to show "2m ago" timestamps.
+    /// `None` on a brand-new bot.
+    #[serde(default)]
+    pub last_active_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// v2.0 Slice E: persisted presence state. Default `Idle`. Written
+    /// by the `bot_set_state` Tauri command from the bot executor.
+    /// The renderer treats this as a hint; it also factors in the
+    /// most-recent `bot_run.status` and the `computers.state` row.
+    #[serde(default)]
+    pub state: BotState,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
@@ -115,4 +175,63 @@ pub struct BotMessage {
 /// is permitted to call. Unknown tool names are silently dropped.
 pub fn registry_for(bot: &Bot, full: &ToolRegistry) -> ToolRegistry {
     full.filtered(&bot.allowed_tools)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::BotState;
+
+    /// `BotState::parse` is the bridge between the DB column
+    /// (free-form TEXT) and the typed enum. Future enum
+    /// additions on the renderer side should not crash the
+    /// read path — unknown values fall back to Idle. This
+    /// test pins the fallback behavior so a future "we
+    /// should default to Error" change has to touch the
+    /// test.
+    #[test]
+    fn bot_state_parse_round_trips_known_values() {
+        assert_eq!(BotState::parse("idle"), BotState::Idle);
+        assert_eq!(BotState::parse("thinking"), BotState::Thinking);
+        assert_eq!(BotState::parse("working"), BotState::Working);
+        assert_eq!(BotState::parse("waiting"), BotState::Waiting);
+        assert_eq!(BotState::parse("blocked"), BotState::Blocked);
+        assert_eq!(BotState::parse("done"), BotState::Done);
+    }
+
+    #[test]
+    fn bot_state_parse_falls_back_to_idle_for_unknown_values() {
+        // A future enum addition on the renderer side
+        // should not crash a read of the old row.
+        assert_eq!(BotState::parse(""), BotState::Idle);
+        assert_eq!(BotState::parse("running"), BotState::Idle);
+        assert_eq!(
+            BotState::parse("panic-now-if-this-matches"),
+            BotState::Idle
+        );
+    }
+
+    #[test]
+    fn bot_state_as_str_round_trips_through_parse() {
+        for state in [
+            BotState::Idle,
+            BotState::Thinking,
+            BotState::Working,
+            BotState::Waiting,
+            BotState::Blocked,
+            BotState::Done,
+        ] {
+            assert_eq!(BotState::parse(state.as_str()), state);
+        }
+    }
+
+    /// v2.0 Slice E: the DB layer must tolerate the
+    /// absence of the new `state` column on a row that
+    /// pre-dates the migration. The migration uses
+    /// `add_column_if_missing` to add it with a default of
+    /// `'idle'`, so the read path is exercised against a
+    /// row that has the default value.
+    #[test]
+    fn bot_state_default_is_idle() {
+        assert_eq!(BotState::default(), BotState::Idle);
+    }
 }

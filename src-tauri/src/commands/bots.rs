@@ -74,6 +74,60 @@ pub async fn delete_bot(state: State<'_, AppState>, id: String) -> Result<(), St
         .map_err(|e| e.to_string())?
 }
 
+/// v2.0 Slice E: set a Bot's persisted presence state. Called
+/// from the bot executor (run start, run end, blocked) and from
+/// the renderer's defensive path when it sees a `bot_run.status`
+/// of `failed` (the executor will catch up shortly, but the
+/// renderer can preempt the UI with this). The state string is
+/// one of `idle`, `thinking`, `working`, `waiting`, `blocked`,
+/// `done` — anything else is rejected with a clear error so a
+/// future enum addition on the renderer side doesn't silently
+/// write a garbage value.
+#[tauri::command]
+pub async fn bot_set_state(
+    state: State<'_, AppState>,
+    bot_id: String,
+    bot_state: String,
+) -> Result<(), String> {
+    // Validate up front so the DB layer never sees a bad value
+    // (the `as_str()` mapper would round-trip anything via the
+    // default arm — but the call should be loud if a typo sneaks
+    // in).
+    let parsed = crate::bots::BotState::parse(&bot_state);
+    if parsed.as_str() != bot_state.to_ascii_lowercase() {
+        return Err(format!(
+            "invalid bot state '{bot_state}'; expected one of idle, thinking, working, waiting, blocked, done"
+        ));
+    }
+    let db = state.db.clone();
+    let id = bot_id.clone();
+    tokio::task::spawn_blocking(move || {
+        db.set_bot_state(&id, parsed).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    Ok(())
+}
+
+/// v2.0 Slice E: fetch a Bot with the new presence fields
+/// (`avatar_color`, `last_active_at`, `state`) populated.
+/// Functionally equivalent to `get_bot` — kept as a separate
+/// command so the renderer's roster code can ask for the
+/// "full" view explicitly, and so future presence-only
+/// columns can be added here without touching the existing
+/// `get_bot` surface.
+#[tauri::command]
+pub async fn bot_get_with_state(
+    state: State<'_, AppState>,
+    bot_id: String,
+) -> Result<Option<crate::bots::Bot>, String> {
+    let db = state.db.clone();
+    let id = bot_id.clone();
+    tokio::task::spawn_blocking(move || db.get_bot(&id).map_err(|e| e.to_string()))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
 #[tauri::command]
 pub async fn get_schedule(
     state: State<'_, AppState>,

@@ -3258,3 +3258,624 @@ button.link:hover {
   border-color: currentColor;
 }
 
+
+/* ---------- v2.0 Slice E: Bot roster sidebar + 6-state avatar ----------
+ *
+ * The roster replaces the conversation list as the sidebar's
+ * primary surface. The avatar is a 32×32 visual that animates
+ * according to the Bot's presence state, derived from
+ * `bot.state` + `bot_run.status` + `computers.state` (see
+ * `BotAvatar.tsx` for the priority table). All animations are
+ * CSS keyframes — no Lottie / framer-motion / heavy SVG
+ * bundles. The visual language intentionally mirrors the
+ * existing sidebar's dark-mode aesthetic.
+ */
+
+.bot-roster {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  /* The roster itself scrolls; the sidebar stays put. */
+  overflow: hidden;
+}
+
+.bot-roster__header {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  padding: 6px 10px 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.bot-roster__search {
+  flex: 1 1 auto;
+  min-width: 0;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text-0);
+  font-size: 12px;
+  padding: 4px 8px;
+  outline: none;
+  transition: border-color 120ms ease, box-shadow 120ms ease;
+}
+
+.bot-roster__search:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+
+.bot-roster__search::placeholder {
+  color: var(--text-3);
+}
+
+.bot-roster__new-btn {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  font-size: 11px;
+  font-weight: 500;
+  background: var(--accent);
+  color: #fff;
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 120ms ease, transform 80ms ease;
+}
+
+.bot-roster__new-btn:hover {
+  background: var(--accent-strong, var(--accent));
+  filter: brightness(1.08);
+}
+
+.bot-roster__new-btn:active {
+  transform: scale(0.97);
+}
+
+.bot-roster__new-btn-label {
+  letter-spacing: 0.02em;
+}
+
+.bot-roster__list {
+  list-style: none;
+  margin: 0;
+  padding: 4px 0;
+  overflow-y: auto;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.bot-roster__item {
+  margin: 0;
+  padding: 0;
+}
+
+.bot-roster__row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 6px 10px;
+  background: transparent;
+  border: 0;
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+  border-left: 2px solid transparent;
+  transition: background 80ms ease, border-color 80ms ease;
+}
+
+.bot-roster__row:hover {
+  background: var(--bg-2);
+}
+
+.bot-roster__item--selected .bot-roster__row {
+  background: var(--bg-2);
+  border-left-color: var(--accent);
+}
+
+.bot-roster__item--selected .bot-roster__name {
+  color: var(--text-0);
+  font-weight: 500;
+}
+
+.bot-roster__meta {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.bot-roster__name {
+  font-size: 13px;
+  color: var(--text-1);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+
+.bot-roster__last-active {
+  font-size: 10px;
+  color: var(--text-3);
+  font-family: var(--font-mono);
+  letter-spacing: 0.02em;
+}
+
+/* --- Roster computer chip (small dot on the right of each row) --- */
+
+.bot-roster__computer-chip {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: transparent;
+  border: 1px solid var(--border);
+  cursor: pointer;
+  position: relative;
+  /* The chip stops propagation so a click on the chip
+   * opens the ComputerPanel rather than selecting the
+   * Bot. The parent `onOpenComputer` is responsible for
+   * actually mounting the panel. */
+}
+
+.bot-roster__computer-chip--none {
+  opacity: 0.4;
+  border-style: dashed;
+}
+
+.bot-roster__computer-chip-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-3);
+  display: inline-block;
+}
+
+.bot-roster__computer-chip--running .bot-roster__computer-chip-dot {
+  background: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+
+.bot-roster__computer-chip--stopped .bot-roster__computer-chip-dot {
+  background: var(--text-3);
+}
+
+.bot-roster__computer-chip--provisioning {
+  border-color: #f59e0b;
+}
+.bot-roster__computer-chip--provisioning .bot-roster__computer-chip-dot {
+  background: #f59e0b;
+  animation: bot-roster-chip-pulse 1.4s ease-in-out infinite;
+}
+
+.bot-roster__computer-chip--error {
+  border-color: var(--danger);
+}
+.bot-roster__computer-chip--error .bot-roster__computer-chip-dot {
+  background: var(--danger);
+}
+
+@keyframes bot-roster-chip-pulse {
+  0%, 100% { opacity: 0.4; }
+  50% { opacity: 1; }
+}
+
+/* --- Empty / no-matches states --- */
+
+.bot-roster__empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  padding: 32px 20px;
+  gap: 10px;
+  color: var(--text-2);
+}
+
+.bot-roster__empty-mark {
+  width: 64px;
+  height: 64px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-3);
+  margin-bottom: 4px;
+}
+
+.bot-roster__empty-title {
+  font-size: 15px;
+  font-weight: 500;
+  color: var(--text-0);
+  margin: 0;
+}
+
+.bot-roster__empty-body {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-2);
+  max-width: 220px;
+  margin: 0;
+}
+
+.bot-roster__empty-cta {
+  margin-top: 8px;
+  padding: 8px 16px;
+  font-size: 13px;
+  font-weight: 500;
+  background: var(--accent);
+  color: #fff;
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background 120ms ease, transform 80ms ease;
+}
+
+.bot-roster__empty-cta:hover {
+  background: var(--accent-strong, var(--accent));
+  filter: brightness(1.08);
+}
+
+.bot-roster__empty-cta:active {
+  transform: scale(0.98);
+}
+
+.bot-roster__no-matches {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 24px 20px;
+  color: var(--text-3);
+  font-size: 12px;
+}
+
+.bot-roster__no-matches p {
+  margin: 0;
+}
+
+.bot-roster__no-matches-clear {
+  background: transparent;
+  border: 0;
+  color: var(--accent);
+  font-size: 11px;
+  cursor: pointer;
+  padding: 2px 6px;
+}
+
+.bot-roster__no-matches-clear:hover {
+  text-decoration: underline;
+}
+
+/* ---------- BotAvatar: the 6-state presence avatar ----------
+ *
+ * `.bot-avatar` is the base circle. Each state is a modifier
+ * class that contributes its own animation. The overlay
+ * badges (`.bot-avatar__badge--*`) sit on top of the base
+ * and provide the per-state visual marker.
+ */
+
+.bot-avatar {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  user-select: none;
+  /* The base color is set inline via `style={{ background }}`
+   * — the gradient/flat color mix driven by the Bot's
+   * `color` + `avatar_color` fields. */
+  transition: box-shadow 240ms ease, transform 240ms ease;
+}
+
+.bot-avatar__initials {
+  position: relative;
+  z-index: 1;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
+}
+
+/* Per-state visual: */
+
+.bot-avatar--idle {
+  /* Subtle breathing — opacity oscillates between 0.85
+   * and 1.0 so the avatar feels "alive" without being
+   * distracting. */
+  animation: bot-avatar-idle-breath 4s ease-in-out infinite;
+}
+
+@keyframes bot-avatar-idle-breath {
+  0%, 100% { opacity: 0.92; }
+  50% { opacity: 1; }
+}
+
+.bot-avatar--thinking {
+  /* Slightly more pronounced pulse so the user can tell
+   * the Bot is composing vs idle. */
+  animation: bot-avatar-thinking-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes bot-avatar-thinking-pulse {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.04); }
+}
+
+.bot-avatar--working {
+  animation: bot-avatar-working-spin 2.4s linear infinite;
+  /* The transform-origin keeps the scale center correct
+   * when the working state is paired with a state-change
+   * flash. */
+  transform-origin: center;
+}
+
+@keyframes bot-avatar-working-spin {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+
+.bot-avatar--waiting {
+  opacity: 0.85;
+  /* Slight dim so the user notices the Bot is paused. */
+}
+
+.bot-avatar--blocked {
+  /* Pulsing red ring — the user can't miss a failure. */
+  box-shadow: 0 0 0 0 var(--danger);
+  animation: bot-avatar-blocked-ring 1.2s ease-in-out infinite;
+}
+
+@keyframes bot-avatar-blocked-ring {
+  0%, 100% { box-shadow: 0 0 0 0 var(--danger); }
+  50% { box-shadow: 0 0 0 4px var(--danger); }
+}
+
+.bot-avatar--done {
+  /* 300ms green flash that fades to idle. The avatar's
+   * parent class transitions the box-shadow to a clean
+   * "0 0 0 0 var(--bg-0)" so the flash dissolves
+   * smoothly. */
+  animation: bot-avatar-done-flash 300ms ease-out;
+}
+
+@keyframes bot-avatar-done-flash {
+  0% { box-shadow: 0 0 0 0 var(--accent); transform: scale(1.08); }
+  100% { box-shadow: 0 0 0 0 var(--bg-0); transform: scale(1); }
+}
+
+/* --- State overlay badges (corner) --- */
+
+.bot-avatar__badge {
+  position: absolute;
+  bottom: -2px;
+  right: -2px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  color: var(--text-0);
+  font-size: 9px;
+  font-weight: 600;
+  z-index: 2;
+  line-height: 1;
+}
+
+.bot-avatar__badge--thinking {
+  gap: 1px;
+  background: rgba(0, 0, 0, 0.7);
+  border-color: var(--accent);
+}
+
+.bot-avatar__dot {
+  width: 2px;
+  height: 2px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: bot-avatar-dot-bounce 1.2s ease-in-out infinite;
+}
+
+.bot-avatar__dot:nth-child(2) {
+  animation-delay: 0.15s;
+}
+
+.bot-avatar__dot:nth-child(3) {
+  animation-delay: 0.3s;
+}
+
+@keyframes bot-avatar-dot-bounce {
+  0%, 100% { transform: translateY(0); opacity: 0.5; }
+  50% { transform: translateY(-2px); opacity: 1; }
+}
+
+.bot-avatar__badge--working {
+  background: rgba(0, 0, 0, 0.7);
+  border-color: var(--accent);
+}
+
+.bot-avatar__spinner {
+  width: 8px;
+  height: 8px;
+  border: 1.5px solid transparent;
+  border-top-color: var(--accent);
+  border-right-color: var(--accent);
+  border-radius: 50%;
+  animation: bot-avatar-spin 0.9s linear infinite;
+}
+
+@keyframes bot-avatar-spin {
+  to { transform: rotate(360deg); }
+}
+
+.bot-avatar__badge--waiting {
+  background: rgba(0, 0, 0, 0.7);
+  border-color: #f59e0b;
+  color: #f59e0b;
+}
+
+.bot-avatar__badge--blocked {
+  background: var(--danger);
+  border-color: var(--danger);
+  color: #fff;
+  font-family: var(--font-mono);
+  font-weight: 700;
+}
+
+.bot-avatar__badge--done {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+/* ---------- v2.0 Slice E: chat-view header + conversation pills ---------- */
+
+.chat-view {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  /* The chat area scrolls; the header is fixed. */
+  overflow: hidden;
+}
+
+.chat-view__header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-1);
+}
+
+.chat-view__header-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.chat-view__header-name {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-0);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.chat-view__header-state {
+  font-size: 11px;
+  font-family: var(--font-mono);
+  color: var(--text-3);
+  letter-spacing: 0.02em;
+}
+
+.chat-view__header-state[data-state="working"],
+.chat-view__header-state[data-state="thinking"] {
+  color: var(--accent);
+}
+
+.chat-view__header-state[data-state="blocked"] {
+  color: var(--danger);
+}
+
+.chat-view__header-state[data-state="waiting"] {
+  color: #f59e0b;
+}
+
+.chat-view__pills {
+  display: flex;
+  gap: 4px;
+  margin-left: auto;
+  align-items: center;
+  overflow-x: auto;
+  scrollbar-width: thin;
+  max-width: 60%;
+  padding: 0 4px;
+}
+
+.chat-view__pill {
+  flex: 0 0 auto;
+  padding: 3px 10px;
+  font-size: 11px;
+  font-weight: 500;
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-2);
+  border-radius: 999px;
+  cursor: pointer;
+  white-space: nowrap;
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  transition: background 80ms ease, border-color 80ms ease, color 80ms ease;
+}
+
+.chat-view__pill:hover {
+  background: var(--bg-2);
+  color: var(--text-0);
+}
+
+.chat-view__pill--active {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--text-0);
+}
+
+.chat-view__pill--new {
+  width: 24px;
+  padding: 3px 0;
+  text-align: center;
+  font-weight: 700;
+  font-size: 14px;
+  color: var(--accent);
+}
+
+.chat-view__pill--new:hover {
+  background: var(--accent-soft);
+}
+
+/* ---------- v2.0 Slice E: main-empty --no-bots variant ---------- */
+
+.main-empty--no-bots {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  padding: 60px 20px;
+  gap: 12px;
+  flex: 1 1 auto;
+  justify-content: center;
+}
+
+.main-empty-cta {
+  margin-top: 8px;
+  padding: 10px 24px;
+  font-size: 14px;
+  font-weight: 500;
+  background: var(--accent);
+  color: #fff;
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background 120ms ease, transform 80ms ease;
+}
+
+.main-empty-cta:hover {
+  background: var(--accent-strong, var(--accent));
+  filter: brightness(1.08);
+}
+
+.main-empty-cta:active {
+  transform: scale(0.98);
+}

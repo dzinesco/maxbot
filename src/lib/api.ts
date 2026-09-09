@@ -282,6 +282,32 @@ export interface ErrorEvent {
 
 // ---- Bot types ----
 
+/**
+ * v2.0 Slice E: the six-state presence system. The renderer
+ * derives the effective state at render time from `bot.state`
+ * (this column) + the most-recent `bot_run.status` + the
+ * `computers.state` row — `deriveAvatarState()` in `BotAvatar`
+ * holds the priority logic. The values match the Rust side's
+ * `BotState` enum; the renderer falls back to `"idle"` for any
+ * unknown value so a future addition doesn't crash the UI.
+ */
+export type BotState =
+  | "idle"
+  | "thinking"
+  | "working"
+  | "waiting"
+  | "blocked"
+  | "done";
+
+export const BOT_STATES: BotState[] = [
+  "idle",
+  "thinking",
+  "working",
+  "waiting",
+  "blocked",
+  "done",
+];
+
 export interface Bot {
   id: string;
   name: string;
@@ -291,6 +317,16 @@ export interface Bot {
   allowed_tools: string[];
   icon: string;
   color: string;
+  // v2.0 Slice E: per-Bot presence + roster metadata.
+  // `avatar_color` is an optional second color slot for the
+  // avatar gradient. `last_active_at` powers the "2m ago"
+  // timestamps in the sidebar roster. `state` is the
+  // persisted presence hint; the renderer still factors in
+  // `bot_run.status` and `computers.state` to land the final
+  // visual.
+  avatar_color?: string;
+  last_active_at?: string | null;
+  state?: BotState;
   created_at: string;
   updated_at: string;
 }
@@ -371,6 +407,10 @@ export function blankBot(): Bot {
     allowed_tools: [],
     icon: "🤖",
     color: "",
+    // v2.0 Slice E: roster metadata starts empty / idle.
+    avatar_color: "",
+    last_active_at: null,
+    state: "idle",
     created_at: now,
     updated_at: now,
   };

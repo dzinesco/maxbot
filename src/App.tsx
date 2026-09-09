@@ -3,7 +3,12 @@ import { Sidebar } from "./components/Sidebar";
 import { ChatView } from "./components/ChatView";
 import { Composer } from "./components/Composer";
 import { Settings } from "./components/Settings";
-import { BotsPanel } from "./components/BotsPanel";
+// v2.0 Slice E: the `BotsPanel` component is now a thin
+// re-export of `BotRoster` (kept for backward compat). The
+// sidebar mounts the roster directly, so this import is
+// no longer needed. `BotsPanel` itself is still importable
+// from older entry points — it just renders the same
+// roster underneath.
 import { BotEditor } from "./components/BotEditor";
 import { BotInbox } from "./components/BotInbox";
 import { ComputerPanel } from "./components/ComputerPanel";
@@ -118,6 +123,12 @@ export default function App() {
   const [botsCollapsed, setBotsCollapsed] = useState(false);
   const [runningBotId, setRunningBotId] = useState<string | null>(null);
   const [ttsSpeaking, setTtsSpeaking] = useState(false);
+  // v2.0 Slice E: the Bot currently focused in the sidebar
+  // roster. Drives (a) the highlight in the roster, (b) the
+  // conversation list shown in ChatView, and (c) the
+  // "Viewing <Bot>'s thread" banner. `null` = no Bot
+  // selected (e.g. brand-new install with no Bots).
+  const [selectedBotId, setSelectedBotId] = useState<string | null>(null);
   // v2.0 Slice D: when the user clicks "View computer" in the
   // BotEditor, we open the ComputerPanel in preview mode for
   // the bot being edited. The BotEditor closes itself; the
@@ -188,17 +199,42 @@ export default function App() {
         setBotSchedules(schedMap);
         setAvailableTools(tools);
         setIsOnboarded(onboarded === "1");
-        // Only create a default conversation once the user is past
-        // the welcome screen. Otherwise we'd auto-create a chat
-        // row that gets orphaned on the "Skip for now" path.
-        if (onboarded === "1" && c.length > 0) {
-          setActiveId(c[0].id);
-        } else if (onboarded === "1") {
-          // No conversations yet — create a fresh "New chat" so the
-          // user can start typing immediately.
-          const created = await createConversation(undefined, undefined);
-          setConversations([created]);
-          setActiveId(created.id);
+        // v2.0 Slice E: per-Bot chat scoping. On boot, pick a
+        // sensible starting Bot: (a) if the user has any
+        // Bots, auto-select the first one and open its
+        // most-recent conversation (or create one); (b) if
+        // they have no Bots, leave the chat area in the
+        // "Select or create a Bot" empty state.
+        if (onboarded === "1") {
+          if (b.length > 0) {
+            // Auto-select the first bot by name. The roster
+            // sorts alphabetically (Rust `ORDER BY name`), so
+            // this is deterministic across launches.
+            const firstBot = b[0];
+            setSelectedBotId(firstBot.id);
+            const matching = c
+              .filter((conv) => conv.bot_id === firstBot.id)
+              .sort((a, b) => (a.updated_at < b.updated_at ? 1 : -1));
+            if (matching[0]) {
+              setActiveId(matching[0].id);
+            } else {
+              // No prior conversation for this Bot — create
+              // a fresh one so the chat area isn't stuck on
+              // the "no conversations" empty state.
+              const created = await createConversation(
+                undefined,
+                firstBot.id,
+              );
+              setConversations([...c, created]);
+              setActiveId(created.id);
+            }
+          } else if (c.length > 0) {
+            // Legacy path: no Bots yet (e.g. a v1.0 install
+            // upgrading to v2.0) but there are old
+            // conversations. Open the first one so the
+            // user doesn't see an empty screen.
+            setActiveId(c[0].id);
+          }
         }
         // Last-run snapshot per bot, plus unread counts.
         const runsEntries = await Promise.all(
@@ -463,6 +499,49 @@ export default function App() {
     setActiveId(created.id);
   }, [refreshConversations]);
 
+  // v2.0 Slice E: per-Bot chat scoping. Selecting a Bot in
+  // the roster either opens the most-recent conversation for
+  // that Bot, or creates a new one if there is none. The
+  // chat list shown in ChatView is filtered to this Bot.
+  const handleSelectBot = useCallback(
+    async (botId: string) => {
+      setSelectedBotId(botId);
+      const matching = conversations
+        .filter((c) => c.bot_id === botId)
+        .sort((a, b) => (a.updated_at < b.updated_at ? 1 : -1));
+      if (matching[0]) {
+        setActiveId(matching[0].id);
+        return;
+      }
+      // No prior conversation — create one for this Bot and
+      // jump to it. The renderer's empty state would otherwise
+      // show "no conversations for this Bot" forever.
+      const created = await createConversation(undefined, botId);
+      await refreshConversations();
+      setActiveId(created.id);
+    },
+    [conversations, refreshConversations],
+  );
+
+  // v2.0 Slice E: per-Bot "new conversation" handler. Used
+  // by both the header's "+ New chat" button and the in-chat
+  // CTA. Pass through the currently-selected Bot; the parent
+  // is the canonical owner of "which Bot is selected" so we
+  // don't accept a `botId` parameter from the chat area (we
+  // read it from `selectedBotId` instead).
+  const handleNewBotConversation = useCallback(async () => {
+    if (!selectedBotId) {
+      // Defensive: ChatView shouldn't show the button when
+      // no Bot is selected, but if a stale state sneaks
+      // through, fall back to the global handler.
+      await handleNewConversation();
+      return;
+    }
+    const created = await createConversation(undefined, selectedBotId);
+    await refreshConversations();
+    setActiveId(created.id);
+  }, [selectedBotId, handleNewConversation, refreshConversations]);
+
   const handleDeleteConversation = useCallback(
     async (id: string) => {
       await deleteConversation(id);
@@ -580,6 +659,55 @@ export default function App() {
   }, [ttsSpeaking, lastAssistantText]);
 
   // ⌘⇧S → speak the last assistant response (or stop if already
+  // v2.0 Slice E: the sidebar's "+ New chat" header button
+  // dispatches a `maxbot:new-conversation` custom event with
+  // the currently-selected Bot id. We listen for it here so
+  // the chat area (which is the canonical owner of
+  // conversation creation) handles the call in one place.
+  useEffect(() => {
+    const onNew = (e: Event) => {
+      const detail = (e as CustomEvent<{ botId: string }>).detail;
+      if (detail && detail.botId) {
+        // The sidebar already set `selectedBotId`; just call
+        // the per-Bot handler. (If the user has no Bots
+        // selected the button is a no-op.)
+        handleNewBotConversation();
+      } else {
+        handleNewConversation();
+      }
+    };
+    const onSelectFirst = () => {
+      // The sidebar couldn't create a chat because no Bot
+      // is selected. Surface a soft prompt — a tiny toast
+      // banner that auto-dismisses. We don't have a global
+      // toast system, so a console hint + a temporary
+      // banner element is the path of least resistance.
+      // (The BotsPanel empty state already shows the
+      // "Create your first Bot" CTA, so the user can
+      // self-recover.)
+      if (bots.length === 0) {
+        // No Bots at all — the chat area already shows
+        // the empty state, so just bail.
+        return;
+      }
+      // Bots exist but none selected — the most common
+      // cause is a stale state. Auto-select the first
+      // Bot and create a conversation for it.
+      if (bots[0]) {
+        setSelectedBotId(bots[0].id);
+      }
+    };
+    window.addEventListener("maxbot:new-conversation", onNew);
+    window.addEventListener("maxbot:select-bot-first", onSelectFirst);
+    return () => {
+      window.removeEventListener("maxbot:new-conversation", onNew);
+      window.removeEventListener(
+        "maxbot:select-bot-first",
+        onSelectFirst,
+      );
+    };
+  }, [bots, handleNewBotConversation, handleNewConversation]);
+
   // speaking). Bound at the document level so it works from anywhere
   // in the chat surface, not just inside the composer.
   useEffect(() => {
@@ -614,17 +742,24 @@ export default function App() {
         // an open modal — let the input own the keystroke.
         const target = e.target as HTMLElement | null;
         if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA")) {
-          // …unless we're inside the search box, where ⌘N is still
-          // a reasonable "new chat" gesture and a no-op otherwise.
-          if (!target.classList.contains("sidebar-search-input")) return;
+          return;
         }
         e.preventDefault();
-        handleNewConversation();
+        // v2.0 Slice E: per-Bot "new conversation" — uses
+        // the currently-selected Bot. If no Bot is selected
+        // the global handler falls back to a fresh Bot-less
+        // conversation (which the chat area can still
+        // open).
+        if (selectedBotId) {
+          handleNewBotConversation();
+        } else {
+          handleNewConversation();
+        }
       }
     };
     document.addEventListener("keydown", handler);
     return () => document.removeEventListener("keydown", handler);
-  }, [handleNewConversation]);
+  }, [handleNewBotConversation, handleNewConversation, selectedBotId]);
 
   const handleRegenerate = useCallback(async () => {
     if (!activeId || streamingId) return;
@@ -908,6 +1043,18 @@ export default function App() {
           ),
       );
   }, [conversations, searchView]);
+  // v2.0 Slice E: per-Bot chat scoping. The chat area's
+  // pill row shows the conversations tied to the
+  // currently-selected Bot, sorted most-recent first. A
+  // Bot with zero conversations renders an empty pill
+  // row (the parent shows the "no conversations" empty
+  // state instead).
+  const scopedConversations = useMemo(() => {
+    if (!selectedBotId) return [];
+    return conversations
+      .filter((c) => c.bot_id === selectedBotId)
+      .sort((a, b) => (a.updated_at < b.updated_at ? 1 : -1));
+  }, [conversations, selectedBotId]);
   const inboxMessagesForModal = useMemo<BotMessage[]>(() => [], []);
 
   // Editor draft drives the modal: when the user clicks New/Edit, we
@@ -1014,122 +1161,120 @@ export default function App() {
   return (
     <div className="app">
       <Sidebar
-        conversations={visibleConversations}
-        activeId={activeId}
+        // v2.0 Slice E: the sidebar's primary object is the
+        // Bot roster. The conversation list and the old
+        // message-search UI have been removed from the
+        // sidebar (the conversation list now lives in the
+        // chat area, scoped to the selected Bot). Search
+        // across messages is still available — see
+        // `ChatView` for the in-chat search box.
+        selectedBotId={selectedBotId}
+        activeConversationId={activeId}
         bots={bots}
-        onSelect={setActiveId}
-        onNew={handleNewConversation}
-        onDelete={handleDeleteConversation}
-        onRename={handleRenameConversation}
-        onOpenSettings={() => setSettingsOpen(true)}
-        searchQuery={searchQuery}
-        onSearchChange={setSearchQuery}
-        searchView={
-          searchView
-            ? Object.fromEntries(
-                Array.from(searchView.entries()).map(([id, v]) => [id, v]),
-              )
-            : null
-        }
+        lastRunsByBot={botLastRuns}
+        onSelectBot={handleSelectBot}
+        onCreateBot={handleNewBot}
+        onOpenComputer={(botId) => setComputerPanelBotId(botId)}
         status={status}
-        botPanel={
-          <BotsPanel
-            bots={bots}
-            schedules={botSchedules}
-            runs={botLastRuns}
-            unreadCounts={unreadCounts}
-            activeRuns={activeRunByBot}
-            onStopBot={handleStopBot}
-            onNewBot={handleNewBot}
-            onEditBot={handleEditBot}
-            onDeleteBot={handleDeleteBot}
-            onRunBot={handleRunBot}
-            onOpenInbox={handleOpenInbox}
-            runningBotId={runningBotId}
-            collapsed={botsCollapsed}
-            onToggleCollapsed={() => setBotsCollapsed((v) => !v)}
-          />
-        }
+        onOpenSettings={() => setSettingsOpen(true)}
       />
       <main className="main">
-        {activeBot && (
-          <div className="bot-banner">
-            <span className="bot-icon">{activeBot.icon || "🤖"}</span>
-            <span>
-              Viewing <strong>{activeBot.name}</strong>'s thread
-            </span>
-            {runningBotId === activeBot.id && (
-              <span className="bot-running-dot" title="Running now…" />
-            )}
-            <button
-              className="ghost small"
-              onClick={() => handleEditBot(activeBot.id)}
-            >
-              Edit bot
-            </button>
-          </div>
-        )}
-        {lastBotFinish && lastBotFinish.conversationId === activeId && (
-          <div
-            className={`bot-finish-banner${
-              lastBotFinish.summary.startsWith("[error]") ? " error" : ""
-            }`}
-          >
-            <span>
-              Bot run finished:{" "}
-              {lastBotFinish.summary.length > 200
-                ? lastBotFinish.summary.slice(0, 200) + "…"
-                : lastBotFinish.summary}
-            </span>
-            <button
-              className="ghost small"
-              onClick={() => setLastBotFinish(null)}
-            >
-              Dismiss
-            </button>
-          </div>
-        )}
-        {messages.length === 0 ? (
-          <div className="main-empty">
-            <div className="main-empty-mark">M</div>
-            <h1>MaxBot</h1>
-            <p className="main-empty-tagline">
-              A multi-provider AI desktop client with sub-agents, browser
-              automation, and the Grok Build CLI in your toolbelt.
-              {status === "missing"
-                ? " Set your LLM provider API key in Settings to begin."
-                : " Type a message below to start."}
-            </p>
-            <div className="main-empty-hints">
-              <span className="main-empty-hint">
-                <kbd>⌘</kbd>+<kbd>⇧</kbd>+<kbd>S</kbd> reads the last
-                response aloud
-              </span>
-              <span className="main-empty-hint">
-                <kbd>⌘</kbd>+<kbd>F</kbd> searches across conversations
-              </span>
+        {bots.length === 0 ? (
+          // v2.0 Slice E: brand-new user with no Bots.
+          // The chat area shows a single, focused "Create
+          // your first Bot" prompt instead of an empty
+          // thread. The composer is hidden — there is no
+          // Bot to send a message to yet.
+          <div className="main-empty main-empty--no-bots">
+            <div className="main-empty-mark" aria-hidden="true">
+              M
             </div>
+            <h1>Welcome to MaxBot</h1>
+            <p className="main-empty-tagline">
+              Bots are persistent assistants with their own tools, computer,
+              and memory. Create your first one to start chatting.
+            </p>
+            <button
+              className="primary main-empty-cta"
+              onClick={handleNewBot}
+              data-testid="main-empty-cta"
+            >
+              Create your first Bot
+            </button>
             {bootError && (
               <p style={{ color: "var(--danger)" }}>{bootError}</p>
             )}
           </div>
         ) : (
-          <ChatView
-            messages={messages}
-            streamingId={streamingId}
-            onRegenerate={handleRegenerate}
-          />
+          <>
+            {lastBotFinish && lastBotFinish.conversationId === activeId && (
+              <div
+                className={`bot-finish-banner${
+                  lastBotFinish.summary.startsWith("[error]") ? " error" : ""
+                }`}
+              >
+                <span>
+                  Bot run finished:{" "}
+                  {lastBotFinish.summary.length > 200
+                    ? lastBotFinish.summary.slice(0, 200) + "…"
+                    : lastBotFinish.summary}
+                </span>
+                <button
+                  className="ghost small"
+                  onClick={() => setLastBotFinish(null)}
+                >
+                  Dismiss
+                </button>
+              </div>
+            )}
+            {messages.length === 0 ? (
+              <div className="main-empty">
+                <div className="main-empty-mark">M</div>
+                <h1>MaxBot</h1>
+                <p className="main-empty-tagline">
+                  A multi-provider AI desktop client with sub-agents, browser
+                  automation, and the Grok Build CLI in your toolbelt.
+                  {status === "missing"
+                    ? " Set your LLM provider API key in Settings to begin."
+                    : " Type a message below to start."}
+                </p>
+                <div className="main-empty-hints">
+                  <span className="main-empty-hint">
+                    <kbd>⌘</kbd>+<kbd>⇧</kbd>+<kbd>S</kbd> reads the last
+                    response aloud
+                  </span>
+                  <span className="main-empty-hint">
+                    <kbd>⌘</kbd>+<kbd>F</kbd> searches across conversations
+                  </span>
+                </div>
+                {bootError && (
+                  <p style={{ color: "var(--danger)" }}>{bootError}</p>
+                )}
+              </div>
+            ) : (
+              <ChatView
+                messages={messages}
+                streamingId={streamingId}
+                onRegenerate={handleRegenerate}
+                activeBot={activeBot}
+                scopedConversations={scopedConversations}
+                activeConversationId={activeId}
+                onSelectConversation={setActiveId}
+                onNewConversation={handleNewBotConversation}
+              />
+            )}
+            <Composer
+              onSend={handleSend}
+              onStop={handleStop}
+              onOpenSendToBot={() => setSendToBotOpen(true)}
+              hasBots={bots.length > 0}
+              streaming={streamingId !== null}
+              lastAssistantText={lastAssistantText}
+              ttsSpeaking={ttsSpeaking}
+              onToggleSpeakLast={handleToggleSpeakLast}
+            />
+          </>
         )}
-        <Composer
-          onSend={handleSend}
-          onStop={handleStop}
-          onOpenSendToBot={() => setSendToBotOpen(true)}
-          hasBots={bots.length > 0}
-          streaming={streamingId !== null}
-          lastAssistantText={lastAssistantText}
-          ttsSpeaking={ttsSpeaking}
-          onToggleSpeakLast={handleToggleSpeakLast}
-        />
       </main>
       {settingsOpen && (
         <Settings

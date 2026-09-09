@@ -137,6 +137,17 @@ pub fn run() {
             commands::bots::stop_bot_run,
             commands::bots::list_active_bot_runs,
             commands::bots::reveal_bot_folder,
+            // v2.0 Slice E — Bot presence. The executor calls
+            // `bot_set_state` at run start / run end / blocked;
+            // the roster's avatar derives its visual from
+            // `bot.state` (column) + the last `bot_run.status` +
+            // `computers.state` (renderer-side). `bot_get_with_state`
+            // returns the same shape as `get_bot` — kept as a
+            // separate command so the renderer's "full presence
+            // view" path can be wired independently of the
+            // editor's "full Bot config" path.
+            commands::bots::bot_set_state,
+            commands::bots::bot_get_with_state,
             commands::tcc::list_controllable_apps,
             commands::tcc::request_tcc_for,
             commands::tcc::open_automation_settings,
