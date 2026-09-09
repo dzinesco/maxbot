@@ -38,6 +38,8 @@ import {
   sendToBot,
   stopBotRun,
   stopMessage,
+  ttsSpeak,
+  ttsStop,
   upsertBot,
   upsertBotSchedule,
 } from "./lib/tauri";
@@ -102,6 +104,7 @@ export default function App() {
   >([]);
   const [botsCollapsed, setBotsCollapsed] = useState(false);
   const [runningBotId, setRunningBotId] = useState<string | null>(null);
+  const [ttsSpeaking, setTtsSpeaking] = useState(false);
   /** Map of active bot run id → bot id. Populated by runBotNow /
    * sendToBot (which return the run id) and pruned by the bot-done
    * event listener. Polled from the DB every 2s as a fallback in
@@ -483,6 +486,61 @@ export default function App() {
       console.error("stop failed:", e);
     }
   }, [streamingId]);
+
+  // ---- Voice (TTS) ----
+  // The most recent assistant message (skipping the in-flight streaming
+  // one when its content is still empty). Used by the composer's 🔊
+  // button and the ⌘⇧S keyboard shortcut.
+  const lastAssistantText = useMemo(() => {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const m = messages[i];
+      if (m.role === "assistant" && m.content.trim().length > 0) {
+        return m.content;
+      }
+    }
+    return null;
+  }, [messages]);
+
+  const handleToggleSpeakLast = useCallback(async () => {
+    if (ttsSpeaking) {
+      try {
+        await ttsStop();
+      } catch (e) {
+        console.error("tts stop failed:", e);
+      }
+      setTtsSpeaking(false);
+      return;
+    }
+    if (!lastAssistantText) return;
+    setTtsSpeaking(true);
+    const chars = lastAssistantText.length;
+    const approxMs = Math.max(3000, Math.ceil(chars / 12) * 1000);
+    setTimeout(() => setTtsSpeaking(false), approxMs);
+    try {
+      await ttsSpeak(lastAssistantText);
+    } catch (e) {
+      console.error("tts speak failed:", e);
+      setTtsSpeaking(false);
+    }
+  }, [ttsSpeaking, lastAssistantText]);
+
+  // ⌘⇧S → speak the last assistant response (or stop if already
+  // speaking). Bound at the document level so it works from anywhere
+  // in the chat surface, not just inside the composer.
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (
+        (e.metaKey || e.ctrlKey) &&
+        e.shiftKey &&
+        (e.key === "S" || e.key === "s")
+      ) {
+        e.preventDefault();
+        handleToggleSpeakLast();
+      }
+    };
+    document.addEventListener("keydown", handler);
+    return () => document.removeEventListener("keydown", handler);
+  }, [handleToggleSpeakLast]);
 
   const handleRegenerate = useCallback(async () => {
     if (!activeId || streamingId) return;
@@ -893,6 +951,10 @@ export default function App() {
                 ? " Set your LLM provider API key in Settings to begin."
                 : ""}
             </p>
+            <p className="muted small" style={{ marginTop: 16 }}>
+              💡 Press <kbd>⌘</kbd>+<kbd>⇧</kbd>+<kbd>S</kbd> after the
+              first response to hear it read aloud.
+            </p>
             {bootError && (
               <p style={{ color: "var(--danger)" }}>{bootError}</p>
             )}
@@ -910,6 +972,9 @@ export default function App() {
           onOpenSendToBot={() => setSendToBotOpen(true)}
           hasBots={bots.length > 0}
           streaming={streamingId !== null}
+          lastAssistantText={lastAssistantText}
+          ttsSpeaking={ttsSpeaking}
+          onToggleSpeakLast={handleToggleSpeakLast}
         />
       </main>
       {settingsOpen && (

@@ -446,6 +446,31 @@ textarea:focus {
   align-items: center;
   color: var(--text-3);
   font-size: 11px;
+  flex-wrap: wrap;
+}
+
+.composer .hints kbd,
+.main-empty kbd {
+  display: inline-block;
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, monospace);
+  font-size: 11px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 1px 5px;
+  margin: 0 1px;
+  line-height: 1.4;
+  color: var(--text-2);
+}
+
+.composer .hint-tip {
+  white-space: nowrap;
+}
+
+.composer .composer-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }
 
 .composer .send {
@@ -1219,7 +1244,7 @@ button.link:hover {
   align-self: flex-start;
 }
 
-/* ---------- Copy button on messages ---------- */
+/* ---------- Copy / TTS buttons on messages ---------- */
 
 .copy-btn {
   margin-left: 8px;
@@ -1246,6 +1271,64 @@ button.link:hover {
   background: var(--bg-3);
   color: var(--text-1);
   border-color: var(--border);
+}
+
+/* TTS button on assistant messages — always visible (not gated on
+   hover) so users can find the voice feature without discovering it
+   by accident. The speak / stop states are color-coded. */
+.tts-btn {
+  opacity: 1;
+  color: var(--text-2);
+  font-size: 11px;
+  padding: 2px 8px;
+}
+.tts-btn:hover {
+  color: var(--accent);
+  background: var(--bg-3);
+  border-color: var(--border);
+}
+.tts-btn.speaking {
+  color: var(--accent);
+  background: var(--bg-3);
+  border-color: var(--accent);
+  animation: tts-pulse 1.2s ease-in-out infinite;
+}
+@keyframes tts-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.55; }
+}
+
+/* Speak-last-response button in the composer. Same icon as the
+   per-message button so the affordance is consistent. */
+.composer-speak {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-right: 8px;
+  padding: 4px 10px;
+  background: transparent;
+  color: var(--text-2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 80ms ease, color 80ms ease, border-color 80ms ease;
+}
+.composer-speak:hover {
+  background: var(--bg-3);
+  color: var(--accent);
+  border-color: var(--accent);
+}
+.composer-speak.speaking {
+  color: var(--accent);
+  background: var(--bg-3);
+  border-color: var(--accent);
+  animation: tts-pulse 1.2s ease-in-out infinite;
+}
+.composer-speak:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
 }
 
 /* ---------- Regenerate bar ---------- */

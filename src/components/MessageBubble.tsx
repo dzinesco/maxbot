@@ -196,9 +196,13 @@ export function MessageBubble({ message, streaming }: MessageBubbleProps) {
             <>
               {isAssistant && (
                 <button
-                  className="copy-btn tts-btn"
+                  className={`copy-btn tts-btn${speaking ? " speaking" : ""}`}
                   onClick={handleToggleSpeech}
-                  title={speaking ? "Stop speaking" : "Speak this message aloud"}
+                  title={
+                    speaking
+                      ? "Stop speaking (or press ⌘⇧S)"
+                      : "Speak this message aloud (⌘⇧S)"
+                  }
                 >
                   {speaking ? "⏹ Stop" : "🔊 Speak"}
                 </button>

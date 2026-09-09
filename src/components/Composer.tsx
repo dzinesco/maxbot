@@ -6,6 +6,12 @@ interface ComposerProps {
   onOpenSendToBot: () => void;
   hasBots: boolean;
   streaming: boolean;
+  /** Text of the most recent assistant message (for the 🔊 button). */
+  lastAssistantText: string | null;
+  /** True while the assistant-message TTS is in flight. */
+  ttsSpeaking: boolean;
+  /** Toggle the speak-last-response action. */
+  onToggleSpeakLast: () => void;
 }
 
 export function Composer({
@@ -14,6 +20,9 @@ export function Composer({
   onOpenSendToBot,
   hasBots,
   streaming,
+  lastAssistantText,
+  ttsSpeaking,
+  onToggleSpeakLast,
 }: ComposerProps) {
   const [value, setValue] = useState("");
   const ref = useRef<HTMLTextAreaElement>(null);
@@ -64,20 +73,40 @@ export function Composer({
                 </button>
               </>
             )}
+            {" · "}
+            <span className="hint-tip">
+              🔊 press <kbd>⌘</kbd>+<kbd>⇧</kbd>+<kbd>S</kbd> to speak
+              the last response
+            </span>
           </div>
-          {streaming ? (
-            <button className="send stop" onClick={onStop}>
-              Stop
-            </button>
-          ) : (
-            <button
-              className="send"
-              onClick={submit}
-              disabled={!value.trim()}
-            >
-              Send
-            </button>
-          )}
+          <div className="composer-actions">
+            {lastAssistantText && (
+              <button
+                className={`composer-speak${ttsSpeaking ? " speaking" : ""}`}
+                onClick={onToggleSpeakLast}
+                title={
+                  ttsSpeaking
+                    ? "Stop speaking (⌘⇧S)"
+                    : "Speak the last response aloud (⌘⇧S)"
+                }
+              >
+                {ttsSpeaking ? "⏹ Stop" : "🔊 Speak"}
+              </button>
+            )}
+            {streaming ? (
+              <button className="send stop" onClick={onStop}>
+                Stop
+              </button>
+            ) : (
+              <button
+                className="send"
+                onClick={submit}
+                disabled={!value.trim()}
+              >
+                Send
+              </button>
+            )}
+          </div>
         </div>
       </div>
     </div>
