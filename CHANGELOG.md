@@ -4,6 +4,77 @@ All notable changes to MaxBot are documented in this file. The format
 follows [Keep a Changelog](https://keepachangelog.com/) and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## v2.3.0 — 2026-09-09
+
+### Added
+- **Routines.** A Routine is "run Skill X at time Y on
+  bot Z." The new `Routines` tab in the side panel
+  lists every bot's routine, lets the user bind a
+  Skill to a schedule, and offers New / Edit / Delete
+  affordances. The existing `bot_schedules.interval_seconds`
+  / `cron_expression` fields are now wired to a real
+  UI.
+- **Skill-bound schedules.** The `BotSchedule` row
+  gained a `skill_id` column (forward-compat added in
+  v2.2). When set, the background scheduler dispatches
+  to the Skill executor — `run_skill` runs the Skill's
+  steps, creates a `skill_runs` row, and bumps
+  `last_run_at` — instead of `run_bot_once`. A
+  scheduler-fired run sees the same per-Bot filesystem,
+  Computer VM, and tool allowlist as a chat-time
+  invocation; the only difference is the LLM chat
+  loop is bypassed in favor of the recorded
+  procedure.
+- **`ScheduleEditorDialog`.** A modal that takes a
+  `Bot` + an optional existing `BotSchedule` and lets
+  the user pick: a Skill (or "no skill" — fires the
+  chat loop), a trigger (interval in minutes or a
+  5-field cron with 4 presets + an Advanced text
+  input), and a live one-line English preview of the
+  cron's next fire. Validation rejects an empty cron
+  or a 0-minute interval.
+- **Per-schedule dispatch is a `pub fn tick(app)` on
+  the scheduler.** Factored out of the inner 30s
+  loop so the `#[ignore]`d `scheduler_e2e` test can
+  drive the same code path the production
+  `scheduler_loop` uses, with a test-supplied
+  in-process `NoopTool` registry.
+
+### Changed
+- **`BotSchedule.skill_id` is read/written through
+  the four schedule methods on `Database`.** The
+  column was added in v2.2 as a forward-compat; v2.3
+  is the first slice to actually use it. `get_schedule`,
+  `upsert_schedule`, `list_due_schedules`, and
+  `list_all_schedules` now read and persist the
+  field. No new migration — the column was already
+  in `bot_schedules` since v2.2.
+- **Scheduler dispatch branches on `skill_id`.** The
+  existing `run_bot_once` path is unchanged; a new
+  `fire_skill_due` path is taken when the schedule
+  has a Skill bound. Both run as separate
+  `tauri::async_runtime::spawn` tasks so a slow
+  Bot or Skill doesn't block the next tick.
+- **`run_skill` was split.** The existing
+  `run_skill` is now a thin wrapper that builds
+  the default `ToolRegistry` and calls a new
+  `run_skill_inner(app: Option<AppHandle>, state,
+  ..., registry)` whose registry is passed in by the
+  caller. The e2e test passes a custom registry
+  with a `NoopTool` so the skill runs end-to-end
+  without needing the libvirt VM or a real
+  AppHandle.
+
+### Fixed
+- **No new top-level dependencies.** The cron
+  preview is rendered inline for the 4 presets and
+  a handful of common shapes; the `cron` Rust
+  crate (already a dep for the scheduler) handles
+  the production due-time check. `tempfile` was
+  added as a `[dev-dependencies]` for the
+  `#[ignore]`d e2e test only — production builds
+  don't link it.
+
 ## v2.2.0 — 2026-09-09
 
 ### Added

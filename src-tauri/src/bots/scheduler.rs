@@ -1,6 +1,6 @@
 //! Background scheduler. A tokio task that wakes up every 30 seconds,
 //! asks the database for any bot whose schedule is due, and fires a
-//! `run_bot_once` for each.
+//! `run_bot_once` (or a `run_skill`, v2.3) for each.
 //!
 //! A bot is "due" if EITHER:
 //! - `cron_expression` is set and the cron's next firing time falls
@@ -16,6 +16,14 @@
 //! The scheduler is a single instance; it lives on the Tauri AppHandle
 //! and runs in the background until the process exits. Per-bot runs are
 //! independent: a slow bot doesn't block the others.
+//!
+//! v2.3.0 — Routines: if `BotSchedule::skill_id` is `Some`, the
+//! scheduler dispatches to the Skill executor (which creates a
+//! `skill_runs` row) instead of `run_bot_once`. The bot is still
+//! the "owner" — the bot row's `system_prompt` / `default_model`
+//! and Computer VM are available to tools that look at `bot_id`
+//! — but the user gets a fixed step-by-step procedure rather than
+//! the LLM-driven chat loop.
 
 use std::str::FromStr;
 use std::sync::Arc;
@@ -24,8 +32,10 @@ use std::time::Duration;
 use chrono::{DateTime, Local, Utc};
 use cron::Schedule;
 use tauri::{AppHandle, Manager};
+use tokio_util::sync::CancellationToken;
 
 use crate::bots::executor::run_bot_once;
+use crate::skills::executor::{fire_skill_due, SkillDispatchOutcome};
 use crate::AppState;
 
 const TICK_SECONDS: u64 = 30;
@@ -46,49 +56,99 @@ async fn scheduler_loop(app: AppHandle) {
             Some(s) => s.inner().clone(),
             None => continue,
         };
-        let now_utc = Utc::now();
-        let due = match state.db.list_due_schedules(now_utc) {
-            Ok(d) => d,
-            Err(e) => {
-                log::warn!("scheduler: list_due_schedules failed: {e}");
-                continue;
-            }
-        };
-        for schedule in due {
-            // Look up the bot. If it was deleted between the list_due
-            // and now, skip.
-            let bot = match state.db.get_bot(&schedule.bot_id) {
-                Ok(Some(b)) => b,
-                _ => continue,
-            };
-            if !is_due(&schedule, now_utc) {
-                continue;
-            }
-            // Spawn the run as a separate task so a slow bot doesn't
-            // block the next tick. The run persists its own
-            // last_run_at / last_conversation_id when it finishes.
-            let app_for_run = app.clone();
-            let state_for_run = state.clone();
-            let bot_clone = bot.clone();
-            tauri::async_runtime::spawn(async move {
-                log::info!(
-                    "scheduler: firing bot {} (cron='{}', interval={}s)",
-                    bot_clone.id,
-                    schedule.cron_expression,
-                    schedule.interval_seconds
-                );
-                let cancel = tokio_util::sync::CancellationToken::new();
-                let _ = run_bot_once(
-                    app_for_run,
-                    state_for_run,
-                    bot_clone,
-                    cancel,
-                    None,
-                )
-                .await;
-            });
+        if let Err(e) = tick(app.clone(), state).await {
+            log::warn!("scheduler: tick failed: {e}");
         }
     }
+}
+
+/// One scheduler pass. Public for testability — the e2e test
+/// in `skills/scheduler_e2e.rs` calls this directly (with a
+/// test-supplied state) and then asserts that a `skill_runs`
+/// row was persisted.
+///
+/// Returns `Err` only if the database is unreachable. Per-bot
+/// errors are logged and swallowed so one bad bot doesn't poison
+/// the whole tick.
+pub async fn tick(app: AppHandle, state: Arc<AppState>) -> Result<(), String> {
+    let now_utc = Utc::now();
+    let due = state
+        .db
+        .list_due_schedules(now_utc)
+        .map_err(|e| format!("list_due_schedules: {e}"))?;
+    for schedule in due {
+        // Look up the bot. If it was deleted between the list_due
+        // and now, skip.
+        let bot = match state.db.get_bot(&schedule.bot_id) {
+            Ok(Some(b)) => b,
+            _ => continue,
+        };
+        if !is_due(&schedule, now_utc) {
+            continue;
+        }
+        // Spawn the run as a separate task so a slow bot doesn't
+        // block the next tick. The run persists its own
+        // last_run_at / last_conversation_id when it finishes.
+        let app_for_run = app.clone();
+        let state_for_run = state.clone();
+        let bot_clone = bot.clone();
+        let schedule_clone = schedule.clone();
+        tauri::async_runtime::spawn(async move {
+            dispatch_due_schedule(app_for_run, state_for_run, bot_clone, schedule_clone).await;
+        });
+    }
+    Ok(())
+}
+
+/// Decide what to do with a single due schedule and run it.
+/// v2.3.0 — if `schedule.skill_id` is set, dispatch to
+/// `run_skill` (the Skill executor creates the `skill_runs`
+/// row). Otherwise fall back to the chat-loop `run_bot_once`.
+///
+/// The skill run uses a fresh `CancellationToken` (no UI is
+/// attached to a scheduler-fired run) and the default
+/// `ToolRegistry` from `state.mcp`.
+pub async fn dispatch_due_schedule(
+    app: AppHandle,
+    state: Arc<AppState>,
+    bot: crate::bots::Bot,
+    schedule: crate::bots::BotSchedule,
+) {
+    let cancel = CancellationToken::new();
+    if let Some(skill_id) = schedule.skill_id.clone() {
+        log::info!(
+            "scheduler: firing skill '{}' for bot {} (cron='{}', interval={}s)",
+            skill_id,
+            bot.id,
+            schedule.cron_expression,
+            schedule.interval_seconds
+        );
+        let outcome = fire_skill_due(
+            Some(app.clone()),
+            state.clone(),
+            bot,
+            skill_id,
+            cancel,
+        )
+        .await;
+        match outcome {
+            SkillDispatchOutcome::Fired => {}
+            SkillDispatchOutcome::SkillMissing(id) => {
+                log::warn!("scheduler: skill {} no longer exists — skipping", id);
+            }
+            SkillDispatchOutcome::Err(e) => {
+                log::warn!("scheduler: skill run failed: {e}");
+            }
+        }
+        return;
+    }
+    log::info!(
+        "scheduler: firing bot {} (cron='{}', interval={}s)",
+        bot.id,
+        schedule.cron_expression,
+        schedule.interval_seconds
+    );
+    let _ = run_bot_once(app, state, bot, cancel, None).await;
 }
 
 /// Decide whether a schedule is due right now. Cron takes precedence
@@ -164,6 +224,7 @@ mod tests {
             cron_expression: cron.to_string(),
             last_run_at: None,
             last_conversation_id: None,
+            skill_id: None,
         }
     }
 
@@ -227,6 +288,26 @@ mod tests {
     fn no_schedule_is_not_due() {
         let now = at(2026, 9, 8, 12, 0);
         let s = sched("", 0);
+        assert!(!is_due(&s, now));
+    }
+
+    /// v2.3.0 — Routines: the skill_id field is a dispatch
+    /// choice inside `dispatch_due_schedule`, not an
+    /// `is_due()` concern. Pin that: a schedule with a
+    /// `skill_id` set still uses the same due-time logic
+    /// as a chat-loop schedule. Without this, a future
+    /// "skip when skill_id is set" change would silently
+    /// break Routines.
+    #[test]
+    fn is_due_with_skill_id_uses_existing_logic() {
+        let now = at(2026, 9, 8, 12, 0);
+        let mut s = sched("", 60);
+        s.skill_id = Some("skill-abc".to_string());
+        s.last_run_at = Some(at(2026, 9, 8, 11, 0));
+        // 60 minutes elapsed → due.
+        assert!(is_due(&s, now));
+        // Just fired → not due.
+        s.last_run_at = Some(at(2026, 9, 8, 12, 0));
         assert!(!is_due(&s, now));
     }
 }

@@ -78,14 +78,15 @@ export interface SidebarProps {
   onOpenSettings: () => void;
 
   /**
-   * v2.2.0 — the currently-active top-level view. The
-   * sidebar renders a tab row with "Bots" and "Skills";
-   * this prop tells the row which one is highlighted.
-   * Callbacks fire on click. The parent owns the state
-   * because the main view area switches based on it.
+   * v2.2.0 / v2.3.0 — the currently-active top-level view.
+   * The sidebar renders a tab row with "Bots" / "Skills" /
+   * "Routines"; this prop tells the row which one is
+   * highlighted. Callbacks fire on click. The parent
+   * owns the state because the main view area switches
+   * based on it.
    */
-  mainView: "chat" | "skills";
-  onSelectView: (view: "chat" | "skills") => void;
+  mainView: "chat" | "skills" | "routines";
+  onSelectView: (view: "chat" | "skills" | "routines") => void;
 
   /**
    * Legacy slot — previously the sidebar mounted the
@@ -181,9 +182,10 @@ export function Sidebar({
         />
       </div>
 
-      {/* v2.2.0 — top-level view switcher. Two tabs: Bots
-         (the chat UI) and Skills (the Skills panel). The
-         parent owns which view is active; this just
+      {/* v2.2.0 / v2.3.0 — top-level view switcher. Three
+         tabs: Bots (the chat UI), Skills (the Skills
+         panel), and Routines (the per-bot scheduler UI).
+         The parent owns which view is active; this just
          dispatches the click. */}
       <div className="sidebar-tabs" role="tablist">
         <button
@@ -201,6 +203,14 @@ export function Sidebar({
           aria-selected={mainView === "skills"}
         >
           Skills
+        </button>
+        <button
+          className={`sidebar-tab ${mainView === "routines" ? "sidebar-tab--active" : ""}`}
+          onClick={() => onSelectView("routines")}
+          role="tab"
+          aria-selected={mainView === "routines"}
+        >
+          Routines
         </button>
       </div>
 

@@ -1,6 +1,6 @@
 [package]
 name = "maxbot"
-version = "2.2.0"
+version = "2.3.0"
 description = "MaxBot — a MiniMax-powered desktop chat, tool, and Computer Use client."
 authors = ["Tyler Martinez"]
 edition = "2021"
@@ -62,3 +62,10 @@ zeroize = "1"
 [features]
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
+
+[dev-dependencies]
+# v2.3.0 — Routines: the `#[ignore]`d scheduler-e2e test
+# uses a tmpfile SQLite so multiple ignored runs in the
+# same session don't collide. `tempfile` is dev-only;
+# production builds never link it.
+tempfile = "3.10"

@@ -5,16 +5,28 @@
 //! `invoke` IPC; long-running streams emit `chat://chunk` events back to the
 //! renderer so the UI can show tokens as they arrive.
 
-mod bots;
+// v2.3.0 — Routines: the `bots`, `skills`, `tools`,
+// `mcp`, `computer`, and `storage` modules are `pub` so
+// external integration tests (in
+// `skills::scheduler_e2e`) can name them as
+// `maxbot_lib::bots::...`. The `bots::scheduler::tick`
+// and `skills::executor::run_skill_inner` are the
+// scheduler-test surface.
+pub mod bots;
+pub mod computer;
+pub mod mcp;
+pub mod skills;
+pub mod storage;
+pub mod tools;
 mod commands;
-mod computer;
 mod env_loader;
 mod grok_build;
 mod llm;
-mod mcp;
-mod skills;
-mod storage;
-mod tools;
+
+// Re-export so `use maxbot_lib::Settings;` works from
+// tests and from the (currently non-existent) external
+// API consumer.
+pub use storage::Settings;
 
 use std::sync::Arc;
 

@@ -349,6 +349,11 @@ export interface BotSchedule {
   cron_expression: string;
   last_run_at: string | null;
   last_conversation_id: string | null;
+  /** v2.3.0 — Routines: when set, the scheduler dispatches
+   *  to `run_skill` instead of `run_bot_once` on every fire.
+   *  Null = the schedule runs the bot's chat loop (v2.2
+   *  behavior). */
+  skill_id?: string | null;
 }
 
 export interface BotMessage {

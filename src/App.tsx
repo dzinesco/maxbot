@@ -14,6 +14,7 @@ import { BotInbox } from "./components/BotInbox";
 import { ComputerPanel } from "./components/ComputerPanel";
 import { RecordSkillDialog } from "./components/RecordSkillDialog";
 import { SkillsPanel } from "./components/SkillsPanel";
+import { RoutinesPanel } from "./components/RoutinesPanel";
 import { SendToBotModal } from "./components/SendToBotModal";
 import { Welcome } from "./components/Welcome";
 import {
@@ -143,7 +144,9 @@ export default function App() {
   // and "Skills" (the Skills panel). Skills gets its own
   // tab so a user can browse and run Skills without first
   // picking a Bot / conversation.
-  const [mainView, setMainView] = useState<"chat" | "skills">("chat");
+  const [mainView, setMainView] = useState<"chat" | "skills" | "routines">(
+    "chat",
+  );
   // v2.2.0 — when the user clicks "Record" in the Skills
   // panel, App.tsx mounts the RecordSkillDialog. State
   // holds the dialog open/closed.
@@ -1231,6 +1234,14 @@ export default function App() {
             bots={bots}
             defaultBotId={selectedBotId}
             onOpenRecord={() => setRecordSkillOpen(true)}
+          />
+        ) : mainView === "routines" ? (
+          <RoutinesPanel
+            activeBotId={selectedBotId}
+            onOpenBot={(botId) => {
+              setMainView("chat");
+              handleSelectBot(botId);
+            }}
           />
         ) : bots.length === 0 ? (
           // v2.0 Slice E: brand-new user with no Bots.

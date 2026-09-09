@@ -948,7 +948,7 @@ impl Database {
     pub fn get_schedule(&self, bot_id: &str) -> rusqlite::Result<Option<crate::bots::BotSchedule>> {
         let conn = self.conn.lock().expect("db lock poisoned");
         let mut stmt = conn.prepare(
-            "SELECT bot_id, interval_seconds, cron_expression, last_run_at, last_conversation_id
+            "SELECT bot_id, interval_seconds, cron_expression, last_run_at, last_conversation_id, skill_id
              FROM bot_schedules WHERE bot_id = ?",
         )?;
         let mut rows = stmt.query(params![bot_id])?;
@@ -963,6 +963,7 @@ impl Database {
             cron_expression: row.get(2)?,
             last_run_at: last_run_str.map(parse_dt),
             last_conversation_id: row.get(4)?,
+            skill_id: row.get(5)?,
         }))
     }
 
@@ -973,19 +974,21 @@ impl Database {
             .as_ref()
             .map(|d| d.to_rfc3339());
         conn.execute(
-            "INSERT INTO bot_schedules (bot_id, interval_seconds, cron_expression, last_run_at, last_conversation_id)
-             VALUES (?, ?, ?, ?, ?)
+            "INSERT INTO bot_schedules (bot_id, interval_seconds, cron_expression, last_run_at, last_conversation_id, skill_id)
+             VALUES (?, ?, ?, ?, ?, ?)
              ON CONFLICT(bot_id) DO UPDATE SET
                 interval_seconds = excluded.interval_seconds,
                 cron_expression = excluded.cron_expression,
                 last_run_at = excluded.last_run_at,
-                last_conversation_id = excluded.last_conversation_id",
+                last_conversation_id = excluded.last_conversation_id,
+                skill_id = excluded.skill_id",
             params![
                 schedule.bot_id,
                 schedule.interval_seconds as i64,
                 schedule.cron_expression,
                 last_run_at,
                 schedule.last_conversation_id,
+                schedule.skill_id,
             ],
         )?;
         Ok(())
@@ -994,7 +997,7 @@ impl Database {
     pub fn list_due_schedules(&self, now: DateTime<Utc>) -> rusqlite::Result<Vec<crate::bots::BotSchedule>> {
         let conn = self.conn.lock().expect("db lock poisoned");
         let mut stmt = conn.prepare(
-            "SELECT bot_id, interval_seconds, cron_expression, last_run_at, last_conversation_id
+            "SELECT bot_id, interval_seconds, cron_expression, last_run_at, last_conversation_id, skill_id
              FROM bot_schedules
              WHERE (interval_seconds > 0 OR cron_expression != '')
                AND (last_run_at IS NULL OR
@@ -1008,6 +1011,7 @@ impl Database {
                 cron_expression: row.get(2)?,
                 last_run_at: last_run_str.map(parse_dt),
                 last_conversation_id: row.get(4)?,
+                skill_id: row.get(5)?,
             })
         })?;
         let mut out = Vec::new();
@@ -1020,7 +1024,7 @@ impl Database {
     pub fn list_all_schedules(&self) -> rusqlite::Result<Vec<crate::bots::BotSchedule>> {
         let conn = self.conn.lock().expect("db lock poisoned");
         let mut stmt = conn.prepare(
-            "SELECT bot_id, interval_seconds, cron_expression, last_run_at, last_conversation_id
+            "SELECT bot_id, interval_seconds, cron_expression, last_run_at, last_conversation_id, skill_id
              FROM bot_schedules",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -1031,6 +1035,7 @@ impl Database {
                 cron_expression: row.get(2)?,
                 last_run_at: last_run_str.map(parse_dt),
                 last_conversation_id: row.get(4)?,
+                skill_id: row.get(5)?,
             })
         })?;
         let mut out = Vec::new();

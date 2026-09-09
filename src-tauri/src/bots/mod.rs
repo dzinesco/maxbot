@@ -127,6 +127,15 @@ pub struct BotSchedule {
     /// persistent log.
     #[serde(default)]
     pub last_conversation_id: Option<String>,
+    /// v2.3.0 — Routines: optional Skill to run on this schedule.
+    /// When `Some`, the scheduler dispatches to `run_skill` instead
+    /// of `run_bot_once`. The bot is still the "owner" (its
+    /// `system_prompt`, `default_model`, and Computer VM are
+    /// available to tools that look at `bot_id`), but the user
+    /// gets a fixed step-by-step procedure rather than the
+    /// LLM-driven chat loop.
+    #[serde(default)]
+    pub skill_id: Option<String>,
 }
 
 /// A single bot invocation, whether triggered by hand or by the

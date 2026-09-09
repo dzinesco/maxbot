@@ -26,11 +26,114 @@ use chrono::Utc;
 use serde_json::{json, Value};
 use tauri::AppHandle;
 use tokio_util::sync::CancellationToken;
+use uuid::Uuid;
 
+use crate::bots::Bot;
 use crate::skills::{RunStep, Skill, SkillRun, SkillRunStatus};
 use crate::tools::registry::ToolRegistry;
 use crate::tools::tool::{ToolContext, ToolInvocation};
 use crate::AppState;
+
+/// Outcome of `fire_skill_due` — the scheduler uses this
+/// to log the right "what happened" line for a fired routine.
+#[derive(Debug)]
+pub enum SkillDispatchOutcome {
+    /// Skill was found and a run row was inserted and
+    /// persisted. The run may have succeeded, failed, or
+    /// been cancelled — see the `SkillRun` returned via
+    /// `list_skill_runs`.
+    Fired,
+    /// The schedule referenced a `skill_id` that no
+    /// longer exists. The schedule is not auto-deleted
+    /// (the user can re-bind or remove it from the
+    /// Routines panel).
+    SkillMissing(String),
+    /// DB error or skill execution crashed.
+    Err(String),
+}
+
+/// v2.3.0 — Routines: scheduler entrypoint. Looks up the
+/// `Skill` referenced by `schedule.skill_id`, inserts a
+/// `skill_runs` row, runs the Skill via the default
+/// `ToolRegistry` (the production one — same as the
+/// `skill_run` Tauri command), updates the row, and bumps
+/// the schedule's `last_run_at`.
+///
+/// The `app` is `Option<AppHandle>` so the `#[ignore]`d
+/// integration test in `scheduler_e2e.rs` can call this
+/// with `None` (the test uses an in-memory no-op tool that
+/// doesn't need the AppHandle). Production callers always
+/// pass `Some(app)`.
+pub async fn fire_skill_due(
+    app: Option<AppHandle>,
+    state: Arc<AppState>,
+    bot: Bot,
+    skill_id: String,
+    cancel: CancellationToken,
+) -> SkillDispatchOutcome {
+    // Look up the skill. If it's gone, leave the schedule
+    // in place (the user might re-bind it) but skip this
+    // firing.
+    let skill = match state.db.get_skill(&skill_id) {
+        Ok(Some(s)) => s,
+        Ok(None) => return SkillDispatchOutcome::SkillMissing(skill_id),
+        Err(e) => return SkillDispatchOutcome::Err(format!("get_skill: {e}")),
+    };
+
+    let run_id = Uuid::new_v4().to_string();
+    let now = Utc::now();
+    let started_run = SkillRun {
+        id: run_id.clone(),
+        skill_id: skill.id.clone(),
+        bot_id: bot.id.clone(),
+        // v2.3 passes an empty inputs object. Per-routine
+        // input binding is a future slice.
+        inputs: Value::Object(Default::default()),
+        status: SkillRunStatus::Running,
+        started_at: now,
+        finished_at: None,
+        result_summary: String::new(),
+        steps: Vec::new(),
+    };
+    if let Err(e) = state.db.insert_skill_run(&started_run) {
+        return SkillDispatchOutcome::Err(format!("insert_skill_run: {e}"));
+    }
+
+    let finished = run_skill_inner(
+        app,
+        state.clone(),
+        run_id,
+        skill,
+        bot.id.clone(),
+        Value::Object(Default::default()),
+        cancel,
+        // Production registry — same shape the
+        // `skill_run` Tauri command uses.
+        ToolRegistry::default_with_extras(state.mcp.tool_adapters()),
+    )
+    .await;
+
+    if let Err(e) = state.db.update_skill_run(&finished) {
+        log::warn!(
+            "fire_skill_due: update_skill_run({}) failed: {e}",
+            finished.id
+        );
+    }
+
+    // Bump the schedule's `last_run_at` so the next tick
+    // doesn't immediately re-fire the same interval. We
+    // don't touch `last_conversation_id` — Skill runs
+    // don't create a conversation (they're step-bound,
+    // not chat-bound).
+    if let Ok(Some(mut s)) = state.db.get_schedule(&bot.id) {
+        s.last_run_at = Some(Utc::now());
+        if let Err(e) = state.db.upsert_schedule(&s) {
+            log::warn!("fire_skill_due: upsert_schedule({}) failed: {e}", s.bot_id);
+        }
+    }
+
+    SkillDispatchOutcome::Fired
+}
 
 /// Run a Skill against a Bot. Returns a fully-populated
 /// `SkillRun` (the in-memory copy, with per-step status).
@@ -55,6 +158,38 @@ pub async fn run_skill(
     user_inputs: Value,
     cancel: CancellationToken,
 ) -> SkillRun {
+    run_skill_inner(
+        Some(app),
+        state.clone(),
+        skill_run_id,
+        skill,
+        bot_id,
+        user_inputs,
+        cancel,
+        ToolRegistry::default_with_extras(state.mcp.tool_adapters()),
+    )
+    .await
+}
+
+/// Inner Skill runner. The `app` is `Option<AppHandle>` —
+/// production callers (`run_skill`, `fire_skill_due`) pass
+/// `Some(...)`. The e2e test in `scheduler_e2e.rs` passes
+/// `None` because its in-memory `NoopTool` ignores
+/// `ToolContext::app`.
+///
+/// `registry` is passed in by the caller so tests can
+/// supply a custom registry with no-op tools. Production
+/// callers use the default registry from `state.mcp`.
+pub async fn run_skill_inner(
+    app: Option<AppHandle>,
+    _state: Arc<AppState>,
+    skill_run_id: String,
+    skill: Skill,
+    bot_id: String,
+    user_inputs: Value,
+    cancel: CancellationToken,
+    registry: ToolRegistry,
+) -> SkillRun {
     let now = Utc::now();
     let mut run = SkillRun {
         id: skill_run_id,
@@ -67,10 +202,6 @@ pub async fn run_skill(
         result_summary: String::new(),
         steps: Vec::new(),
     };
-
-    // Build the registry once per call; same shape the
-    // chat loop and the Bot executor use.
-    let registry = ToolRegistry::default_with_extras(state.mcp.tool_adapters());
 
     // Substitution context: a flat map of `output_var` ->
     // captured tool output. Filled as we go; read by
@@ -136,7 +267,7 @@ pub async fn run_skill(
         let tool_context = ToolContext {
             consent_granted: true,
             consent_prompt: None,
-            app: Some(app.clone()),
+            app: app.clone(),
         };
 
         let (output, is_error) = match registry.execute(tool_invocation, tool_context).await {
