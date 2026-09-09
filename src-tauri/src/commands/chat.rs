@@ -43,7 +43,7 @@ const MAX_AGENT_ITERATIONS: u32 = 5;
 /// surface a `stream stalled` error and let the UI recover. 90s
 /// accommodates the slowest cold starts while still failing fast on
 /// real stalls.
-pub(crate) const STREAM_CHUNK_TIMEOUT: Duration = Duration::from_secs(90);
+pub(crate) const STREAM_CHUNK_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Serialize, Clone)]
 struct ChunkEvent {

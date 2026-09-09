@@ -173,8 +173,9 @@ textarea:focus {
 
 /* Version pill next to the brand. Channel-color so a glance tells
  * you stable vs beta vs alpha without clicking. Default = stable
- * (green). The data-version-channel attribute is set by the
- * Sidebar component from the APP_VERSION/VERSION_CHANNEL consts. */
+ * (green). v2.8 (always-on daemon) and v2.9 (team mode) can flip
+ * this to beta/alpha as a release channel marker without
+ * touching the layout. */
 .brand-version {
   display: inline-flex;
   align-items: center;

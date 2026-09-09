@@ -38,9 +38,10 @@ import { approvalPendingCount, computerGet, groupList } from "../lib/tauri";
 
 // Version pulled from package.json at build time so the sidebar
 // pill always matches the running app. The `data-version-channel`
-// attribute drives the color (see .brand-version CSS); "stable"
-// is the green pill we ship today. Future pre-release channels
-// (beta/alpha) flip the same slot without a layout change.
+// attribute on the pill drives the color (see .brand-version CSS);
+// "stable" is the green pill we ship today. When v2.8 / v2.9 land
+// as pre-release channels, the same slot can carry a yellow/red
+// pill without a layout change.
 const APP_VERSION: string = pkg.version;
 const VERSION_CHANNEL: "stable" | "beta" | "alpha" = "stable";
 
