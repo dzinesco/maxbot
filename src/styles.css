@@ -2789,6 +2789,17 @@ button.link:hover {
 .computer-panel__body--loading,
 .computer-panel__body--empty,
 .computer-panel__body--error {
+  /* The parent `.computer-panel__body` is `display: flex;
+   * flex-direction: column;` but modifier classes don't
+   * inherit display from the base. Without this, the
+   * "Opening console…" / "No computer" / "Computer error"
+   * body states render as plain block divs with no inner
+   * layout — the spinner + label collapse to invisible
+   * inside the body-pane's `overflow: hidden` parent.
+   * Reproduced: preview-mode Console tab shows a black
+   * void instead of the loading state. */
+  display: flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
   text-align: center;
@@ -2916,8 +2927,26 @@ button.link:hover {
   flex: 0 0 auto;
 }
 
+.computer-panel__footer-cell {
+  /* Flex items default to `min-width: auto`, which means
+   * "as wide as the content needs". The VM name
+   * (`maxbot-bot-<uuid>`) is ~38 chars and would otherwise
+   * blow out the panel width and force the VNC / uptime
+   * cells to wrap their text. Truncate with an ellipsis
+   * so the footer stays one line on a 320px panel. */
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .computer-panel__footer-cell.muted {
   color: var(--text-3);
+  /* The muted cells (VNC port, uptime) can be a little
+   * tighter — the long content lives in the un-muted
+   * VM-name cell. `flex-shrink: 1` lets them give up
+   * space first. */
+  flex-shrink: 1;
 }
 
 .computer-panel__footer-spacer {
