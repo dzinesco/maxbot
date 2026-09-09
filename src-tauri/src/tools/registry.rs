@@ -22,6 +22,7 @@ use super::browsers::{
 };
 use super::calendar::{CalendarCreateEventTool, CalendarTodayTool, CalendarWeekTool};
 use super::clipboard::{ClipboardReadTool, ClipboardWriteTool};
+use super::coding::{GrokPromptTool, GrokSessionStatusTool};
 use super::ego_browser::EgoBrowserTool;
 use super::file_read::FileReadTool;
 use super::file_write::FileWriteTool;
@@ -108,6 +109,15 @@ impl ToolRegistry {
             // AppleScript safari_*/chrome_* path for the common
             // "drive a real browser" workflow. Per-call consent.
             Arc::new(EgoBrowserTool),
+            // v0.7.0 — Grok Build session: spawn a long-lived
+            // `grok agent stdio` subprocess and speak ACP /
+            // JSON-RPC 2.0 over its stdin/stdout. Multi-turn:
+            // sessionId is persisted to SQLite so a relaunch
+            // resumes the same conversation. Per-call consent
+            // because the agent can read/write files and run
+            // shell commands in its cwd.
+            Arc::new(GrokPromptTool),
+            Arc::new(GrokSessionStatusTool),
             // v0.6.8 — Per-bot filesystem (memory / scratchpad / outputs)
             Arc::new(MemoryReadTool),
             Arc::new(MemoryWriteTool),

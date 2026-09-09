@@ -119,6 +119,31 @@ pub struct Settings {
     /// built-in default (Samantha, ships with every macOS install).
     #[serde(default)]
     pub tts_voice: String,
+
+    // ---- Grok Build CLI (v0.7.0) ----
+    /// Path to the `grok` binary the `grok_prompt` tool spawns.
+    /// May be a bare name on PATH or an absolute path. Default
+    /// `grok` — Tyler's install lives at `~/.grok/bin/grok`, so
+    /// either add it to PATH or set the absolute path here.
+    #[serde(default)]
+    pub grok_build_binary: String,
+    /// Model alias passed to `grok --model <alias>`. The alias
+    /// resolves to an API model via `~/.grok/config.toml`
+    /// `[model.<alias>]`. Default `minimax` (the alias the
+    /// official install uses for the MiniMax provider).
+    #[serde(default)]
+    pub grok_build_model: String,
+    /// Working directory for the `grok agent stdio` subprocess.
+    /// Empty (default) = `<app_data_dir>/grok/` is created and
+    /// used. Set to an absolute path to point the agent at a
+    /// specific project.
+    #[serde(default)]
+    pub grok_cwd: String,
+    /// Persisted ACP session id. Auto-managed: written on first
+    /// bring-up, read on the next app launch to resume the same
+    /// conversation. Not exposed in the Settings UI.
+    #[serde(default)]
+    pub grok_session_id: Option<String>,
     /// Base URL override for OpenAI. Empty = `https://api.openai.com/v1`.
     #[serde(default)]
     pub openai_base_url: String,

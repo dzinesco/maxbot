@@ -8,6 +8,7 @@
 mod bots;
 mod commands;
 mod env_loader;
+mod grok_build;
 mod llm;
 mod mcp;
 mod storage;
@@ -191,6 +192,9 @@ fn seed_settings_from_env(db: &Database) {
     changed |= seed_string(&mut settings.default_model, "SAND_MINIMAX_MODEL", "SAND_MINIMAX_MODEL");
     changed |= seed_string(&mut settings.provider_kind, "MAXBOT_PROVIDER", "MAXBOT_PROVIDER");
     changed |= seed_string(&mut settings.tts_voice, "MAXBOT_TTS_VOICE", "MAXBOT_TTS_VOICE");
+    changed |= seed_string(&mut settings.grok_build_binary, "MAXBOT_GROK_BUILD_BINARY", "MAXBOT_GROK_BUILD_BINARY");
+    changed |= seed_string(&mut settings.grok_build_model, "MAXBOT_GROK_BUILD_MODEL", "MAXBOT_GROK_BUILD_MODEL");
+    changed |= seed_string(&mut settings.grok_cwd, "MAXBOT_GROK_CWD", "MAXBOT_GROK_CWD");
 
     if changed {
         if let Err(e) = db.save_settings(&settings) {

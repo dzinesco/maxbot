@@ -16,6 +16,7 @@ pub mod bot_fs;
 pub mod browsers;
 pub mod calendar;
 pub mod clipboard;
+pub mod coding;
 pub mod ego_browser;
 pub mod file_read;
 pub mod file_write;
