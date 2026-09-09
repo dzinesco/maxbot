@@ -14,6 +14,7 @@ pub mod apple_script_exec;
 pub mod clipboard;
 pub mod file_read;
 pub mod file_write;
+pub mod mail;
 pub mod registry;
 pub mod shell_run;
 pub mod system;

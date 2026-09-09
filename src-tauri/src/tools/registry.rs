@@ -14,6 +14,7 @@ use super::apple_script::AppleScriptRunTool;
 use super::clipboard::{ClipboardReadTool, ClipboardWriteTool};
 use super::file_read::FileReadTool;
 use super::file_write::FileWriteTool;
+use super::mail::{MailDraftTool, MailInboxTool, MailSearchTool, MailSendTool};
 use super::shell_run::ShellRunTool;
 use super::system::{
     SystemDarkModeGetTool, SystemDarkModeSetTool, SystemFrontAppTool, SystemNotifyTool,
@@ -51,6 +52,11 @@ impl ToolRegistry {
             Arc::new(SystemDarkModeGetTool),
             Arc::new(SystemDarkModeSetTool),
             Arc::new(SystemFrontAppTool),
+            // v0.4.1 — Mail
+            Arc::new(MailInboxTool),
+            Arc::new(MailSearchTool),
+            Arc::new(MailSendTool),
+            Arc::new(MailDraftTool),
         ];
         let mut by_name: HashMap<&'static str, Arc<dyn Tool>> = HashMap::new();
         for t in tools {
