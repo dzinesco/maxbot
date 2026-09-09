@@ -11,6 +11,7 @@
 
 pub mod apple_script;
 pub mod apple_script_exec;
+pub mod app_launcher;
 pub mod browsers;
 pub mod calendar;
 pub mod clipboard;
@@ -22,7 +23,6 @@ pub mod registry;
 pub mod reminders;
 pub mod shell_run;
 pub mod system;
-pub mod things;
 pub mod tool;
 pub mod tts;
 pub mod web_fetch;

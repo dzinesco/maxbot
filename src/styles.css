@@ -514,10 +514,14 @@ textarea:focus {
   width: 480px;
   max-width: 92vw;
   /* Keep the modal inside the viewport on short windows — without
-     these two rules a long Settings form overflows and the bottom
-     fields (Save / Cancel) are unreachable. */
+     these rules a long Settings form overflows and the bottom
+     fields (Save / Cancel) are unreachable. `min-height: 0` is
+     required on a flex column with overflow so the browser
+     doesn't fall back to the content's natural height. */
   max-height: 90vh;
+  min-height: 0;
   overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
   display: flex;
   flex-direction: column;
   gap: 14px;

@@ -11,6 +11,7 @@ use serde_json::Value;
 use crate::llm::provider::ToolDefinition;
 
 use super::apple_script::AppleScriptRunTool;
+use super::app_launcher::{AppListTool, AppOpenTool};
 use super::browsers::{
     ChromeCurrentUrlTool, ChromeExecJsTool, ChromeOpenTool, ChromeTabsTool, SafariCurrentUrlTool,
     SafariExecJsTool, SafariOpenTool, SafariTabsTool,
@@ -27,7 +28,6 @@ use super::system::{
     SystemDarkModeGetTool, SystemDarkModeSetTool, SystemFrontAppTool, SystemNotifyTool,
     SystemVolumeGetTool, SystemVolumeSetTool,
 };
-use super::things::{ThingsAddTool, ThingsCompleteTool, ThingsInboxTool, ThingsProjectsTool, ThingsTodayTool, ThingsUpcomingTool};
 use super::tool::{Tool, ToolContext, ToolError, ToolInvocation, ToolResult};
 use super::tts::{TtsSpeakTool, TtsStopTool};
 use super::web_fetch::WebFetchTool;
@@ -94,13 +94,9 @@ impl ToolRegistry {
             // v0.6.1 — Text-to-Speech via macOS `say`
             Arc::new(TtsSpeakTool),
             Arc::new(TtsStopTool),
-            // v0.6.6 — Things 3 (AppleScript)
-            Arc::new(ThingsTodayTool),
-            Arc::new(ThingsInboxTool),
-            Arc::new(ThingsUpcomingTool),
-            Arc::new(ThingsProjectsTool),
-            Arc::new(ThingsAddTool),
-            Arc::new(ThingsCompleteTool),
+            // v0.6.7 — App launcher (open any macOS app by name)
+            Arc::new(AppOpenTool),
+            Arc::new(AppListTool),
         ];
         tools.extend(extra);
         let mut by_name: HashMap<String, Arc<dyn Tool>> = HashMap::new();
