@@ -11,10 +11,13 @@ use serde_json::Value;
 use crate::llm::provider::ToolDefinition;
 
 use super::apple_script::AppleScriptRunTool;
+use super::calendar::{CalendarCreateEventTool, CalendarTodayTool, CalendarWeekTool};
 use super::clipboard::{ClipboardReadTool, ClipboardWriteTool};
 use super::file_read::FileReadTool;
 use super::file_write::FileWriteTool;
 use super::mail::{MailDraftTool, MailInboxTool, MailSearchTool, MailSendTool};
+use super::notes::{NotesCreateTool, NotesReadTool, NotesSearchTool};
+use super::reminders::{RemindersAddTool, RemindersCompleteTool, RemindersListTool};
 use super::shell_run::ShellRunTool;
 use super::system::{
     SystemDarkModeGetTool, SystemDarkModeSetTool, SystemFrontAppTool, SystemNotifyTool,
@@ -57,6 +60,16 @@ impl ToolRegistry {
             Arc::new(MailSearchTool),
             Arc::new(MailSendTool),
             Arc::new(MailDraftTool),
+            // v0.4.2 — Calendar + Reminders + Notes
+            Arc::new(CalendarTodayTool),
+            Arc::new(CalendarWeekTool),
+            Arc::new(CalendarCreateEventTool),
+            Arc::new(RemindersListTool),
+            Arc::new(RemindersAddTool),
+            Arc::new(RemindersCompleteTool),
+            Arc::new(NotesSearchTool),
+            Arc::new(NotesReadTool),
+            Arc::new(NotesCreateTool),
         ];
         let mut by_name: HashMap<&'static str, Arc<dyn Tool>> = HashMap::new();
         for t in tools {

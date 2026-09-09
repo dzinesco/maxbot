@@ -11,11 +11,14 @@
 
 pub mod apple_script;
 pub mod apple_script_exec;
+pub mod calendar;
 pub mod clipboard;
 pub mod file_read;
 pub mod file_write;
 pub mod mail;
+pub mod notes;
 pub mod registry;
+pub mod reminders;
 pub mod shell_run;
 pub mod system;
 pub mod tool;
