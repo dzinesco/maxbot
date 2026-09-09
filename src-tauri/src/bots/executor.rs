@@ -368,8 +368,21 @@ pub async fn run_bot_once(
                     finish_reason = "cancelled".to_string();
                     break;
                 }
-                next = stream.next() => {
-                    let Some(item) = next else { break };
+                // Per-chunk timeout — mirrors the chat command so a
+                // hung bot run surfaces an error instead of spinning
+                // forever. The user can stop a stalled run via the
+                // BotsPanel Run→Stop toggle.
+                next = tokio::time::timeout(crate::commands::chat::STREAM_CHUNK_TIMEOUT, stream.next()) => {
+                    let item = match next {
+                        Ok(Some(item)) => item,
+                        Ok(None) => break, // stream ended cleanly
+                        Err(_elapsed) => {
+                            stream_error = Some(StreamError::Network(
+                                "stream stalled — no response for 90s".to_string(),
+                            ));
+                            break;
+                        }
+                    };
                     match item {
                         Ok(StreamChunk::Text { delta }) => {
                             full_text.push_str(&delta);

@@ -17,6 +17,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use futures_util::StreamExt;
 use serde::Serialize;
@@ -36,6 +37,13 @@ use crate::AppState;
 /// loop runs until the model stops emitting tool calls. Capped to keep
 /// runaway agents from hammering the API.
 const MAX_AGENT_ITERATIONS: u32 = 5;
+
+/// Per-chunk streaming timeout. If the provider goes silent for this
+/// long between chunks (cold start, TCP half-open, hung model), we
+/// surface a `stream stalled` error and let the UI recover. 90s
+/// accommodates the slowest cold starts while still failing fast on
+/// real stalls.
+pub(crate) const STREAM_CHUNK_TIMEOUT: Duration = Duration::from_secs(90);
 
 #[derive(Serialize, Clone)]
 struct ChunkEvent {
@@ -452,8 +460,24 @@ async fn run_agent_loop(
                     finish_reason = "cancelled".to_string();
                     break;
                 }
-                next = stream.next() => {
-                    let Some(item) = next else { break };
+                // Per-chunk timeout: if the provider goes silent for
+                // more than STREAM_CHUNK_TIMEOUT (no token at all,
+                // TCP half-open, model hung), surface a clear error
+                // instead of letting the UI spin forever. The first
+                // chunk can take a while on cold start, so this
+                // applies uniformly — `stream.next()` resolves as
+                // soon as a single chunk arrives.
+                next = tokio::time::timeout(STREAM_CHUNK_TIMEOUT, stream.next()) => {
+                    let item = match next {
+                        Ok(Some(item)) => item,
+                        Ok(None) => break, // stream ended cleanly
+                        Err(_elapsed) => {
+                            hit_error = Some(StreamError::Network(
+                                "stream stalled — no response for 90s".to_string(),
+                            ));
+                            break;
+                        }
+                    };
                     match item {
                         Ok(StreamChunk::Text { delta }) => {
                             full_text.push_str(&delta);

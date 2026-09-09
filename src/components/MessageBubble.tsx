@@ -11,17 +11,24 @@ interface MessageBubbleProps {
  * tags the model may emit) from the visible content. The raw
  * reasoning is preserved in the DB and the streaming layer — we
  * only hide it from the chat view. Multi-line, nested-safe.
+ *
+ * Handles two cases:
+ *  1. Paired `<think>…</think>` — strip the whole run.
+ *  2. Orphaned `<think>` with no closing tag (model stream cut off
+ *     mid-reasoning, or model simply forgot to close it) — strip
+ *     from the tag to end of input so the user doesn't see a raw
+ *     opening tag with no payload.
  */
 function stripReasoningTags(input: string): string {
-  // Repeatedly strip non-greedy `<think>…</think>` runs until none
-  // remain. This handles nested tags that some reasoning models emit.
   let out = input;
   let prev: string | null = null;
   while (out !== prev) {
     prev = out;
     out = out.replace(/<think>[\s\S]*?<\/think>/gi, "");
   }
-  return out;
+  // Orphaned opening tag (no closing). Strip from `<think>` to end.
+  out = out.replace(/<think>[\s\S]*$/gi, "");
+  return out.trim();
 }
 
 /** Very small markdown subset: paragraphs, fenced code blocks, inline code,
