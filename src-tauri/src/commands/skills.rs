@@ -307,7 +307,7 @@ pub async fn skill_record_start(
     let recording_id_for_task = recording_id.clone();
     tauri::async_runtime::spawn(async move {
         let _ = run_bot_once(
-            app,
+            Some(app),
             state_arc,
             bot,
             CancellationToken::new(),

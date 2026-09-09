@@ -192,6 +192,29 @@ impl Database {
         Ok(n as u32)
     }
 
+    /// v2.8.0 — ActivityFeed: most-recent approvals
+    /// across **all** Bots regardless of status, used by
+    /// the Sidebar's ActivityFeed component. The result
+    /// is sorted by `created_at DESC` so the newest
+    /// approval is first. `limit` is small (5 from the
+    /// renderer). Includes `pending`, `approved`,
+    /// `rejected`, and `edited` rows.
+    pub fn list_recent_approvals(&self, limit: u32) -> rusqlite::Result<Vec<Approval>> {
+        let conn = self.conn.lock().expect("db lock poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT id, bot_id, tool_name, status, payload_json,
+                    result_json, bot_run_id, tool_call_id, created_at, decided_at
+             FROM approvals
+             ORDER BY created_at DESC LIMIT ?",
+        )?;
+        let rows = stmt.query_map(params![limit as i64], |row| row_to_approval(row))?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
     /// Mark an approval as decided. `result` is the
     /// tool's result string (or `None` for rejections).
     /// `status` is one of `"approved"`, `"rejected"`,

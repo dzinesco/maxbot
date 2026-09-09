@@ -453,6 +453,18 @@ export interface ApprovalDecideOutput {
   tool_result: string | null;
 }
 
+// v2.8.0 — Always-on Daemon (24/7). The
+// `list_recent_activity` Tauri command returns a
+// bundle of the three ActivityFeed sections, each
+// capped at 5 rows. The fields are camelCase
+// already (serde's default), so the wire shape
+// matches the JS shape directly.
+export interface ActivityFeed {
+  bot_runs: BotRun[];
+  skill_runs: SkillRun[];
+  approvals: Approval[];
+}
+
 export interface BotChunkEvent {
   bot_id: string;
   bot_run_id: string;

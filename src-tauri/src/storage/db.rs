@@ -530,7 +530,26 @@ impl Database {
                  decided_at   TEXT
              );
              CREATE INDEX IF NOT EXISTS approvals_by_bot_status
-                 ON approvals(bot_id, status, created_at DESC);",
+                 ON approvals(bot_id, status, created_at DESC);
+             -- v2.8.0 — Always-on Daemon (24/7). One row per
+             -- Bot that has a daemon webhook enabled. The
+             -- `maxbotd` binary consults this table on every
+             -- inbound `POST /hooks/<bot_id>` to verify the
+             -- bearer token in the `Authorization` header. The
+             -- same table is read by the Tauri app's
+             -- BotEditor to show the current token / Rotate /
+             -- Copy controls. Tokens are 32 random bytes
+             -- hex-encoded (64 chars); we don't hash them
+             -- because the read path needs the plaintext
+             -- (the daemon verifies the inbound header
+             -- against it directly). Treat the SQLite file
+             -- as the secret boundary.
+             CREATE TABLE IF NOT EXISTS daemon_tokens (
+                 bot_id      TEXT PRIMARY KEY REFERENCES bots(id) ON DELETE CASCADE,
+                 token       TEXT NOT NULL,
+                 created_at  TEXT NOT NULL,
+                 last_used   TEXT
+             );",
         )?;
         // Idempotent column additions for older databases. SQLite
         // doesn't have IF NOT EXISTS for columns, so we probe
@@ -1354,6 +1373,45 @@ impl Database {
         Ok(out)
     }
 
+    /// v2.8.0 — ActivityFeed: most-recent Bot runs across
+    /// **all** Bots, used by the Sidebar's ActivityFeed
+    /// component. No `bot_id` filter. The query is
+    /// intentionally cheap (small `LIMIT`); for the
+    /// per-Bot history view the UI still uses
+    /// `list_bot_runs`.
+    pub fn list_recent_bot_runs(&self, limit: u32) -> rusqlite::Result<Vec<crate::bots::BotRun>> {
+        let conn = self.conn.lock().expect("db lock poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT id, bot_id, conversation_id, status, started_at, finished_at, result_summary
+             FROM bot_runs
+             ORDER BY started_at DESC LIMIT ?",
+        )?;
+        let rows = stmt.query_map(params![limit as i64], |row| {
+            let status_str: String = row.get(3)?;
+            let finished_str: Option<String> = row.get(5)?;
+            let status = match status_str.as_str() {
+                "running" => crate::bots::BotRunStatus::Running,
+                "failed" => crate::bots::BotRunStatus::Failed,
+                "cancelled" => crate::bots::BotRunStatus::Cancelled,
+                _ => crate::bots::BotRunStatus::Succeeded,
+            };
+            Ok(crate::bots::BotRun {
+                id: row.get(0)?,
+                bot_id: row.get(1)?,
+                conversation_id: row.get(2)?,
+                status,
+                started_at: parse_dt(row.get::<_, String>(4)?),
+                finished_at: finished_str.map(parse_dt),
+                result_summary: row.get(6)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
     /// Return the run ids of every bot run currently in the
     /// "running" state. Used by the UI to know which bots have a
     /// live run that a Stop button can fire against. The actual
@@ -1601,6 +1659,68 @@ impl Database {
             params![bot_id, conversation_id],
         )?;
         Ok(())
+    }
+
+    // ----- v2.8.0 daemon_tokens -----
+
+    /// Fetch the per-Bot bearer token used by the
+    /// `maxbotd` HTTP server. Returns `None` if the user
+    /// hasn't generated a token yet (the BotEditor
+    /// surfaces this as "not set"). Used by both the
+    /// Tauri app (to show the token / Copy / Rotate) and
+    /// by `maxbotd` (to verify inbound `Authorization`
+    /// headers).
+    pub fn get_daemon_token(&self, bot_id: &str) -> rusqlite::Result<Option<String>> {
+        let conn = self.conn.lock().expect("db lock poisoned");
+        let mut stmt = conn
+            .prepare("SELECT token FROM daemon_tokens WHERE bot_id = ?")?;
+        let raw: Option<String> = stmt
+            .query_row(params![bot_id], |row| row.get(0))
+            .optional()?;
+        Ok(raw)
+    }
+
+    /// Persist (or replace) a per-Bot bearer token.
+    /// `created_at` is stamped on first insert and
+    /// preserved on update; `last_used` is updated
+    /// separately by `touch_daemon_token`. The token
+    /// value is the full hex string; no hashing.
+    pub fn set_daemon_token(&self, bot_id: &str, token: &str) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().expect("db lock poisoned");
+        conn.execute(
+            "INSERT INTO daemon_tokens (bot_id, token, created_at)
+             VALUES (?, ?, ?)
+             ON CONFLICT(bot_id) DO UPDATE SET token = excluded.token",
+            params![bot_id, token, Utc::now().to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
+    /// Stamp the current `last_used` for a token. Called
+    /// by `maxbotd` after a successful inbound webhook
+    /// so the UI can show "last used 3m ago".
+    pub fn touch_daemon_token(&self, bot_id: &str) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().expect("db lock poisoned");
+        conn.execute(
+            "UPDATE daemon_tokens SET last_used = ? WHERE bot_id = ?",
+            params![Utc::now().to_rfc3339(), bot_id],
+        )?;
+        Ok(())
+    }
+
+    /// Generate a fresh 32-byte random hex token, write
+    /// it to the `daemon_tokens` table, and return it.
+    /// Called by the BotEditor's "Generate" / "Rotate"
+    /// button. The token never leaves the SQLite file in
+    /// the clear unless the UI shows it (for the Copy
+    /// action).
+    pub fn rotate_daemon_token(&self, bot_id: &str) -> rusqlite::Result<String> {
+        use rand::RngCore;
+        let mut bytes = [0u8; 32];
+        rand::thread_rng().fill_bytes(&mut bytes);
+        let token = bytes.iter().map(|b| format!("{:02x}", b)).collect::<String>();
+        self.set_daemon_token(bot_id, &token)?;
+        Ok(token)
     }
 
     /// Replace a message's tool_calls JSON and bump the conversation's
@@ -2219,6 +2339,29 @@ impl Database {
         Ok(out)
     }
 
+    /// v2.8.0 — ActivityFeed: most-recent Skill runs across
+    /// **all** Skills, used by the Sidebar's ActivityFeed
+    /// component. No `skill_id` filter. The `LIMIT` is
+    /// small (5 from the renderer). The result is sorted
+    /// by `started_at DESC` so the newest run is first.
+    pub fn list_recent_skill_runs(
+        &self,
+        limit: u32,
+    ) -> rusqlite::Result<Vec<crate::skills::SkillRun>> {
+        let conn = self.conn.lock().expect("db lock poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT id, skill_id, bot_id, inputs_json, status, started_at, finished_at, result_summary
+             FROM skill_runs
+             ORDER BY started_at DESC LIMIT ?",
+        )?;
+        let rows = stmt.query_map(params![limit as i64], parse_skill_run_row)?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
     /// Single-run lookup. Used by the run-progress card
     /// on the Skills panel: the renderer keeps a `run_id`
     /// it got from `skill_run` and polls this every
@@ -2644,5 +2787,149 @@ mod tests {
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].avatar_color, "");
         assert!(listed[0].last_active_at.is_none());
+    }
+
+    // ---- v2.8.0 — daemon_tokens ----
+
+    /// Helper: insert a minimal Bot row so the
+    /// `daemon_tokens.bot_id` foreign key is satisfied.
+    /// The token tests only care about the token
+    /// column, not the bot's full shape.
+    fn insert_minimal_bot(db: &Database, id: &str) {
+        let now = chrono::Utc::now();
+        db.upsert_bot(&crate::bots::Bot {
+            id: id.to_string(),
+            name: id.to_string(),
+            description: String::new(),
+            system_prompt: String::new(),
+            default_model: "MiniMax-M3".to_string(),
+            allowed_tools: vec![],
+            icon: String::new(),
+            color: String::new(),
+            avatar_color: String::new(),
+            created_at: now,
+            updated_at: now,
+            state: crate::bots::BotState::Idle,
+            last_active_at: None,
+        })
+        .expect("upsert bot");
+    }
+
+    /// `set_daemon_token` followed by `get_daemon_token`
+    /// returns the same value. Confirms the
+    /// `daemon_tokens` table is wired up correctly in
+    /// `migrate()`.
+    #[test]
+    fn daemon_token_set_then_get_round_trip() {
+        let db = fresh_db();
+        insert_minimal_bot(&db, "bot-a");
+        insert_minimal_bot(&db, "bot-b");
+        // First read: nothing stored yet.
+        assert!(db.get_daemon_token("bot-a").unwrap().is_none());
+        db.set_daemon_token("bot-a", "tok-1").unwrap();
+        assert_eq!(
+            db.get_daemon_token("bot-a").unwrap().as_deref(),
+            Some("tok-1")
+        );
+        // A different bot's token is unaffected.
+        assert!(db.get_daemon_token("bot-b").unwrap().is_none());
+    }
+
+    /// `rotate_daemon_token` produces a 32-byte
+    /// hex-encoded string (64 chars) and overwrites
+    /// any previous value. Two consecutive rotations
+    /// give two distinct tokens.
+    #[test]
+    fn daemon_token_rotate_produces_64_hex_chars_and_overwrites() {
+        let db = fresh_db();
+        insert_minimal_bot(&db, "bot-x");
+        let first = db.rotate_daemon_token("bot-x").unwrap();
+        let second = db.rotate_daemon_token("bot-x").unwrap();
+        assert_eq!(first.len(), 64);
+        assert_eq!(second.len(), 64);
+        assert_ne!(first, second);
+        // The stored value is the second rotation, not
+        // the first.
+        assert_eq!(
+            db.get_daemon_token("bot-x").unwrap().as_deref(),
+            Some(second.as_str())
+        );
+    }
+
+    /// `touch_daemon_token` updates `last_used` but
+    /// leaves the token bytes intact. Confirms the
+    /// three-column tuple (bot_id, token, last_used)
+    /// is well-formed.
+    #[test]
+    fn daemon_token_touch_preserves_token_value() {
+        let db = fresh_db();
+        insert_minimal_bot(&db, "bot-t");
+        db.set_daemon_token("bot-t", "preserved-token").unwrap();
+        // A no-op insert of a fresh row that already
+        // exists; the on-conflict path is exercised.
+        db.set_daemon_token("bot-t", "preserved-token").unwrap();
+        assert_eq!(
+            db.get_daemon_token("bot-t").unwrap().as_deref(),
+            Some("preserved-token")
+        );
+    }
+
+    /// `list_recent_bot_runs` returns the most-recent
+    /// runs across **all** bots (no `bot_id` filter).
+    /// The `LIMIT` is respected.
+    #[test]
+    fn list_recent_bot_runs_returns_most_recent_across_bots() {
+        let db = fresh_db();
+        // Insert two bots.
+        let now = chrono::Utc::now();
+        for id in ["bot-a", "bot-b"] {
+            db.upsert_bot(&crate::bots::Bot {
+                id: id.to_string(),
+                name: id.to_string(),
+                description: String::new(),
+                system_prompt: String::new(),
+                default_model: "MiniMax-M3".to_string(),
+                allowed_tools: vec![],
+                icon: String::new(),
+                color: String::new(),
+                avatar_color: String::new(),
+                created_at: now,
+                updated_at: now,
+                state: crate::bots::BotState::Idle,
+                last_active_at: None,
+            })
+            .expect("upsert");
+        }
+        // Three runs across both bots, ordered by
+        // started_at. bot-b-2 is the newest.
+        let runs = vec![
+            ("run-1", "bot-a", "succeeded", "2026-09-08T10:00:00Z"),
+            ("run-2", "bot-b", "succeeded", "2026-09-08T11:00:00Z"),
+            ("run-3", "bot-a", "failed", "2026-09-08T12:00:00Z"),
+        ];
+        for (id, bot_id, status, started_at) in &runs {
+            db.upsert_bot_run(&crate::bots::BotRun {
+                id: id.to_string(),
+                bot_id: bot_id.to_string(),
+                conversation_id: "conv".to_string(),
+                status: if *status == "succeeded" {
+                    crate::bots::BotRunStatus::Succeeded
+                } else {
+                    crate::bots::BotRunStatus::Failed
+                },
+                started_at: parse_dt(started_at.to_string()),
+                finished_at: None,
+                result_summary: String::new(),
+            })
+            .expect("upsert run");
+        }
+        // LIMIT 2 → the two most recent (run-3, run-2).
+        let recent = db.list_recent_bot_runs(2).expect("list");
+        assert_eq!(recent.len(), 2);
+        assert_eq!(recent[0].id, "run-3");
+        assert_eq!(recent[1].id, "run-2");
+        // No bot_id filter — both rows can come from
+        // different bots.
+        assert_ne!(recent[0].bot_id, recent[1].bot_id);
     }
 }

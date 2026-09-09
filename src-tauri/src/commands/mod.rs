@@ -6,6 +6,7 @@ pub mod bots;
 pub mod chat;
 pub mod computer;
 pub mod conversations;
+pub mod daemon;
 pub mod groups;
 pub mod memory;
 pub mod meta;

@@ -272,7 +272,7 @@ pub async fn run_bot_now(
     // The bot runs to completion here; cancel is a no-op for now (UI
     // doesn't yet expose a per-run Stop button).
     run_bot_once(
-        app.clone(),
+        Some(app.clone()),
         state_arc,
         bot,
         CancellationToken::new(),
@@ -388,7 +388,7 @@ pub async fn send_to_bot(
         if let Some(bot) = bot {
             tauri::async_runtime::spawn(async move {
                 let _ = run_bot_once(
-                    app,
+                    Some(app),
                     state_arc,
                     bot,
                     CancellationToken::new(),

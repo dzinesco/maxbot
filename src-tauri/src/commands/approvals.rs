@@ -448,7 +448,7 @@ async fn resume_bot_after_decide(
     let _ = tool_call_id_owned;
     tauri::async_runtime::spawn(async move {
         let _ = run_bot_once(
-            app_for_task,
+            Some(app_for_task),
             state_arc,
             bot,
             CancellationToken::new(),

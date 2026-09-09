@@ -4,6 +4,95 @@ All notable changes to MaxBot are documented in this file. The format
 follows [Keep a Changelog](https://keepachangelog.com/) and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## v2.8.0 — 2026-09-09
+
+### Added
+- **Always-on Daemon (`maxbotd`).** A new second
+  binary in the same source tree (`src-tauri/src/bin/
+  maxbotd.rs`) that runs headless on the user's Linux
+  server (`crispy`). It shares the same SQLite file
+  and the same `maxbot_lib` code as the Tauri app —
+  same `Database`, same `run_bot_once`, same
+  scheduler tick logic. Two responsibilities:
+  - **30s scheduler poll.** Walks `bot_schedules`
+    every 30s, fires `run_bot_once` for any due
+    schedule. Reuses the in-app scheduler verbatim
+    (v2.8.0 refactored `run_bot_once` to accept
+    `Option<AppHandle>`; the daemon passes `None` and
+    skips the Tauri `bot://chunk` / `bot://done` /
+    `bot://error` event emits).
+  - **Webhook server.** `POST /hooks/<bot_id>` on
+    `0.0.0.0:8443` by default. Auth: `Authorization:
+    Bearer <token>` against a per-Bot token stored in
+    the new `daemon_tokens` SQLite table. On 202, the
+    daemon creates a fresh conversation, appends the
+    webhook body as a synthetic user message, and
+    fires `run_bot_once` asynchronously. Returns
+    `{ "bot_run_id": "...", "status": "accepted" }`.
+- **ActivityFeed.** New Sidebar section showing the
+  last 5 Bot runs, last 5 Skill runs, and last 5
+  Approvals across **all** Bots. Polls
+  `list_recent_activity` every 10s. Empty state: "No
+  activity yet — the daemon will populate this when
+  it fires." The Mac app sees whatever the daemon
+  wrote on next poll, so the feed is effectively
+  real-time as long as the app is open.
+- **BotEditor Daemon tab.** Shows the per-Bot bearer
+  token (or "(not set)"), a Rotate button, a Copy
+  button (uses `navigator.clipboard.writeText`), and
+  the public webhook URL
+  (`https://<computer_server_host>:8443/hooks/<bot_id>`).
+  New `get_daemon_token` / `rotate_daemon_token`
+  Tauri commands. Token rotation invalidates the old
+  token immediately; inbound webhooks using the old
+  token start returning 401.
+- **Database additions.** New `daemon_tokens` table
+  (bot_id PK, token, created_at, last_used). New
+  `list_recent_bot_runs`, `list_recent_skill_runs`,
+  and `list_recent_approvals` queries (each takes a
+  small `LIMIT` and returns rows across all owners
+  for the ActivityFeed).
+
+### Fixed
+- **Run bot from a separate process.** `run_bot_once`
+  and `run_with_timeout` now accept
+  `Option<AppHandle>`. Existing Tauri-app call sites
+  pass `Some(app)` and behave exactly as before; the
+  daemon passes `None` and the executor skips event
+  emission. The persisted `bot_runs` row is the
+  source of truth either way.
+
+### Changed
+- **Executor's `AppHandle` parameter is now optional.**
+  The 4 `app.emit` calls (`bot://chunk` text delta,
+  `bot://chunk` tool-call delta, `bot://done`,
+  `bot://error`) and the `agents.md` filesystem read
+  are all guarded on `app.is_some()`. Daemon runs
+  skip these and rely on the SQLite row.
+- **Added `axum = "0.7"`** to `src-tauri/Cargo.toml`
+  for the daemon's HTTP server. No other new
+  top-level deps.
+
+### Caveats / Deferred
+- **TLS is v3.0.** v2.8 listens on plain HTTP. The
+  bearer token is the only auth. Reverse-proxy with
+  TLS at the edge (Caddy / nginx) or wait for v3.0.
+- **Mac notifications on daemon-triggered events are
+  v2.8.1.** The daemon is a separate process; an
+  outbound IPC back to the MaxBot app for native
+  notifications needs more design. The ActivityFeed
+  is the v2.8.0 substitute.
+- **VM-side `bots/<id>/daemon.json` token storage is
+  v3.0.** v2.8 reads tokens from the SQLite
+  `daemon_tokens` table. The VM-side JSON is a
+  v3.0 polish for shareable, copyable per-Bot
+  credentials.
+- **Daemon bot runs do not read `agents.md`.** The
+  file lives on the Mac's app data dir, not the
+  server. Daemon runs fall back to `bot.system_prompt`
+  only. Syncing agents.md to the server is out of
+  scope for v2.8.
+
 ## v2.6.2 — 2026-09-09
 
 ### Fixed

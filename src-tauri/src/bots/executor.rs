@@ -92,7 +92,7 @@ pub struct BotRunOutput {
 /// the Bot picks up where it left off in the same conversation —
 /// no new chat tab, no lost history.
 pub async fn run_bot_once(
-    app: AppHandle,
+    app: Option<AppHandle>,
     state: Arc<AppState>,
     bot: Bot,
     cancel: CancellationToken,
@@ -222,7 +222,7 @@ pub async fn run_bot_once(
         Ok(s) => s,
         Err(e) => {
             return fail_run(
-                &app,
+                app.as_ref(),
                 &state,
                 &mut run,
                 format!("settings load failed: {e}"),
@@ -233,7 +233,7 @@ pub async fn run_bot_once(
         Some(k) if !k.is_empty() => k,
         _ => {
             return fail_run(
-                &app,
+                app.as_ref(),
                 &state,
                 &mut run,
                 "set your MiniMax API key in Settings first".to_string(),
@@ -246,7 +246,7 @@ pub async fn run_bot_once(
     let provider: Arc<dyn Provider> = match provider_for_settings(&settings) {
         Ok(p) => p,
         Err(e) => {
-            return fail_run(&app, &state, &mut run, e);
+            return fail_run(app.as_ref(), &state, &mut run, e);
         }
     };
     // Model precedence: bot.default_model > settings.default_model >
@@ -308,15 +308,26 @@ pub async fn run_bot_once(
     //     auto-seeded from the SQLite system_prompt on first run.
     //     Soft-warn on read failure so a transient FS error doesn't
     //     break a bot run.
-    let agents_md_section = match crate::bots::filesystem::bot_dir(&app, &bot.id)
-        .and_then(|dir| crate::bots::filesystem::read_agents_md(&dir, &bot.system_prompt))
+    //
+    //     v2.8.0 — daemon (no Tauri AppHandle) skips this
+    //     step. The agents.md file lives on the Mac's app
+    //     data dir, not the server. The daemon's bot runs
+    //     fall back to `bot.system_prompt` only. If the
+    //     user later wants the daemon to honor agents.md,
+    //     they'll need a synced copy (out of scope for
+    //     v2.8).
+    let agents_md_section = match app
+        .as_ref()
+        .and_then(|a| crate::bots::filesystem::bot_dir(a, &bot.id).ok())
+        .and_then(|dir| crate::bots::filesystem::read_agents_md(&dir, &bot.system_prompt).ok())
     {
-        Ok(s) if s.trim().is_empty() => String::new(),
-        Ok(s) => format!("\n\n# Long-term memory (agents.md)\n\n{}", s),
-        Err(e) => {
+        Some(s) if s.trim().is_empty() => String::new(),
+        Some(s) => format!("\n\n# Long-term memory (agents.md)\n\n{}", s),
+        None => {
             log::warn!(
-                "executor: could not read agents.md for bot {}: {e}",
-                bot.id
+                "executor: could not read agents.md for bot {} (app={} or read failed)",
+                bot.id,
+                app.is_some()
             );
             String::new()
         }
@@ -481,15 +492,23 @@ pub async fn run_bot_once(
                         Ok(StreamChunk::Text { delta }) => {
                             full_text.push_str(&delta);
                             let _ = state.db.append_message_content(&assistant_id, &delta);
-                            let _ = app.emit(
-                                "bot://chunk",
-                                BotChunkEvent {
-                                    bot_id: bot.id.clone(),
-                                    bot_run_id: run_id.clone(),
-                                    conversation_id: conversation_id.clone(),
-                                    chunk: StreamChunk::Text { delta },
-                                },
-                            );
+                            // v2.8.0 — daemon (no AppHandle) skips
+                            // the live chunk event. The bot_runs
+                            // row + the persisted assistant
+                            // message are the durable record;
+                            // the Mac app sees the result via
+                            // ActivityFeed on next open / poll.
+                            if let Some(a) = app.as_ref() {
+                                let _ = a.emit(
+                                    "bot://chunk",
+                                    BotChunkEvent {
+                                        bot_id: bot.id.clone(),
+                                        bot_run_id: run_id.clone(),
+                                        conversation_id: conversation_id.clone(),
+                                        chunk: StreamChunk::Text { delta },
+                                    },
+                                );
+                            }
                         }
                         Ok(StreamChunk::ToolCallDelta { id, name, arguments_delta }) => {
                             let entry = by_id.entry(id.clone()).or_insert_with(|| PersistedToolCall {
@@ -499,15 +518,17 @@ pub async fn run_bot_once(
                             });
                             if let Some(n) = name.clone() { entry.name = n; }
                             if let Some(args) = arguments_delta.clone() { entry.arguments.push_str(&args); }
-                            let _ = app.emit(
-                                "bot://chunk",
-                                BotChunkEvent {
-                                    bot_id: bot.id.clone(),
-                                    bot_run_id: run_id.clone(),
-                                    conversation_id: conversation_id.clone(),
-                                    chunk: StreamChunk::ToolCallDelta { id, name, arguments_delta },
-                                },
-                            );
+                            if let Some(a) = app.as_ref() {
+                                let _ = a.emit(
+                                    "bot://chunk",
+                                    BotChunkEvent {
+                                        bot_id: bot.id.clone(),
+                                        bot_run_id: run_id.clone(),
+                                        conversation_id: conversation_id.clone(),
+                                        chunk: StreamChunk::ToolCallDelta { id, name, arguments_delta },
+                                    },
+                                );
+                            }
                         }
                         Ok(StreamChunk::Done { .. }) => {
                             break;
@@ -652,7 +673,7 @@ pub async fn run_bot_once(
                         ToolContext {
                             consent_granted: true,
                             consent_prompt: None,
-                            app: Some(app.clone()),
+                            app: app.clone(),
                         },
                     )
                     .await
@@ -702,7 +723,7 @@ pub async fn run_bot_once(
             let _ = state.db.upsert_bot_run(&run);
             err
         } else {
-            fail_run(&app, &state, &mut run, err.clone()).result_summary
+            fail_run(app.as_ref(), &state, &mut run, err.clone()).result_summary
         }
     } else {
         // Successful run: write a one-line summary.
@@ -741,16 +762,20 @@ pub async fn run_bot_once(
         let _ = state.db.upsert_schedule(&schedule);
     }
 
-    // Emit the final bot://done event for the UI.
-    let _ = app.emit(
-        "bot://done",
-        BotDoneEvent {
-            bot_id: bot.id.clone(),
-            bot_run_id: run_id.clone(),
-            conversation_id: conversation_id.clone(),
-            result_summary: result_summary.clone(),
-        },
-    );
+    // Emit the final bot://done event for the UI. v2.8.0:
+    // the daemon (no AppHandle) skips this and the bot_runs
+    // row is the source of truth.
+    if let Some(a) = app.as_ref() {
+        let _ = a.emit(
+            "bot://done",
+            BotDoneEvent {
+                bot_id: bot.id.clone(),
+                bot_run_id: run_id.clone(),
+                conversation_id: conversation_id.clone(),
+                result_summary: result_summary.clone(),
+            },
+        );
+    }
 
     BotRunOutput {
         run_id,
@@ -767,7 +792,7 @@ enum ConversationRef {
 }
 
 fn fail_run(
-    app: &AppHandle,
+    app: Option<&AppHandle>,
     state: &AppState,
     run: &mut BotRun,
     message: String,
@@ -776,15 +801,21 @@ fn fail_run(
     run.finished_at = Some(Utc::now());
     run.result_summary = first_line(&message, 200);
     let _ = state.db.upsert_bot_run(run);
-    let _ = app.emit(
-        "bot://error",
-        BotErrorEvent {
-            bot_id: run.bot_id.clone(),
-            bot_run_id: run.id.clone(),
-            conversation_id: run.conversation_id.clone(),
-            message: message.clone(),
-        },
-    );
+    // v2.8.0 — daemon runs (no AppHandle) skip the
+    // Tauri event emit. The bot_runs row is the
+    // source of truth; the Mac app sees it via the
+    // ActivityFeed on next open / poll.
+    if let Some(a) = app {
+        let _ = a.emit(
+            "bot://error",
+            BotErrorEvent {
+                bot_id: run.bot_id.clone(),
+                bot_run_id: run.id.clone(),
+                conversation_id: run.conversation_id.clone(),
+                message: message.clone(),
+            },
+        );
+    }
     BotRunOutput {
         run_id: run.id.clone(),
         conversation_id: run.conversation_id.clone(),
@@ -1004,7 +1035,7 @@ async fn auto_write_history(
 /// iteration; increase for longer models or heavier tool use.
 #[allow(dead_code)]
 pub async fn run_with_timeout(
-    app: AppHandle,
+    app: Option<AppHandle>,
     state: Arc<AppState>,
     bot_id: String,
     timeout_secs: u64,

@@ -5,7 +5,10 @@ import {
   approvalRuleSet,
   computerGet,
   computerProvision,
+  getDaemonToken,
+  getSettings,
   revealBotFolder,
+  rotateDaemonToken,
 } from "../lib/tauri";
 
 interface BotEditorProps {
@@ -226,6 +229,39 @@ export function BotEditor({
       cancelled = true;
     };
   }, [bot.id, initial.id]);
+
+  // v2.8.0 — Daemon: load the per-Bot bearer token
+  // (or `null` for "(not set)") and the Settings
+  // (for the webhook URL's host). Both are async; we
+  // only fetch once per Bot (the token doesn't change
+  // unless the user clicks Rotate).
+  const [daemonToken, setDaemonToken] = useState<string | null>(null);
+  const [daemonServerHost, setDaemonServerHost] = useState<string>("");
+  useEffect(() => {
+    let cancelled = false;
+    if (isNew) {
+      // New bots have no token yet.
+      setDaemonToken(null);
+      return;
+    }
+    getDaemonToken(bot.id)
+      .then((tok) => {
+        if (!cancelled) setDaemonToken(tok);
+      })
+      .catch(() => {
+        if (!cancelled) setDaemonToken(null);
+      });
+    getSettings()
+      .then((s) => {
+        if (!cancelled) setDaemonServerHost(s.computer_server_host || "");
+      })
+      .catch(() => {
+        /* non-fatal — the URL just shows "<host>:8443/..." */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [bot.id, isNew]);
 
   // Esc closes
   useEffect(() => {
@@ -819,6 +855,80 @@ export function BotEditor({
               </div>
             )}
           </section>
+
+          {/* v2.8.0 — Always-on Daemon. The BotEditor
+              surfaces the per-Bot bearer token and the
+              public webhook URL. New bots have no
+              token until the user clicks "Generate".
+              Plain HTTP in v2.8 (TLS is v3.0); the
+              bearer token is the only auth. */}
+          {!isNew && (
+            <section className="form-section" data-testid="bot-editor-daemon">
+              <h3>Daemon</h3>
+              <div className="form-row">
+                <label>Webhook URL</label>
+                <input
+                  type="text"
+                  readOnly
+                  data-testid="daemon-webhook-url"
+                  value={
+                    daemonServerHost
+                      ? `https://${daemonServerHost}:8443/hooks/${bot.id}`
+                      : `<set computer_server_host in Settings>:8443/hooks/${bot.id}`
+                  }
+                  style={{ fontFamily: "var(--font-mono)", width: "100%" }}
+                  onFocus={(e) => e.currentTarget.select()}
+                />
+                <div className="muted small">
+                  POST a JSON body to this URL with header{" "}
+                  <code>Authorization: Bearer &lt;token&gt;</code>. v2.8
+                  is plain HTTP; TLS is v3.0.
+                </div>
+              </div>
+              <div className="form-row">
+                <label>Bearer token</label>
+                <div
+                  className="daemon-token-row"
+                  data-testid="daemon-token-row"
+                >
+                  <input
+                    type="text"
+                    readOnly
+                    data-testid="daemon-token-value"
+                    value={daemonToken ?? "(not set)"}
+                    style={{ fontFamily: "var(--font-mono)", flex: 1 }}
+                    onFocus={(e) => e.currentTarget.select()}
+                  />
+                  <button
+                    type="button"
+                    data-testid="daemon-token-rotate"
+                    onClick={async () => {
+                      const tok = await rotateDaemonToken(bot.id);
+                      setDaemonToken(tok);
+                    }}
+                  >
+                    {daemonToken ? "Rotate" : "Generate"}
+                  </button>
+                  <button
+                    type="button"
+                    data-testid="daemon-token-copy"
+                    disabled={!daemonToken}
+                    onClick={() => {
+                      if (daemonToken) {
+                        navigator.clipboard.writeText(daemonToken);
+                      }
+                    }}
+                  >
+                    Copy
+                  </button>
+                </div>
+                <div className="muted small">
+                  Rotate invalidates the old token immediately. Anything
+                  still using the old token will start receiving 401s.
+                </div>
+              </div>
+            </section>
+          )}
         </div>
 
         <footer className="modal-footer">

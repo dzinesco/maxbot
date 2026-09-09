@@ -249,6 +249,12 @@ pub fn run() {
             commands::approvals::approval_rule_list,
             commands::approvals::approval_rule_set,
             commands::approvals::approval_decide,
+            // v2.8.0 — Always-on Daemon (24/7). ActivityFeed
+            // data for the Sidebar + the per-Bot daemon
+            // token (read / rotate) for the BotEditor.
+            commands::daemon::list_recent_activity,
+            commands::daemon::get_daemon_token,
+            commands::daemon::rotate_daemon_token,
         ])
         .run(tauri::generate_context!())
         .expect("error while running MaxBot");

@@ -1,6 +1,6 @@
 [package]
 name = "maxbot"
-version = "2.6.3"
+version = "2.8.0"
 description = "MaxBot — a MiniMax-powered desktop chat, tool, and Computer Use client."
 authors = ["Tyler Martinez"]
 edition = "2021"
@@ -9,6 +9,19 @@ rust-version = "1.75"
 [lib]
 name = "maxbot_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
+
+# v2.8.0 — Always-on Daemon (24/7). `maxbotd` is the
+# headless server-side binary that runs on the user's
+# Linux server (`crispy`). It shares the same source tree
+# (this Cargo.toml) and the same `maxbot_lib` lib
+# crate as the Tauri app — same Database, same executor,
+# same scheduler logic. The Tauri `maxbot` app is built
+# implicitly from `src/main.rs` (or `src/lib.rs`); the
+# daemon is wired through the standard cargo `[[bin]]`
+# mechanism.
+[[bin]]
+name = "maxbotd"
+path = "src/bin/maxbotd.rs"
 
 [build-dependencies]
 tauri-build = { version = "2.0", features = [] }
@@ -58,6 +71,13 @@ argon2 = "0.5"
 chacha20poly1305 = "0.10"
 rand = "0.8"
 zeroize = "1"
+
+# v2.8.0 — Always-on Daemon (24/7). `axum` powers the
+# `maxbotd` binary's tiny HTTP server: a single
+# `POST /hooks/<bot_id>` route with bearer-token auth.
+# Plain HTTP only in v2.8 (TLS is a v3.0 polish); the
+# bearer token is the only auth.
+axum = "0.7"
 
 [features]
 default = ["custom-protocol"]

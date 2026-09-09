@@ -33,10 +33,47 @@ vi.mock("../lib/tauri", () => ({
   // editor falls through to `auto` for every tool.
   approvalRuleList: vi.fn(() => Promise.resolve([])),
   approvalRuleSet: vi.fn(() => Promise.resolve()),
+  // v2.8.0 — Daemon: per-Bot bearer token + webhook
+  // URL. Default mocks return `null` (no token yet)
+  // and a placeholder settings blob.
+  getDaemonToken: vi.fn(() => Promise.resolve(null)),
+  rotateDaemonToken: vi.fn(() => Promise.resolve("rotated-token-abcdef")),
+  getSettings: vi.fn(() =>
+    Promise.resolve({
+      provider_kind: "minimax",
+      minimax_api_key: null,
+      openai_api_key: null,
+      anthropic_api_key: null,
+      xai_api_key: null,
+      default_model: "MiniMax-M3",
+      minimax_base_url: "",
+      openai_base_url: "",
+      anthropic_base_url: "",
+      xai_base_url: "",
+      minimax_model: "",
+      openai_model: "",
+      anthropic_model: "",
+      xai_model: "",
+      computer_server_host: "crispy.local",
+      computer_user: "tyler",
+      computer_ssh_port: 22,
+      computer_passphrase: "",
+      libvirt_uri: "",
+      tts_voice: "",
+      grok_build_binary: "",
+      grok_build_model: "",
+      grok_cwd: "",
+    }),
+  ),
 }));
 
 import { BotEditor } from "./BotEditor";
-import { approvalRuleSet, computerProvision } from "../lib/tauri";
+import {
+  approvalRuleSet,
+  computerProvision,
+  getDaemonToken,
+  rotateDaemonToken,
+} from "../lib/tauri";
 import type { Bot, BotSchedule, ToolSummary } from "../lib/api";
 
 const noTools: ToolSummary[] = [];
@@ -296,6 +333,120 @@ describe("BotEditor — Rules section (v2.6.0)", () => {
         "file_write",
         "deny",
       );
+    });
+  });
+});
+
+// v2.8.0 — Always-on Daemon: BotEditor surfaces the
+// per-Bot bearer token and the public webhook URL.
+// The Daemon section is hidden for new bots (no id
+// yet) and shown for existing bots.
+
+describe("BotEditor — Daemon section (v2.8.0)", () => {
+  beforeEach(() => {
+    vi.mocked(getDaemonToken).mockReset();
+    vi.mocked(rotateDaemonToken).mockReset();
+    vi.mocked(getDaemonToken).mockResolvedValue(null);
+    vi.mocked(rotateDaemonToken).mockResolvedValue("rotated-token-xyz");
+  });
+
+  it("hides the Daemon section for new bots (no id yet)", () => {
+    const onSave = vi.fn((bot: Bot) => Promise.resolve({ ...bot, id: "new-id" }));
+    renderEditor(onSave, blankBot({ id: "" }));
+    expect(screen.queryByTestId("bot-editor-daemon")).toBeNull();
+  });
+
+  it("shows '(not set)' when the bot has no daemon token yet", async () => {
+    vi.mocked(getDaemonToken).mockResolvedValue(null);
+    const onSave = vi.fn((bot: Bot) => Promise.resolve({ ...bot, id: "bot-d-1" }));
+    render(
+      <BotEditor
+        initial={blankBot({ id: "bot-d-1" })}
+        schedule={noSchedule}
+        availableTools={noTools}
+        isNew={false}
+        onClose={() => {}}
+        onSave={onSave}
+      />,
+    );
+    await waitFor(() => {
+      expect(screen.getByTestId("bot-editor-daemon")).toBeTruthy();
+    });
+    const tokenInput = screen.getByTestId("daemon-token-value") as HTMLInputElement;
+    expect(tokenInput.value).toBe("(not set)");
+  });
+
+  it("shows the current token when one is configured", async () => {
+    vi.mocked(getDaemonToken).mockResolvedValue("tok-1234-abcdef");
+    const onSave = vi.fn((bot: Bot) => Promise.resolve({ ...bot, id: "bot-d-2" }));
+    render(
+      <BotEditor
+        initial={blankBot({ id: "bot-d-2" })}
+        schedule={noSchedule}
+        availableTools={noTools}
+        isNew={false}
+        onClose={() => {}}
+        onSave={onSave}
+      />,
+    );
+    await waitFor(() => {
+      const tokenInput = screen.getByTestId("daemon-token-value") as HTMLInputElement;
+      expect(tokenInput.value).toBe("tok-1234-abcdef");
+    });
+  });
+
+  it("clicking Rotate calls rotateDaemonToken and shows the new token", async () => {
+    vi.mocked(getDaemonToken).mockResolvedValue("old-token-aaaa");
+    vi.mocked(rotateDaemonToken).mockResolvedValue("fresh-token-bbbb");
+    const onSave = vi.fn((bot: Bot) => Promise.resolve({ ...bot, id: "bot-d-3" }));
+    render(
+      <BotEditor
+        initial={blankBot({ id: "bot-d-3" })}
+        schedule={noSchedule}
+        availableTools={noTools}
+        isNew={false}
+        onClose={() => {}}
+        onSave={onSave}
+      />,
+    );
+    fireEvent.click(screen.getByTestId("daemon-token-rotate"));
+    await waitFor(() => {
+      expect(rotateDaemonToken).toHaveBeenCalledWith("bot-d-3");
+    });
+    await waitFor(() => {
+      const tokenInput = screen.getByTestId("daemon-token-value") as HTMLInputElement;
+      expect(tokenInput.value).toBe("fresh-token-bbbb");
+    });
+  });
+
+  it("clicking Copy writes the current token to the clipboard", async () => {
+    vi.mocked(getDaemonToken).mockResolvedValue("clipboard-tok-7777");
+    // jsdom doesn't ship a real clipboard, so we
+    // stub `navigator.clipboard.writeText` with a
+    // spy and assert on it.
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      value: { writeText },
+      configurable: true,
+    });
+    const onSave = vi.fn((bot: Bot) => Promise.resolve({ ...bot, id: "bot-d-4" }));
+    render(
+      <BotEditor
+        initial={blankBot({ id: "bot-d-4" })}
+        schedule={noSchedule}
+        availableTools={noTools}
+        isNew={false}
+        onClose={() => {}}
+        onSave={onSave}
+      />,
+    );
+    await waitFor(() => {
+      const tokenInput = screen.getByTestId("daemon-token-value") as HTMLInputElement;
+      expect(tokenInput.value).toBe("clipboard-tok-7777");
+    });
+    fireEvent.click(screen.getByTestId("daemon-token-copy"));
+    await waitFor(() => {
+      expect(writeText).toHaveBeenCalledWith("clipboard-tok-7777");
     });
   });
 });

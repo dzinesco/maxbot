@@ -35,6 +35,7 @@ import type {
   GroupChat,
 } from "../lib/api";
 import { approvalPendingCount, computerGet, groupList } from "../lib/tauri";
+import { ActivityFeed } from "./ActivityFeed";
 
 // Version pulled from package.json at build time so the sidebar
 // pill always matches the running app. The `data-version-channel`
@@ -296,6 +297,13 @@ export function Sidebar({
       <ApprovalsSection />
 
       {botPanel}
+
+      {/* v2.8.0 — Always-on Daemon: read-only feed of
+          recent Bot runs / Skill runs / Approvals. Sits
+          between the Bot list and the Approvals badge
+          so the user sees "what fired while I was
+          away" without opening a separate view. */}
+      <ActivityFeed />
 
       <div className="sidebar-footer">
         <div

@@ -275,7 +275,7 @@ pub async fn run_group_turn(
         .map_err(|e| GroupError::Db(e.to_string()).to_string())?;
     // 8. Run the bot.
     let output = run_bot_once(
-        app.clone(),
+        Some(app.clone()),
         state.clone(),
         bot.clone(),
         CancellationToken::new(),

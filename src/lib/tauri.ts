@@ -5,6 +5,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
+  ActivityFeed,
   Bot,
   BotChunkEvent,
   BotDoneEvent,
@@ -794,4 +795,30 @@ export async function approvalDecide(
     decision,
     editedArgs: editedArgs ?? null,
   });
+}
+
+// ---- v2.8.0 — Always-on Daemon (24/7) ----
+
+/** Fetch the per-Bot bearer token used by the
+ *  `maxbotd` HTTP server. `null` means the user
+ *  hasn't generated one yet — the BotEditor surfaces
+ *  this as "(not set)" and a Generate button. */
+export async function getDaemonToken(botId: string): Promise<string | null> {
+  return invoke<string | null>("get_daemon_token", { botId });
+}
+
+/** Generate (or rotate) a fresh per-Bot bearer token,
+ *  write it to `daemon_tokens`, and return the new
+ *  value for the UI to display + put on the
+ *  clipboard. The old token is invalidated
+ *  immediately. */
+export async function rotateDaemonToken(botId: string): Promise<string> {
+  return invoke<string>("rotate_daemon_token", { botId });
+}
+
+/** Return the three-section activity bundle for the
+ *  Sidebar's ActivityFeed. Cheap: three small
+ *  `LIMIT 5` queries against the same SQLite file. */
+export async function listRecentActivity(): Promise<ActivityFeed> {
+  return invoke<ActivityFeed>("list_recent_activity");
 }
