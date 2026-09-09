@@ -91,6 +91,7 @@ pub fn run() {
             commands::conversations::delete_conversation,
             commands::conversations::rename_conversation,
             commands::conversations::get_messages,
+            commands::conversations::search_messages,
             commands::chat::send_message,
             commands::chat::stop_message,
             commands::bots::list_bots,

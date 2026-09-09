@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { Bot, Conversation } from "../lib/api";
 
 interface SidebarProps {
@@ -14,6 +14,14 @@ interface SidebarProps {
   /** Slot for the BotsPanel component (rendered between conversation
    *  list and the footer). */
   botPanel?: ReactNode;
+  searchQuery: string;
+  onSearchChange: (q: string) => void;
+  /** When set, the sidebar shows a one-line snippet per matching
+   *  conversation. Map keys are conversation IDs. */
+  searchView: Record<
+    string,
+    { count: number; firstSnippet: string; mostRecentAt: string }
+  > | null;
 }
 
 export function Sidebar({
@@ -27,10 +35,31 @@ export function Sidebar({
   onOpenSettings,
   status,
   botPanel,
+  searchQuery,
+  onSearchChange,
+  searchView,
 }: SidebarProps) {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
+  const searchRef = useRef<HTMLInputElement>(null);
   const botsById = new Map(bots.map((b) => [b.id, b]));
+  const searching = searchView !== null;
+
+  // Cmd/Ctrl+F focuses the search box, just like every other chat
+  // app. Escape clears it.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === "f") {
+        e.preventDefault();
+        searchRef.current?.focus();
+        searchRef.current?.select();
+      } else if (e.key === "Escape" && document.activeElement === searchRef.current) {
+        onSearchChange("");
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onSearchChange]);
 
   return (
     <aside className="sidebar">
@@ -43,6 +72,24 @@ export function Sidebar({
           + New chat
         </button>
       </div>
+      <div className="sidebar-search">
+        <input
+          ref={searchRef}
+          type="text"
+          value={searchQuery}
+          onChange={(e) => onSearchChange(e.target.value)}
+          placeholder="Search messages…  ⌘F"
+        />
+        {searching && (
+          <button
+            className="ghost small"
+            onClick={() => onSearchChange("")}
+            title="Clear search (Esc)"
+          >
+            ✕
+          </button>
+        )}
+      </div>
       <div className="conversation-list">
         {conversations.length === 0 && (
           <div
@@ -52,11 +99,14 @@ export function Sidebar({
               padding: "12px 10px",
             }}
           >
-            No conversations yet.
+            {searching
+              ? `No matches for "${searchQuery}".`
+              : "No conversations yet."}
           </div>
         )}
         {conversations.map((c) => {
           const bot = c.bot_id ? botsById.get(c.bot_id) : undefined;
+          const view = searchView?.[c.id];
           return (
             <div
               key={c.id}
@@ -66,6 +116,7 @@ export function Sidebar({
                 onSelect(c.id);
               }}
               onDoubleClick={() => {
+                if (searching) return;
                 setEditingId(c.id);
                 setDraft(c.title);
               }}
@@ -101,7 +152,19 @@ export function Sidebar({
                   onClick={(e) => e.stopPropagation()}
                 />
               ) : (
-                <span className="title">{c.title}</span>
+                <div className="conversation-text">
+                  <span className="title">{c.title}</span>
+                  {view && (
+                    <>
+                      <span className="conv-snippet">
+                        {view.firstSnippet}
+                      </span>
+                      <span className="conv-match-count">
+                        {view.count} match{view.count === 1 ? "" : "es"}
+                      </span>
+                    </>
+                  )}
+                </div>
               )}
               <span
                 className="actions"

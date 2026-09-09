@@ -14,6 +14,7 @@ import {
   getBot,
   getBotSchedule,
   getMessages,
+  searchMessages,
   getSettings,
   listAllSchedules,
   listAvailableTools,
@@ -69,6 +70,8 @@ export default function App() {
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchResults, setSearchResults] = useState<Message[]>([]);
   const [settings, setSettings] = useState<SettingsT>(DEFAULT_SETTINGS);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [streamingId, setStreamingId] = useState<string | null>(null);
@@ -107,6 +110,29 @@ export default function App() {
     summary: string;
   } | null>(null);
   const requestSeq = useRef(0);
+
+  // --- search (debounced) ---
+  // When searchQuery is non-empty, kick off a `search_messages` call
+  // 250ms after the last keystroke. We store the raw matching
+  // messages and let the Sidebar render a snippet per matching
+  // conversation. Empty query clears the result set.
+  useEffect(() => {
+    const q = searchQuery.trim();
+    if (!q) {
+      setSearchResults([]);
+      return;
+    }
+    const handle = setTimeout(async () => {
+      try {
+        const results = await searchMessages(q, 100);
+        setSearchResults(results);
+      } catch (e) {
+        console.error("search failed:", e);
+        setSearchResults([]);
+      }
+    }, 250);
+    return () => clearTimeout(handle);
+  }, [searchQuery]);
 
   // --- bootstrap ---
   useEffect(() => {
@@ -594,6 +620,56 @@ export default function App() {
     if (!activeConversation?.bot_id) return null;
     return bots.find((b) => b.id === activeConversation.bot_id) ?? null;
   }, [activeConversation, bots]);
+
+  // When search is active, group the matching messages by
+  // conversation_id and pick the most recent snippet per
+  // conversation. The Sidebar renders one row per conversation with
+  // the snippet inline.
+  const searchView = useMemo(() => {
+    const q = searchQuery.trim();
+    if (!q) return null;
+    const byConv = new Map<
+      string,
+      { count: number; firstSnippet: string; mostRecentAt: string }
+    >();
+    for (const m of searchResults) {
+      const existing = byConv.get(m.conversation_id);
+      // Truncate the matching message to a short snippet, anchoring
+      // around the first occurrence of the query.
+      const lower = m.content.toLowerCase();
+      const idx = lower.indexOf(q.toLowerCase());
+      const snippet = makeSnippet(m.content, idx, q.length, 100);
+      if (!existing) {
+        byConv.set(m.conversation_id, {
+          count: 1,
+          firstSnippet: snippet,
+          mostRecentAt: m.created_at,
+        });
+      } else {
+        existing.count += 1;
+        if (m.created_at > existing.mostRecentAt) {
+          existing.mostRecentAt = m.created_at;
+          existing.firstSnippet = snippet;
+        }
+      }
+    }
+    return byConv;
+  }, [searchQuery, searchResults]);
+
+  // The list of conversations to render in the sidebar. When
+  // searching, this is the subset that has at least one match,
+  // ordered by most recent match.
+  const visibleConversations = useMemo(() => {
+    if (!searchView) return conversations;
+    return conversations
+      .filter((c) => searchView.has(c.id))
+      .sort(
+        (a, b) =>
+          searchView.get(b.id)!.mostRecentAt.localeCompare(
+            searchView.get(a.id)!.mostRecentAt,
+          ),
+      );
+  }, [conversations, searchView]);
   const inboxMessagesForModal = useMemo<BotMessage[]>(() => [], []);
 
   // Editor draft drives the modal: when the user clicks New/Edit, we
@@ -643,7 +719,7 @@ export default function App() {
   return (
     <div className="app">
       <Sidebar
-        conversations={conversations}
+        conversations={visibleConversations}
         activeId={activeId}
         bots={bots}
         onSelect={setActiveId}
@@ -651,6 +727,15 @@ export default function App() {
         onDelete={handleDeleteConversation}
         onRename={handleRenameConversation}
         onOpenSettings={() => setSettingsOpen(true)}
+        searchQuery={searchQuery}
+        onSearchChange={setSearchQuery}
+        searchView={
+          searchView
+            ? Object.fromEntries(
+                Array.from(searchView.entries()).map(([id, v]) => [id, v]),
+              )
+            : null
+        }
         status={status}
         botPanel={
           <BotsPanel
@@ -789,6 +874,35 @@ function upsertBotStreamMessage(
   const next = prev.slice();
   next[idx] = { ...next[idx], content: text, tool_calls: tcs };
   return next;
+}
+
+/**
+ * Build a snippet around a query match. `idx` is the (case-folded)
+ * index of the query in the content; if idx is -1 the snippet
+ * starts at the top of the message. The snippet is at most `maxLen`
+ * characters and includes a leading "…" when truncated on the left.
+ */
+function makeSnippet(
+  content: string,
+  idx: number,
+  queryLen: number,
+  maxLen: number,
+): string {
+  if (content.length <= maxLen) return content;
+  // Whitespace-collapse newlines so snippets read cleanly in the
+  // sidebar.
+  const collapsed = content.replace(/\s+/g, " ");
+  if (idx < 0) {
+    return collapsed.slice(0, maxLen) + "…";
+  }
+  // Center the snippet around the match.
+  const half = Math.floor((maxLen - queryLen) / 2);
+  const start = Math.max(0, idx - half);
+  const end = Math.min(collapsed.length, start + maxLen);
+  const actualStart = Math.max(0, end - maxLen);
+  const prefix = actualStart > 0 ? "…" : "";
+  const suffix = end < collapsed.length ? "…" : "";
+  return prefix + collapsed.slice(actualStart, end) + suffix;
 }
 
 /** Modal wrapper that fetches and renders the bot's full inbox. */

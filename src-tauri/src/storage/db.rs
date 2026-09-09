@@ -326,6 +326,58 @@ impl Database {
         Ok(out)
     }
 
+    /// Full-text-ish search across all messages. Uses SQL `LIKE` (case
+    /// insensitive) so it works without a separate FTS5 virtual table.
+    /// Returns one row per matching message, newest first. The caller
+    /// is expected to group by `conversation_id` and pick a snippet.
+    /// Empty query returns no rows.
+    pub fn search_messages(
+        &self,
+        query: &str,
+        limit: u32,
+    ) -> rusqlite::Result<Vec<Message>> {
+        let q = query.trim();
+        if q.is_empty() {
+            return Ok(Vec::new());
+        }
+        // Wrap in % for substring match. SQL injection: we use a
+        // parameterized query, so the user's query is treated as a
+        // literal value. We escape LIKE wildcards in the user input
+        // so a search for "100%" doesn't match everything.
+        let escaped = q
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_");
+        let pattern = format!("%{}%", escaped);
+        let conn = self.conn.lock().expect("db lock poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT id, conversation_id, role, content, tool_calls_json, created_at
+             FROM messages
+             WHERE content LIKE ? ESCAPE '\\'
+             ORDER BY created_at DESC
+             LIMIT ?",
+        )?;
+        let rows = stmt.query_map(params![pattern, limit as i64], |row| {
+            let role_str: String = row.get(2)?;
+            let tool_calls_json: String = row.get(4)?;
+            let tool_calls: Vec<PersistedToolCall> =
+                serde_json::from_str(&tool_calls_json).unwrap_or_default();
+            Ok(Message {
+                id: row.get(0)?,
+                conversation_id: row.get(1)?,
+                role: MessageRole::parse(&role_str).unwrap_or(MessageRole::User),
+                content: row.get(3)?,
+                tool_calls,
+                created_at: parse_dt(row.get::<_, String>(5)?),
+            })
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
     pub fn insert_message(
         &self,
         conversation_id: &str,

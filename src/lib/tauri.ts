@@ -52,6 +52,16 @@ export async function getMessages(conversationId: string): Promise<Message[]> {
   return invoke<Message[]>("get_messages", { conversationId });
 }
 
+export async function searchMessages(
+  query: string,
+  limit?: number,
+): Promise<Message[]> {
+  return invoke<Message[]>("search_messages", {
+    query,
+    limit: limit ?? null,
+  });
+}
+
 export async function getSettings(): Promise<Settings> {
   return invoke<Settings>("get_settings");
 }

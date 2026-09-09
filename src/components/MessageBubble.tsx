@@ -1,3 +1,4 @@
+import { useState } from "react";
 import type { Message, PersistedToolCall } from "../lib/api";
 
 interface MessageBubbleProps {
@@ -95,6 +96,32 @@ function ToolCalls({ calls }: { calls: PersistedToolCall[] }) {
 export function MessageBubble({ message, streaming }: MessageBubbleProps) {
   const isUser = message.role === "user";
   const isTool = message.role === "tool";
+  const [copied, setCopied] = useState(false);
+  const handleCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(message.content);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1200);
+    } catch {
+      // Clipboard API can fail in iframes / non-secure contexts;
+      // fall back to a hidden textarea + execCommand.
+      const ta = document.createElement("textarea");
+      ta.value = message.content;
+      ta.style.position = "fixed";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.select();
+      try {
+        document.execCommand("copy");
+        setCopied(true);
+        setTimeout(() => setCopied(false), 1200);
+      } catch {
+        // give up silently
+      } finally {
+        document.body.removeChild(ta);
+      }
+    }
+  };
   return (
     <div
       className={`message ${message.role}${streaming ? " streaming" : ""}`}
@@ -105,6 +132,15 @@ export function MessageBubble({ message, streaming }: MessageBubbleProps) {
       <div className="body">
         <div className="meta">
           {isUser ? "You" : isTool ? "Tool" : "MaxBot"}
+          {!streaming && message.content && (
+            <button
+              className="copy-btn"
+              onClick={handleCopy}
+              title="Copy message text"
+            >
+              {copied ? "Copied" : "Copy"}
+            </button>
+          )}
         </div>
         <div className="content">{renderMarkdown(message.content)}</div>
         <ToolCalls calls={message.tool_calls} />

@@ -1161,6 +1161,93 @@ button.link:hover {
   font-family: var(--font-mono);
 }
 
+/* ---------- Search bar in sidebar ---------- */
+
+.sidebar-search {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 8px 4px;
+  border-bottom: 1px solid var(--border);
+}
+
+.sidebar-search input {
+  flex: 1;
+  font-family: inherit;
+  font-size: 12px;
+  padding: 4px 8px;
+  background: var(--bg-2);
+  color: var(--text-0);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.sidebar-search input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.conversation-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.conversation-text .title {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.conv-snippet {
+  font-size: 11px;
+  color: var(--text-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-style: italic;
+}
+
+.conv-match-count {
+  font-size: 9.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  color: var(--text-3);
+  font-weight: 600;
+  align-self: flex-start;
+}
+
+/* ---------- Copy button on messages ---------- */
+
+.copy-btn {
+  margin-left: 8px;
+  background: transparent;
+  color: var(--text-3);
+  border: 1px solid transparent;
+  border-radius: 3px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  font-weight: 600;
+  padding: 1px 6px;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 80ms ease;
+}
+
+.message:hover .copy-btn,
+.message .copy-btn:focus {
+  opacity: 1;
+}
+
+.copy-btn:hover {
+  background: var(--bg-3);
+  color: var(--text-1);
+  border-color: var(--border);
+}
+
 /* ---------- Computer Use settings list ---------- */
 
 .cu-app-list {

@@ -66,6 +66,22 @@ pub async fn get_messages(
         .map_err(|e| e.to_string())?
 }
 
+#[tauri::command]
+pub async fn search_messages(
+    state: State<'_, AppState>,
+    query: String,
+    limit: Option<u32>,
+) -> Result<Vec<Message>, String> {
+    let db = state.db.clone();
+    let q = query;
+    let lim = limit.unwrap_or(100);
+    tokio::task::spawn_blocking(move || {
+        db.search_messages(&q, lim).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 // `MessageRole` and `PersistedToolCall` are re-exported in case future
 // commands need them. They are kept in this file to colocate all
 // conversation-related commands.
