@@ -724,6 +724,16 @@ function FullComputerPanel({
   }
 
   if (!computer) {
+    // v3.7.5: previously this branch told the user "go to
+    // the Bot editor" — but the Bot editor doesn't have a
+    // Provision button either, so users destroyed a VM and
+    // then had to make a new Bot to get a working VM back.
+    // Real fix: put a Provision button right here. Same
+    // code path as the "VM not provisioned" branch
+    // (`handleProvision` -> `computerProvision`), just
+    // from a different starting state. Settings carry the
+    // disk/RAM defaults so the user doesn't have to
+    // re-enter them.
     return (
       <div className={wrapClass} data-mode={mode} data-testid="computer-panel">
         <ComputerToolbar
@@ -739,8 +749,48 @@ function FullComputerPanel({
         <div className="computer-panel__body computer-panel__body--empty">
           <div className="computer-panel__empty-title">No computer</div>
           <div className="computer-panel__empty-detail">
-            This Bot doesn't have a VM yet. Create one in the Bot editor
-            ("Provision a computer") to give it a Linux desktop of its own.
+            {domainNotFound ? (
+              <>
+                The libvirt domain
+                {domainNotFound ? ` "${domainNotFound}"` : ""} is missing
+                on the host. Click Provision to create a fresh VM, or
+                Destroy + re-provision to start over.
+              </>
+            ) : (
+              <>
+                This Bot doesn't have a VM right now — either it was
+                never provisioned, or you just clicked Destroy. Click
+                Provision to spin up a new VM and keep this Bot's
+                identity, conversations, and memory.
+              </>
+            )}
+          </div>
+          <div
+            className="computer-panel__actions"
+            style={{
+              display: "flex",
+              gap: 8,
+              marginTop: 12,
+            }}
+          >
+            <button
+              type="button"
+              className="computer-panel__primary"
+              onClick={handleProvision}
+              disabled={actionPending}
+              data-testid="computer-empty-provision"
+            >
+              {actionPending ? "Provisioning…" : "Provision"}
+            </button>
+            <button
+              type="button"
+              className="computer-panel__secondary"
+              onClick={handleDestroyAndReprovision}
+              disabled={actionPending}
+              data-testid="computer-empty-destroy-reprovision"
+            >
+              {actionPending ? "Working…" : "Destroy + re-provision"}
+            </button>
           </div>
         </div>
       </div>
