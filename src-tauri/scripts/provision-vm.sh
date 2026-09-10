@@ -292,16 +292,41 @@ virt-install \
   --noreboot \
   --noautoconsole
 
-# 4a. Patch the domain XML to inject `<qemu:commandline>` with
-#     `-vnc 127.0.0.1:0,password=off,to=5999`. Uses Python (always
-#     present on Ubuntu) for the multi-line regex; the previous
-#     sed-only approach didn't handle the namespace declaration
-#     cleanly. The new XML is fed to `virsh define /dev/stdin` so
-#     the persistent config carries the new auth.
+# 4a. Patch the domain XML to add a `<video>` element (so the
+#     VM has a virtual VGA that `virsh screenshot` can poll)
+#     AND a `<qemu:commandline>` block with
+#     `-vnc 127.0.0.1:0,password=off,to=5999` (so the VNC
+#     server is no-auth).
+#
+#     The `<video>` element is required because `--graphics none`
+#     tells libvirt not to add any display device. Without an
+#     explicit `<video>`, `virsh screenshot` fails with
+#     "no screens to take screenshot from" (verified 2026-09-10
+#     on maxbot-bot-f0e7f365). The `<video>` element goes
+#     through libvirt's schema and gets the right PCI slot; using
+#     qemu:commandline's `-vga std` instead collides with
+#     libvirt's pcie-root-port slot allocation
+#     ("PCI: slot 1 function 0 not available for pcie-root-port,
+#     in use by VGA").
+#
+#     The VNC server stays via qemu:commandline because libvirt
+#     11.6 doesn't accept `auth` as a `<graphics>` attribute
+#     (only `vnc` and `sasl` are valid) and QEMU 9.x rejects
+#     `auth=none` on the `-vnc` option. The working path is
+#     `password=off` via qemu:commandline, on a port the app
+#     knows via the `poll_for_vnc_port` Rust fallback (5900
+#     for the first VM; multi-VM port allocation is a future
+#     enhancement noted in the Rust code).
+#
+#     Uses Python (always present on Ubuntu) for the multi-line
+#     regex; sed can't handle the namespace + the <video>
+#     injection cleanly.
 virsh dumpxml "$VM_NAME" | python3 -c "
 import re, sys
 x = sys.stdin.read()
 x = re.sub(r'<qemu:commandline>.*?</qemu:commandline>', '', x, flags=re.DOTALL)
+x = re.sub(r'<video>.*?</video>', '', x, flags=re.DOTALL)
+x = re.sub(r'<video[^/]*/>', '', x)
 x = re.sub(r\"\"\"\\sxmlns:qemu=['\\\"][^'\\\"]+['\\\"]\"\"\", '', x)
 if 'xmlns:qemu' not in x:
     x = x.replace(
@@ -309,6 +334,10 @@ if 'xmlns:qemu' not in x:
         \"<domain xmlns:qemu='http://libvirt.org/schemas/domain/qemu/1.0' type=\",
         1,
     )
+# Add <video><model type='vga'/></video> right before the closing
+# </devices> tag, so libvirt allocates a PCI slot for the VGA
+# without colliding with the pcie-root-port it allocated.
+x = x.replace('</devices>', \"<video><model type='vga'/></video></devices>\", 1)
 qemu_block = (
     '<qemu:commandline>'
     \"<qemu:arg value='-vnc'/>\"
