@@ -202,30 +202,46 @@ prompt.*
 
 ## Computer Panel
 
+> **Note (v3.7.4):** the screenshots below are pre-v3.7.2 — the
+> Computer Panel no longer renders a noVNC viewer. The v3.7.2
+> display rework replaced the in-webview RFB stream with a
+> host-side QEMU framebuffer poll (Preview) and macOS Screen
+> Sharing via SSH tunnel (Takeover). See
+> `docs/first-bot-20-minutes.md` (landed in v3.7.7) for the
+> current flow. Screenshot regeneration is tracked as a
+> separate follow-up; the text below is updated for the
+> current behavior, but the images are stale.
+
 The Computer Panel is the per-Bot VM surface, in three modes:
 
 - **Status** — a tiny chip (icon + dot + uptime like `1h 2m`).
   Used in the title bar. Always on. Updates every 5 seconds.
-- **Preview** — a pinned side panel (~30% width) showing the live
-  noVNC view of the Bot's desktop. The Bot keeps driving; you
-  watch read-only by default (a toggle enables local input).
-- **Takeover** — full-window noVNC with mouse + keyboard control.
-  The Bot continues running; you take over the desktop. Click
-  **Hand back to Bot** when you're done; the Bot resumes control.
+- **Preview** — a pinned side panel (~30% width) showing a
+  fresh JPEG of the QEMU framebuffer, polled by the host every
+  300ms (`virsh screenshot` on the Linux server, piped back to
+  the Mac over the existing SSH connection). The Bot keeps
+  driving; you watch read-only by default.
+- **Takeover** — full mouse + keyboard control via macOS Screen
+  Sharing. MaxBot opens an `ssh -N -L <port>:127.0.0.1:<qemu-vnc>
+  <user>@<host>` tunnel and hands the renderer
+  `vnc://127.0.0.1:<port>`. macOS opens the Screen Sharing app
+  against the loopback port. The Bot continues running; you take
+  over the desktop. Click **Hand back to Bot** when you're done
+  — the SSH child is killed and the Bot resumes control.
 
-All three modes connect to the same `ws://localhost:<port>/` URL
-— MaxBot's Rust side handles the SSH tunnel + WebSocket↔RFB
-bridging. The URL never contains the server's IP/hostname, so you
+The loopback URL never contains the server's IP/hostname, so you
 can share Preview links without leaking infra.
 
 ![Computer Panel — Console (loading)](./v3-grand-tour/screenshots/computer-console.png)
 *Computer Panel in Preview mode (Console tab) — the Mailroom
 Bot is selected, the panel's toolbar (Start / Stop / Restart /
-Destroy / Close) is at the top, and the noVNC viewer is
+Destroy / Close) is at the top, and the screenshot viewer is
 bootstrapping. The "Loading computer..." state is the v3
 skeleton-shimmer polish at work — the panel lays out the
-correct shape and the content fills in once the SSH tunnel
-comes up.*
+correct shape and the content fills in once the first JPEG
+comes back from `virsh screenshot`. (Screenshot is pre-v3.7.2
+and shows the old noVNC canvas — the v3.7.7 doc will replace
+this with a current shot.)*
 
 ### Files tab
 
@@ -248,10 +264,10 @@ Tyler. See v3.0.6 CHANGELOG note.*
 - The toolbar (Start / Stop / Restart / Destroy) is disabled
   while the VM is in `provisioning` or `error` — both states
   are visible in the status chip.
-- **Console tab vs Files tab:** the Console tab is the noVNC
-  desktop view; the Files tab is the SFTP file browser. Both
-  are part of the same panel — switch via the tab bar at the
-  top.
+- **Console tab vs Files tab:** the Console tab is the
+  host-side screenshot preview of the desktop; the Files tab
+  is the SFTP file browser. Both are part of the same panel —
+  switch via the tab bar at the top.
 
 ---
 

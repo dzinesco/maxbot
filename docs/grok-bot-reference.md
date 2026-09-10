@@ -6,8 +6,9 @@ both are covered. The "how the bots interact" part is specifically
 about Grok Bot.
 
 Useful as a design reference for MaxBot's per-Bot ComputerPanel
-work: MaxBot's Slice C/D/E (per-Bot Linux VM, noVNC console, SFTP
-file browser) is a simpler, single-Bot take on the same idea.
+work: MaxBot's Slice C/D/E (per-Bot Linux VM, host-side screenshot
+preview + macOS Screen Sharing takeover, SFTP file browser) is a
+simpler, single-Bot take on the same idea.
 
 ---
 

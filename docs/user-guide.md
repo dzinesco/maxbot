@@ -128,32 +128,47 @@ MaxBot:
 
 1. Generates a new Ed25519 keypair for the Bot (encrypted at rest)
 2. SSHes to the server and runs `virt-install` with a cloud-init
-   seed ISO that injects XFCE, x11vnc, qemu-guest-agent, and your
+   seed ISO that injects XFCE, LightDM, qemu-guest-agent, and your
    per-Bot SSH public key
 3. Polls the libvirt DHCP lease to find the VM's IP
 4. Marks the Bot's `computers.state = running` (or `error` on failure)
 
 Provisioning takes 30–60 seconds for the VM to boot and get an IP.
-The first-boot `apt-get install` of XFCE + x11vnc takes 3–5 minutes
+The first-boot `apt-get install` of LightDM + XFCE takes 3–5 minutes
 in the background — the VM is usable (SSH-able, qemu-guest-agent
 responding) long before the desktop is fully ready.
 
 #### Three access levels (Status / Preview / Takeover)
 
+> **TODO (v3.7.7 will replace this section):** the screenshot path
+> below was rewritten in v3.7.2; the `docs/first-bot-20-minutes.md`
+> walk-through (landed in v3.7.7) is the canonical "show me the
+> new flow" reference. This section stays here as a 1-paragraph
+> quick-reference; v3.7.7 replaces the paragraph with a link to
+> the new doc.
+
 Once a Bot has a running computer, three ways to see what it's doing:
 
 - **Status** — a small chip in the title bar that turns purple
   while the VM is active. Always on.
-- **Preview** — a pinned side panel (~30% width) showing the live
-  noVNC view of the Bot's desktop. The Bot can keep driving while
-  you watch.
-- **Takeover** — full-window noVNC with mouse + keyboard control.
-  The Bot continues running; you take over the desktop. Click
-  **Hand back to Bot** when you're done; the Bot resumes control.
+- **Preview** — a pinned side panel (~30% width) showing a fresh
+  JPEG of the QEMU framebuffer, polled by the host every 300ms
+  (`virsh screenshot` on the Linux server, piped back to the Mac
+  over the existing SSH connection). The Bot can keep driving
+  while you watch. **No in-VM VNC server runs in v3.7.2+** — the
+  Preview is a single JPEG that refreshes, not a live RFB stream.
+- **Takeover** — full mouse + keyboard control via macOS Screen
+  Sharing. MaxBot opens an `ssh -N -L <port>:127.0.0.1:<qemu-vnc>
+  <user>@<host>` tunnel and hands the renderer
+  `vnc://127.0.0.1:<port>`. macOS opens the Screen Sharing app
+  against the loopback port. Click **Hand back to Bot** when done
+  — the SSH child is killed, the port is freed, and the Bot
+  resumes control.
 
-All three modes connect to the same `ws://localhost:<port>/` URL —
-MaxBot's Rust side handles the SSH tunnel + WebSocket↔RFB bridging.
-The URL never contains the server's IP/hostname.
+The loopback URL never contains the server's IP/hostname — both
+Preview and Takeover bind 127.0.0.1 only, so a process on the Mac
+that can reach localhost can't accidentally reach the VM's
+framebuffer.
 
 #### Tool routing
 

@@ -247,12 +247,34 @@ impl SshPool {
 mod tests {
     use super::*;
 
+    /// v3.7.4: a process-wide lock that serializes the
+    /// `pick_free_port_*` tests so they can't fight over
+    /// 127.0.0.1 ports when cargo runs them in parallel.
+    /// The companion test `pick_free_port_returns_port_in_range`
+    /// holds port 5980; the exhausted test holds whatever
+    /// port the OS gives it via the probe. If they
+    /// overlap, the exhausted test's `pick_free_port`
+    /// may briefly observe its probe port as free (the
+    /// companion test released 5980 before the exhausted
+    /// test's bind) and the test would race.
+    /// `PORT_LOCK` makes the two tests mutually exclusive.
+    /// (The pattern is the same `static Mutex<()>` that
+    /// `computer/mod.rs` uses for `HOME_LOCK` in
+    /// v3.0.3 — both serialize access to a shared OS
+    /// resource across parallel tests.)
+    static PORT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// v3.7.2: `pick_free_port` returns a port in the
     /// requested range. The exact port isn't predictable
     /// (other tests may be holding ports), so we assert
     /// the invariant rather than a specific value.
+    ///
+    /// v3.7.4: acquire `PORT_LOCK` so the parallel
+    /// `pick_free_port_exhausted_returns_none` can't
+    /// race with this one over 127.0.0.1:5980.
     #[tokio::test]
     async fn pick_free_port_returns_port_in_range() {
+        let _lock = PORT_LOCK.lock().expect("port lock");
         // Use a range unlikely to be in use by other
         // tests — high ports, single-port range to keep
         // the test deterministic.
@@ -262,8 +284,13 @@ mod tests {
     }
 
     /// An empty / exhausted range yields `None`.
+    ///
+    /// v3.7.4: acquire `PORT_LOCK` (same rationale as
+    /// the companion test) so the probe-vs-allocator
+    /// race on a parallel run is impossible.
     #[tokio::test]
     async fn pick_free_port_exhausted_returns_none() {
+        let _lock = PORT_LOCK.lock().expect("port lock");
         // Pick a port, hold it for the test duration, then
         // assert the allocator can't return it.
         let probe = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -275,10 +302,13 @@ mod tests {
         let _guard = probe;
         // Use a one-port range matching the held port.
         // The probe will fail; no fallback exists.
-        // We can't be sure OTHER ports in the same range
-        // are free, so the test is only meaningful if
-        // `port` is the lowest in some range. We narrow
-        // the range to JUST that port and assert None.
+        // The previous (pre-v3.7.4) version of this
+        // comment said "we can't be sure OTHER ports
+        // in the same range are free" — the one-port
+        // range makes that concern moot, and the
+        // `PORT_LOCK` above prevents any parallel
+        // test from binding the probe port before
+        // our allocator checks.
         let result = pick_free_port((port, port)).await;
         assert!(result.is_none(), "expected None for held port");
     }

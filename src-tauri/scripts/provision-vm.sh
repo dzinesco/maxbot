@@ -15,7 +15,7 @@
 # the Tauri side bridges to it over an SSH tunnel that already
 # requires the user's SSH key. The VNC password was a second secret
 # that the Rust side generated, sent to the script, and then
-# discarded — the noVNC client never received it, so the RFB
+# discarded — the VNC client never received it, so the RFB
 # handshake always failed with "VNC security handshake failed" and
 # the console area silently rendered blank. With `-nopw`, the VNC
 # port is open to anyone on the server's loopback, but only the
@@ -34,18 +34,18 @@
 # and because ssh.service is Type=notify, systemctl then
 # blocks forever waiting for READY=1. We tried a host-key
 # pre-generation, but the underlying deadlock with Type=notify
-# still bites when the apt-get install of xfce4 / x11vnc
+# still bites when the apt-get install of xfce4
 # races with the systemd notification. The fix:
 #   1. bootcmd generates host keys with ssh-keygen -A BEFORE
 #      trying to start sshd, so sshd -t passes.
 #   2. bootcmd pre-creates bot + drops the authorized_keys
 #      so SSH works the moment sshd binds port 22 (no wait for
 #      cc_users_groups, which is in cloud_config_modules and
-#      gets stuck behind the apt install of xfce4 / x11vnc).
+#      gets stuck behind the apt install of xfce4).
 #   3. bootcmd starts /usr/sbin/sshd DIRECTLY (no systemd
 #      Type=notify, no systemctl --now). Port 22 binds in
 #      milliseconds, independent of how long the apt install
-#      of xfce4 / x11vnc / openssh-server takes.
+#      of xfce4 / openssh-server takes.
 #   4. The original users: block is kept (cc_users_groups is
 #      idempotent and re-confirms the same key).
 #   5. runcmd: ends with systemctl enable ssh (so systemd
@@ -112,7 +112,7 @@ bootcmd:
   # Start sshd directly. systemctl enable --now ssh deadlocks
   # in this image because ssh.service is Type=notify and
   # systemd's notify machinery races with the apt-get install
-  # of xfce4 / x11vnc that the packages: block kicks off
+  # of xfce4 that the packages: block kicks off
   # right after bootcmd returns. Starting the binary
   # directly (no systemd notification) gives us a working
   # port 22 within milliseconds, independent of how long
@@ -126,17 +126,17 @@ users:
     ssh_authorized_keys:
       - $SSH_PUB
 packages:
-  # v3.7.2: replaced x11vnc + tigervnc-standalone-server
-  # with lightdm + xfce4. The v3.0.x noVNC path tunneled
-  # a separate x11vnc instance bound to `:1`, but the
-  # Tauri webview (WKWebView) doesn't render noVNC's
-  # canvas path reliably and the two-screen mismatch
-  # (QEMU virtual VGA + x11vnc on :1) is what kept the
-  # preview showing a created-but-invisible VM. The
-  # new path: the in-app preview is a `virsh screenshot`
-  # poll on the QEMU virtual VGA, and takeover uses
-  # macOS `Screen Sharing` over the existing SSH `-L`
-  # tunnel — no in-VM VNC server needed.
+  # v3.7.2: the `packages:` block now installs lightdm +
+  # xfce4 only. The v3.0.x path tunneled a separate in-VM
+  # VNC server on `:1` for the in-app console, but the
+  # Tauri webview (WKWebView) didn't render its canvas
+  # path reliably, and the two-screen mismatch (QEMU
+  # virtual VGA + a separate VNC display on `:1`) is what
+  # kept the preview showing a created-but-invisible VM.
+  # The v3.7.2 path: the in-app preview is a
+  # `virsh screenshot` poll on the QEMU virtual VGA, and
+  # takeover uses macOS `Screen Sharing` over the existing
+  # SSH `-L` tunnel — no in-VM VNC server needed.
   #
   # LightDM + xfce4 autologin brings up a real desktop
   # on the QEMU display so `virsh screenshot` returns
@@ -157,7 +157,7 @@ packages:
   #     (cloud-init's `bootcmd` block creates the `bot` user
   #     and the per-Bot Computer runs as `bot`, but chromium
   #     still needs `--no-sandbox` for SUID sandboxes that
-  #     conflict with noVNC's x11vnc session).
+  #     conflict with the in-VM display server).
   #   - `xdotool` provides `mousemove x y`, `click 1`, `type`,
   #     and `key` for synthetic input. The tool shells out to
   #     these via the existing SshPool.

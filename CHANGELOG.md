@@ -4,6 +4,94 @@ All notable changes to MaxBot are documented in this file. The format
 follows [Keep a Changelog](https://keepachangelog.com/) and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## v3.7.4 — 2026-09-10
+
+### Changed — noVNC / x11vnc / tigervnc references swept (Hardening items #2 + #5)
+
+- **`docs/user-guide.md` "Computer" section rewritten** to reflect
+  the v3.7.2 display rework: Preview is now a 300ms host-side
+  `virsh screenshot` poll, Takeover opens macOS Screen Sharing
+  via an `ssh -L` tunnel. The v3.0.x noVNC canvas path is
+  documented as gone. (TODO note left at the top of the section:
+  v3.7.7's `docs/first-bot-20-minutes.md` is the canonical
+  "show me the new flow" reference and will replace the
+  paragraph with a link.)
+- **`docs/server-setup.md` "What gets installed on each Bot VM"
+  section updated** — the `packages:` block now lists
+  `lightdm + xfce4 + ...` (per v3.7.2), not the historical
+  `x11vnc + tigervnc-standalone-server`. A `v3.7.2 change`
+  callout explains why the in-VM VNC server is no longer
+  installed.
+- **`docs/v3-grand-tour.md` "Computer Panel" section** carries
+  a `v3.7.4` note explaining that the screenshots are pre-v3.7.2
+  and that the canonical current flow is in v3.7.7's
+  `docs/first-bot-20-minutes.md`. Text body updated; screenshot
+  regen is a follow-up.
+- **`docs/grok-bot-reference.md`** — the Slice C/D/E summary
+  now reads "host-side screenshot preview + macOS Screen
+  Sharing takeover" instead of "noVNC console".
+- **`src-tauri/scripts/provision-vm.sh`** — historical
+  `x11vnc` / `tigervnc` mentions cleaned out of the
+  explanatory comments. The script does not install
+  any of those packages; the v3.7.2 v3.7.2 comment
+  block now uses generic "in-VM VNC server" / "in-VM
+  display server" wording instead of naming the dropped
+  tools. **No behavior change** — the `packages:` block
+  was already `lightdm + xfce4 + ...` since v3.7.2.
+- **`README.md`** — the "Three access levels" bullet drops
+  "noVNC viewer" in favor of "fresh JPEG from the QEMU
+  framebuffer" + macOS Screen Sharing.
+
+### Fixed — Two pre-existing maxbotd FK test failures
+
+- **`daemon_token_round_trip` and `rotate_daemon_token_invalidates_old`**
+  were failing in `cargo test --bin maxbotd` because they
+  built a `Bot { ... }` literal and called
+  `set_daemon_token(bot.id, ...)` / `rotate_daemon_token(bot.id)`
+  against a fresh DB with no `bots` row. The `daemon_tokens.bot_id`
+  FK to `bots.id` is enforced; the inserts failed with
+  `FOREIGN KEY constraint failed`. Both tests now call a
+  small `insert_test_bot` helper (the same pattern used by
+  `src-tauri/src/computer/mod.rs` since v3.0.3) to seed the
+  `bots` row before the token operation. **No production
+  behavior change** — the production code path always
+  inserts a `bots` row first; only the test fixtures were
+  wrong.
+
+### Fixed — `pick_free_port_exhausted_returns_none` flakiness
+
+The v3.7.2 port-picker test was parallel-runnable but
+shared 127.0.0.1 state with the companion
+`pick_free_port_returns_port_in_range` test, so two
+parallel `cargo test` runs could race over a port.
+Both tests now acquire a process-wide `PORT_LOCK`
+static `Mutex<()>` (same pattern as the v3.0.3
+`HOME_LOCK` in `src-tauri/src/computer/mod.rs`) before
+touching the OS. The test count is unchanged
+(`301/0/4` in `cargo test --lib`).
+
+### Added — `#[ignore]`d crispy smoke tests for screenshot + takeover
+
+Two new files under `src-tauri/tests/` provide
+real-crispy verification of the v3.7.2 display path
+without making them part of the default CI run:
+
+- `src-tauri/tests/screenshot_smoke.rs` — captures one
+  JPEG from a known-running Bot via the existing
+  `screenshot::capture_jpeg` path, asserts the bytes
+  start with `0xFF 0xD8` (JPEG magic) and are
+  non-empty. Skips gracefully if crispy is unreachable.
+- `src-tauri/tests/takeover_smoke.rs` — opens a takeover
+  tunnel via the existing `vnc::open_takeover` path,
+  asserts the local port is bound on 127.0.0.1, then
+  closes and asserts the port is released. Skips
+  gracefully if crispy is unreachable.
+
+Both are `#[ignore]`d. Run them with
+`cargo test --lib screenshot_smoke -- --ignored --nocapture`
+and `cargo test --lib takeover_smoke -- --ignored --nocapture`
+when real crispy is available.
+
 ## v3.7.3 — 2026-09-10
 
 ### Added — Always-on maxbotd audit (Hardening item #3)

@@ -327,15 +327,23 @@ ssh tyler@<SERVER> "sudo virsh console $VM_NAME"
 The base image is a **bare Ubuntu 24.04 cloud image with cloud-init
 ready**. It does not yet have XFCE or a desktop. MaxBot's
 Bot-provisioning step (in `provision-vm.sh`, called for every Bot)
-injects the desktop packages + VNC server per-VM via cloud-init's
-`runcmd` when the VM first boots — that keeps the base image small
-and the provisioning step flexible. The per-VM install includes:
-`xfce4`, `xfce4-goodies`, `x11vnc`, `tigervnc-standalone-server`,
-`qemu-guest-agent`, `openssh-server`, **`chromium-browser`**,
-**`xdotool`**, and **`scrot`** (the last three are v3.2.0 — they
-back the `vm_computer_use` tool that drives the Bot's own browser
-and desktop over SSH). x11vnc is set to start on display `:1` with
-the VNC password the provisioning step generated.
+injects the desktop packages per-VM via cloud-init's `runcmd` when
+the VM first boots — that keeps the base image small and the
+provisioning step flexible. The per-VM install includes:
+`lightdm`, `xfce4`, `xfce4-goodies`, `qemu-guest-agent`,
+`openssh-server`, **`chromium-browser`**, **`xdotool`**, and
+**`scrot`** (the last three are v3.2.0 — they back the
+`vm_computer_use` tool that drives the Bot's own browser and
+desktop over SSH).
+
+> **v3.7.2 change:** `x11vnc` and `tigervnc-standalone-server` are
+> no longer installed per-Bot. The v3.0.x noVNC-over-RFB path was
+> dropped in v3.7.2 because the Tauri webview (WKWebView) didn't
+> render noVNC's canvas reliably, and the v3.7.2 path uses
+> `virsh screenshot` (host-side QEMU framebuffer poll) for Preview
+> and `ssh -L` + macOS Screen Sharing for Takeover — no in-VM VNC
+> server required. The `lightdm + xfce4` combo is what makes the
+> desktop visible to the host-side screenshot.
 
 > **Re-provisioning note (v3.2.0):** cloud-init only runs ONCE per
 > VM, at first boot. If you have existing v3.0.x or v3.1.x VMs

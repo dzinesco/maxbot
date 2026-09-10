@@ -1334,14 +1334,64 @@ async fn scheduler_tick(state: &Arc<DaemonState>) -> Result<(), String> {
 mod tests {
     use super::*;
 
+    /// v3.7.4: insert a minimal bot row so the
+    /// `daemon_tokens.bot_id` FK to `bots.id` is
+    /// satisfied. Without this, `set_daemon_token` and
+    /// `rotate_daemon_token` fail with
+    /// `FOREIGN KEY constraint failed` because no
+    /// `bots` row exists. Mirrors the
+    /// `insert_test_bot` helper in
+    /// `src-tauri/src/computer/mod.rs` (added in
+    /// v3.0.3 for the same FK pattern against
+    /// `computers.bot_id`).
+    fn insert_test_bot(db: &Database, bot_id: &str) {
+        let now = Utc::now();
+        let bot = Bot {
+            id: bot_id.to_string(),
+            name: "test".to_string(),
+            description: String::new(),
+            system_prompt: String::new(),
+            default_model: "MiniMax-M3".to_string(),
+            allowed_tools: vec![],
+            icon: String::new(),
+            color: String::new(),
+            avatar_color: String::new(),
+            created_at: now,
+            updated_at: now,
+            state: maxbot_lib::bots::BotState::Idle,
+            last_active_at: None,
+            // v3.2.0 — `computer_use` defaults to "vm"
+            // for new Bots. The daemon's token tests
+            // don't exercise the Computer surface; the
+            // value is just here so the struct literal
+            // compiles.
+            computer_use: "vm".to_string(),
+            // v3.7.0 — added the `connectors_enabled`
+            // field. The daemon's token tests don't
+            // exercise the connector surface; the empty
+            // value matches the pre-v3.7.0 default and
+            // is here only to make the struct literal
+            // compile.
+            connectors_enabled: String::new(),
+        };
+        db.upsert_bot(&bot).expect("upsert test bot");
+    }
+
     /// `daemon_token_round_trip` — set a token, then
     /// fetch it back. Confirms the SQLite path
     /// end-to-end on a temp file.
+    ///
+    /// v3.7.4: insert a `bots` row before
+    /// `set_daemon_token` so the `daemon_tokens.bot_id`
+    /// FK is satisfied. (The two pre-existing
+    /// maxbotd FK test failures in v3.7.3 are exactly
+    /// this gap.)
     #[test]
     fn daemon_token_round_trip() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let path = tmp.path().join("test.db");
         let db = Database::open(&path).expect("open");
+        insert_test_bot(&db, "bot-a");
         db.set_daemon_token("bot-a", "tok-1").expect("set");
         let got = db.get_daemon_token("bot-a").expect("get");
         assert_eq!(got.as_deref(), Some("tok-1"));
@@ -1353,11 +1403,16 @@ mod tests {
     /// `rotate_daemon_token_invalidates_old` — calling
     /// rotate twice gives two different tokens; the
     /// second one is what's stored, not the first.
+    ///
+    /// v3.7.4: insert a `bots` row before
+    /// `rotate_daemon_token` so the
+    /// `daemon_tokens.bot_id` FK is satisfied.
     #[test]
     fn rotate_daemon_token_invalidates_old() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let path = tmp.path().join("test.db");
         let db = Database::open(&path).expect("open");
+        insert_test_bot(&db, "bot-x");
         let first = db.rotate_daemon_token("bot-x").expect("rotate 1");
         let second = db.rotate_daemon_token("bot-x").expect("rotate 2");
         assert_ne!(first, second, "rotate must produce a new token");
