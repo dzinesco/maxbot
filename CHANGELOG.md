@@ -4,6 +4,25 @@ All notable changes to MaxBot are documented in this file. The format
 follows [Keep a Changelog](https://keepachangelog.com/) and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## v3.0.7 — 2026-09-09
+
+### Fixed
+- **noVNC streaming — viewer paints the VM framebuffer, no silent
+  black canvas.** The RFB `connect` event fires on local WebSocket
+  open, which can succeed even when the SSH-tunneled VNC stream
+  behind it is dead — the canvas stayed black with no overlay and
+  no error. The viewer now waits for the first framebuffer event
+  (`desktopname` / `resize` / pixel change) before dropping the
+  "Connecting to VM…" overlay, surfaces a 6s no-frame timeout as
+  a red centered error, renders the canvas with `flex: 1;
+  min-height: 0;` so it actually fills nested flex parents,
+  passes `shared: true` to the RFB constructor, wires a
+  `ResizeObserver` to re-scale on container size changes, and
+  supports an optional VNC `credentials` prop. Consolidates the
+  mount + wsUrl effects into a single `useEffect` keyed on
+  `wsUrl` so React 19 Strict Mode can't race a stale mount with
+  a fresh URL.
+
 ## v3.0.6 — 2026-09-09
 
 ### Docs

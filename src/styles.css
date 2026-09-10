@@ -3336,14 +3336,64 @@ button.link:hover {
  * into the container; this rule just gives the wrapper a
  * fill-the-parent layout so the canvas can size to the
  * remote desktop's natural dimensions or scale to fit
- * (per the `scaleViewport` prop on NoVncViewer). */
+ * (per the `scaleViewport` prop on NoVncViewer).
+ *
+ * `flex: 1; min-height: 0;` is the load-bearing line:
+ * `width: 100%` and `height: 100%` collapse to 0×0 inside
+ * `display: flex` parents that don't propagate their own
+ * height down to a flex child unless that child opts in
+ * with `min-height: 0`. The `.computer-panel__body-pane`
+ * ancestor is `display: flex; flex-direction: column;` with
+ * `overflow: hidden;`, so without `flex: 1; min-height: 0;`
+ * on this rule the canvas paints to a 0×0 box and the
+ * "Connecting to VM…" overlay is the only thing visible.
+ * The `firstFrameReceived` state in the React side keeps
+ * the overlay up until the framebuffer actually flows. */
 
 .novnc-viewer {
   position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
   width: 100%;
   height: 100%;
   background: var(--bg-0);
   overflow: hidden;
+}
+
+/* The error overlay is rendered as a child of `.novnc-viewer`
+ * (not as `::after` like the connecting message) because the
+ * error text comes from React state and needs to be a real
+ * element to receive the message. The `pointer-events: none`
+ * keeps it from stealing focus from the canvas. */
+
+.novnc-viewer__error {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 16px 20px;
+  background: rgba(28, 0, 0, 0.78);
+  color: var(--danger, #fca5a5);
+  font-size: 12px;
+  line-height: 1.5;
+  font-family: var(--font-mono);
+  pointer-events: none;
+  z-index: 3;
+}
+
+.novnc-viewer__error-title {
+  font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 6px;
+  color: var(--danger, #fca5a5);
+}
+
+.novnc-viewer__error-detail {
+  max-width: 80%;
+  white-space: pre-wrap;
 }
 
 .novnc-viewer[data-show-overlay="true"]::after {

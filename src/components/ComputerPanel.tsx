@@ -602,7 +602,29 @@ function FullComputerPanel({
         <div className="computer-panel__body-pane">
           {bodyTab === "console" ? (
             consoleUrl ? (
+              // (v3.0.7) `key={consoleUrl}` forces a clean
+              // remount whenever the Tauri side hands us a
+              // fresh WebSocket URL. This is the common
+              // path after a VM restart (the previous
+              // session's proxy dies when its WS closes,
+              // and the new proxy comes back on a new
+              // port). The single-effect design in
+              // noVncViewer handles wsUrl changes without a
+              // remount, but the key guarantees a hard
+              // teardown of any stale noVNC state
+              // (in-flight timers, ResizeObserver) that
+              // the effect's cleanup might miss under
+              // React 19 Strict Mode.
+              //
+              // `credentials` is not currently passed —
+              // there's no `vnc_password` field on the
+              // Computer API row, and the Tauri proxy
+              // handles auth in 99% of cases. When VNC
+              // passwords are wired through Settings (or
+              // a per-Bot key), pass them here as
+              // `credentials={{ password: "..." }}`.
               <NoVncViewer
+                key={consoleUrl}
                 wsUrl={consoleUrl}
                 viewOnly={viewOnly}
                 scaleViewport

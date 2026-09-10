@@ -15,6 +15,16 @@
 //      parent (Takeover mode) can drive input programmatically
 //      (noVNC's own keyboard/mouse handlers do the normal
 //      take-the-mouse path automatically).
+//   5. (v3.0.7) Waits for the first framebuffer event before
+//      dropping the "Connecting to VM…" overlay. The RFB
+//      `connect` event fires on local WS open, which can
+//      succeed even when the SSH-tunneled VNC stream behind it
+//      is dead — leaving the canvas black with no overlay. The
+//      new `firstFrameReceived` state is set true on the first
+//      `desktopname`, `resize`, or canvas-pixel event. A 6s
+//      no-frame timeout surfaces a red error overlay and
+//      triggers a reconnect instead of leaving a silent black
+//      canvas.
 //
 // Bundled via the `@novnc/novnc` package — no CDN. The package
 // only ships `core/rfb.js` (+ dependencies under `core/` and
@@ -68,10 +78,28 @@ export interface NoVncViewerProps {
   viewOnly?: boolean;
   /** Scale the remote desktop to fit the canvas. Default true. */
   scaleViewport?: boolean;
+  /** (v3.0.7) Optional VNC credentials. The viewer responds
+   * to the RFB's `credentialsrequired` event by calling
+   * `sendCredentials(password)`. If the prop is omitted the
+   * default noVNC password dialog would appear (which we
+   * don't want — the Tauri side handles auth in 99% of
+   * cases, and the rare VNC-password VM is wired through
+   * this prop). */
+  credentials?: { password: string };
 }
 
 const MAX_RETRIES = 5;
 const BASE_BACKOFF_MS = 500;
+// (v3.0.7) Floor for the "Connecting to VM…" overlay so the
+// user has time to read it even if the RFB handshake and
+// the first framebuffer pixel both happen immediately.
+const MIN_OVERLAY_MS = 3000;
+// (v3.0.7) After `connect` fires, give the framebuffer this
+// long to actually paint a pixel. If it doesn't, surface a
+// "no framebuffer received" error and reconnect — the most
+// common cause is a dead SSH tunnel behind a working local
+// WebSocket, which previously left a silent black canvas.
+const NO_FRAME_TIMEOUT_MS = 6000;
 
 export const NoVncViewer = forwardRef<NoVncViewerHandle, NoVncViewerProps>(
   function NoVncViewer(
@@ -83,21 +111,23 @@ export const NoVncViewer = forwardRef<NoVncViewerHandle, NoVncViewerProps>(
       showRemoteCursor = false,
       viewOnly = false,
       scaleViewport = true,
+      credentials,
     },
     ref,
   ) {
     const containerRef = useRef<HTMLDivElement | null>(null);
     const rfbRef = useRef<InstanceType<typeof RFB> | null>(null);
     const [connected, setConnected] = useState(false);
-    // `showOverlay` is a separate signal from `connected` —
-    // we want the centered "Connecting to VM…" message to
-    // stay visible for at least 3 seconds on every fresh
-    // mount, even if the noVNC RFB `connect` event fires
-    // immediately (which it does once the local WS opens,
-    // even when the SSH-tunneled VNC stream behind it is
-    // dead). Otherwise the overlay flashes for ~1 frame
-    // and the user is back to staring at a black canvas
-    // with no indication anything is wrong.
+    // (v3.0.7) The "have we actually seen the framebuffer
+    // paint anything?" signal. Distinct from `connected`,
+    // which is just "the local WebSocket is open". The
+    // "Connecting to VM…" overlay stays up until both
+    // `connected` AND `firstFrameReceived` are true (and the
+    // MIN_OVERLAY_MS floor has elapsed). The no-frame timeout
+    // fires if `firstFrameReceived` is still false
+    // NO_FRAME_TIMEOUT_MS after `connect`.
+    const [firstFrameReceived, setFirstFrameReceived] = useState(false);
+    const [lastError, setLastError] = useState<string | null>(null);
     const [showOverlay, setShowOverlay] = useState(true);
     // Refs for the latest callbacks so we don't re-create the
     // RFB on every parent re-render.
@@ -107,10 +137,6 @@ export const NoVncViewer = forwardRef<NoVncViewerHandle, NoVncViewerProps>(
     onConnectRef.current = onConnect;
     onDisconnectRef.current = onDisconnect;
     onErrorRef.current = onError;
-    // `wsUrl` lives in a ref for the same reason: when it
-    // changes, we tear down + reconnect (handled by an effect).
-    const urlRef = useRef(wsUrl);
-    urlRef.current = wsUrl;
     // Reconnect bookkeeping: how many attempts have we made
     // for the current `wsUrl`?
     const attemptsRef = useRef(0);
@@ -128,16 +154,35 @@ export const NoVncViewer = forwardRef<NoVncViewerHandle, NoVncViewerProps>(
     // Minimum-show timer for the overlay. We keep the
     // "Connecting to VM…" message on screen for at least
     // MIN_OVERLAY_MS after every fresh mount, even if the
-    // RFB fires `connect` immediately, so the user has a
-    // chance to read it. The timer is reset on every
-    // mount / wsUrl change.
+    // RFB fires `connect` and the framebuffer streams
+    // immediately, so the user has a chance to read it.
+    // The timer is reset on every mount / wsUrl change.
     const minShowTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
       null,
     );
-    const MIN_OVERLAY_MS = 3000;
+    // (v3.0.7) No-frame timeout. Scheduled when `connect`
+    // fires; cleared on the first framebuffer event or on
+    // cleanup. If it fires, we surface an error and call
+    // `scheduleReconnect()` — a dead SSH tunnel behind a
+    // working local WebSocket is the most common cause.
+    const noFrameTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
+      null,
+    );
+    // (v3.0.7) ResizeObserver that re-applies
+    // `rfb.scaleViewport = true` when the container's
+    // intrinsic size changes. noVNC often paints 0×0 until
+    // a resize event after the initial layout settles; the
+    // observer also catches panel-resize during drag.
+    const resizeObserverRef = useRef<ResizeObserver | null>(null);
+    // (v3.0.7) Ref mirror of `firstFrameReceived` so the
+    // `connect` closure (which runs once per RFB
+    // construction) can read the current value without
+    // having to re-create the RFB on every state update.
+    const firstFrameReceivedRef = useRef(false);
+    firstFrameReceivedRef.current = firstFrameReceived;
 
     // Imperative handle: forward sendKey / sendMouse to the
-    // active RFB instance.
+    // active RFB instance. v3.0.7 preserves the existing API.
     useImperativeHandle(
       ref,
       () => ({
@@ -167,22 +212,57 @@ export const NoVncViewer = forwardRef<NoVncViewerHandle, NoVncViewerProps>(
       [connected],
     );
 
+    // (v3.0.7) Single connect effect keyed on `wsUrl`. This
+    // handles BOTH the initial mount (because the effect runs
+    // once with the initial `wsUrl`) AND every reconnect
+    // (because the parent re-renders with a fresh URL from
+    // the Rust side). No "skip first run" branches, no split
+    // mount + wsUrl effects — that's the path that races
+    // under React 19 Strict Mode and leaves a stale RFB
+    // around when a fresh URL arrives.
     useEffect(() => {
       mountedRef.current = true;
       cancelledRef.current = false;
       attemptsRef.current = 0;
-      // Show the overlay on every fresh mount; the
-      // min-show timer will allow it to drop after
+      // Reset the per-mount signals: the overlay is up, no
+      // framebuffer seen yet, no error rendered. The
+      // min-show timer will allow the overlay to drop after
       // MIN_OVERLAY_MS, but no sooner.
       setShowOverlay(true);
+      setFirstFrameReceived(false);
+      setLastError(null);
+      firstFrameReceivedRef.current = false;
       if (minShowTimerRef.current !== null) {
         clearTimeout(minShowTimerRef.current);
         minShowTimerRef.current = null;
+      }
+      if (noFrameTimerRef.current !== null) {
+        clearTimeout(noFrameTimerRef.current);
+        noFrameTimerRef.current = null;
       }
       minShowTimerRef.current = setTimeout(() => {
         minShowTimerRef.current = null;
         if (mountedRef.current) setShowOverlay(false);
       }, MIN_OVERLAY_MS);
+      // (v3.0.7) Wire a ResizeObserver on the container so
+      // a panel drag re-applies `scaleViewport` and forces
+      // a fresh layout. The noVNC constructor captures the
+      // container's initial size synchronously; if the
+      // container is 0×0 at that moment (the common case
+      // for a freshly-mounted panel inside a flex chain
+      // that hasn't laid out yet), noVNC paints to a 0×0
+      // canvas. Re-applying `scaleViewport` on every
+      // resize event re-derives the canvas dimensions.
+      const containerEl = containerRef.current;
+      if (containerEl && typeof ResizeObserver !== "undefined") {
+        const ro = new ResizeObserver(() => {
+          const r = rfbRef.current;
+          if (!r) return;
+          r.scaleViewport = true;
+        });
+        ro.observe(containerEl);
+        resizeObserverRef.current = ro;
+      }
       connect();
       return () => {
         mountedRef.current = false;
@@ -194,6 +274,14 @@ export const NoVncViewer = forwardRef<NoVncViewerHandle, NoVncViewerProps>(
         if (minShowTimerRef.current !== null) {
           clearTimeout(minShowTimerRef.current);
           minShowTimerRef.current = null;
+        }
+        if (noFrameTimerRef.current !== null) {
+          clearTimeout(noFrameTimerRef.current);
+          noFrameTimerRef.current = null;
+        }
+        if (resizeObserverRef.current !== null) {
+          resizeObserverRef.current.disconnect();
+          resizeObserverRef.current = null;
         }
         const r = rfbRef.current;
         rfbRef.current = null;
@@ -213,32 +301,13 @@ export const NoVncViewer = forwardRef<NoVncViewerHandle, NoVncViewerProps>(
           while (el.firstChild) el.removeChild(el.firstChild);
         }
       };
-      // We intentionally only run on mount/unmount. The
-      // `wsUrl` change handler below is a separate effect.
-      // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, []);
-
-    // Reconnect on `wsUrl` change. Most common path: the
-    // panel re-renders with a fresh console URL after the
-    // Tauri side restarted the proxy.
-    useEffect(() => {
-      // Skip the first run (handled by the mount effect).
-      const r = rfbRef.current;
-      if (!r) return;
-      cancelledRef.current = true;
-      attemptsRef.current = 0;
-      if (reconnectTimerRef.current !== null) {
-        clearTimeout(reconnectTimerRef.current);
-        reconnectTimerRef.current = null;
-      }
-      try {
-        r.disconnect();
-      } catch {
-        // ignore
-      }
-      rfbRef.current = null;
-      cancelledRef.current = false;
-      connect();
+      // The connect function reads the latest `viewOnly`,
+      // `scaleViewport`, `showRemoteCursor`, and `credentials`
+      // via the props closure. We re-run the whole effect
+      // when `wsUrl` changes (the only common case is a
+      // fresh URL from the Tauri side after a VM restart),
+      // and React's render before the effect picks up the
+      // latest values for the other props too.
       // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [wsUrl]);
 
@@ -257,23 +326,48 @@ export const NoVncViewer = forwardRef<NoVncViewerHandle, NoVncViewerProps>(
       // it and let the reconnect path retry.
       let rfb: InstanceType<typeof RFB>;
       try {
-        rfb = new RFB(el, urlRef.current, {
-          // Reasonable defaults for a local WebSocket:
-          // shared mode (other VNC viewers can attach),
-          // no repeater, no credentials (the VNC password is
-          // wired through x11vnc on the VM side and we don't
-          // need it on the noVNC end since the Tauri proxy
-          // runs on localhost).
+        rfb = new RFB(el, wsUrl, {
+          // (v3.0.7) Shared mode: allow other VNC viewers
+          // to attach to the same session. The previous
+          // comment said this was the intent but the
+          // option wasn't actually passed — explicitly
+          // pass it now so the second viewer (e.g. a
+          // second preview tab) doesn't get an "exclusive
+          // session" rejection.
+          shared: true,
+          // If the caller supplied a VNC password at
+          // mount time, hand it to the constructor so
+          // the RFB doesn't need to ask via
+          // `credentialsrequired`. The fallback
+          // `credentialsrequired` handler below still
+          // works for the case where the server demands
+          // a password mid-session.
+          credentials: credentials
+            ? { password: credentials.password }
+            : undefined,
         });
       } catch (e) {
         const message = e instanceof Error ? e.message : String(e);
-        onErrorRef.current?.(`VNC connection failed: ${message}`);
+        const errMsg = `VNC connection failed: ${message}`;
+        setLastError(errMsg);
+        onErrorRef.current?.(errMsg);
         scheduleReconnect();
         return;
       }
       rfbRef.current = rfb;
       rfb.viewOnly = viewOnly;
       rfb.scaleViewport = scaleViewport;
+      // (v3.0.7) Re-apply scaleViewport after the
+      // container has been laid out. The constructor
+      // captures the container's current size
+      // synchronously, but at construction time the
+      // surrounding flex chain often hasn't sized the
+      // container yet — re-applying after a microtask
+      // lets noVNC re-derive the canvas size against
+      // the post-layout dimensions.
+      queueMicrotask(() => {
+        if (rfbRef.current === rfb) rfb.scaleViewport = true;
+      });
       // The remote-cursor flag is set via the `showCursor`
       // setter; passing it in the options object is the
       // documented path.
@@ -286,10 +380,54 @@ export const NoVncViewer = forwardRef<NoVncViewerHandle, NoVncViewerProps>(
       rfb.addEventListener("connect", () => {
         attemptsRef.current = 0;
         if (mountedRef.current) setConnected(true);
-        onConnectRef.current?.();
+        // (v3.0.7) Schedule the no-frame timeout. If the
+        // framebuffer doesn't paint within
+        // NO_FRAME_TIMEOUT_MS, the user gets a real
+        // error message instead of a silent black canvas
+        // (the symptom of a working local WS but a dead
+        // SSH tunnel behind it).
+        if (noFrameTimerRef.current !== null) {
+          clearTimeout(noFrameTimerRef.current);
+          noFrameTimerRef.current = null;
+        }
+        noFrameTimerRef.current = setTimeout(() => {
+          noFrameTimerRef.current = null;
+          if (!mountedRef.current || cancelledRef.current) return;
+          if (firstFrameReceivedRef.current) return;
+          const errMsg =
+            "VNC connected but no framebuffer received in " +
+            Math.round(NO_FRAME_TIMEOUT_MS / 1000) +
+            "s — check VM console / VNC server";
+          setLastError(errMsg);
+          onErrorRef.current?.(errMsg);
+          // Treat as a failed connect: drop the
+          // overlay so the red error message is
+          // visible, and schedule a reconnect.
+          setShowOverlay(false);
+          scheduleReconnect();
+        }, NO_FRAME_TIMEOUT_MS);
+        // (v3.0.7) `connect` is NOT enough to call
+        // `onConnect` anymore — that fires on
+        // `firstFrameReceived`. Tell the parent the
+        // socket is up via `setConnected` (it gates
+        // the imperative ref's `isConnected()`), but
+        // hold the onConnect callback until the
+        // framebuffer is confirmed.
+        setLastError(null);
       });
       rfb.addEventListener("disconnect", (e) => {
         if (mountedRef.current) setConnected(false);
+        // (v3.0.7) Cancel any pending no-frame timer
+        // when the connection drops.
+        if (noFrameTimerRef.current !== null) {
+          clearTimeout(noFrameTimerRef.current);
+          noFrameTimerRef.current = null;
+        }
+        // Reset the first-frame signal so a
+        // successful reconnect shows the overlay
+        // again until the new framebuffer paints.
+        setFirstFrameReceived(false);
+        firstFrameReceivedRef.current = false;
         onDisconnectRef.current?.();
         // NoVNC's RFB fires `disconnect` even on our own
         // unmount. Check `cancelledRef` so we don't loop
@@ -304,8 +442,60 @@ export const NoVncViewer = forwardRef<NoVncViewerHandle, NoVncViewerProps>(
         scheduleReconnect();
       });
       rfb.addEventListener("securityfailure", () => {
-        onErrorRef.current?.("VNC security handshake failed");
+        const errMsg = "VNC security handshake failed";
+        setLastError(errMsg);
+        onErrorRef.current?.(errMsg);
+        setShowOverlay(false);
       });
+      // (v3.0.7) The RFB fires `credentialsrequired` when
+      // the server demands a password mid-handshake. If
+      // the caller passed a `credentials` prop, reply
+      // immediately with the password. Without this
+      // handler, noVNC shows its own password dialog —
+      // not the right UX for a renderer inside Tauri.
+      rfb.addEventListener("credentialsrequired", () => {
+        if (credentials?.password) {
+          rfb.sendCredentials({ password: credentials.password });
+        } else {
+          const errMsg =
+            "VNC server requested credentials but no password was provided";
+          setLastError(errMsg);
+          onErrorRef.current?.(errMsg);
+          setShowOverlay(false);
+        }
+      });
+      // (v3.0.7) `desktopname` is the first event the RFB
+      // fires after the server has actually responded with
+      // the desktop name — strong evidence the
+      // WS↔VNC chain is alive. The RFB also fires
+      // `resize` once it knows the framebuffer
+      // dimensions. Either of these counts as
+      // "framebuffer received" for the purposes of
+      // dropping the overlay.
+      const markFirstFrame = () => {
+        if (firstFrameReceivedRef.current) return;
+        firstFrameReceivedRef.current = true;
+        if (mountedRef.current) {
+          setFirstFrameReceived(true);
+          // Drop the overlay only after the min-show
+          // floor has elapsed (the minShowTimerRef
+          // handles the actual unsetting). If the
+          // floor already elapsed while we were
+          // waiting for the framebuffer, drop it now.
+          if (minShowTimerRef.current === null) {
+            setShowOverlay(false);
+          }
+        }
+        if (noFrameTimerRef.current !== null) {
+          clearTimeout(noFrameTimerRef.current);
+          noFrameTimerRef.current = null;
+        }
+        // Now that the framebuffer is confirmed
+        // streaming, fire the parent's onConnect.
+        onConnectRef.current?.();
+      };
+      rfb.addEventListener("desktopname", markFirstFrame);
+      rfb.addEventListener("resize", markFirstFrame);
       rfb.addEventListener("clipboard", () => {
         // no-op for now; the renderer's preview doesn't
         // surface clipboard sync.
@@ -315,9 +505,9 @@ export const NoVncViewer = forwardRef<NoVncViewerHandle, NoVncViewerProps>(
     function scheduleReconnect() {
       if (!mountedRef.current || cancelledRef.current) return;
       if (attemptsRef.current >= MAX_RETRIES) {
-        onErrorRef.current?.(
-          `Lost VNC connection — gave up after ${MAX_RETRIES} retries`,
-        );
+        const errMsg = `Lost VNC connection — gave up after ${MAX_RETRIES} retries`;
+        setLastError(errMsg);
+        onErrorRef.current?.(errMsg);
         return;
       }
       const attempt = ++attemptsRef.current;
@@ -327,6 +517,17 @@ export const NoVncViewer = forwardRef<NoVncViewerHandle, NoVncViewerProps>(
       reconnectTimerRef.current = setTimeout(() => {
         reconnectTimerRef.current = null;
         if (cancelledRef.current || !mountedRef.current) return;
+        // Drop the old RFB cleanly so the next
+        // construction gets a fresh canvas.
+        const r = rfbRef.current;
+        rfbRef.current = null;
+        if (r) {
+          try {
+            r.disconnect();
+          } catch {
+            // ignore
+          }
+        }
         // noVNC owns the DOM children of the container;
         // clear them before constructing a fresh RFB so
         // the new instance gets a clean canvas.
@@ -334,9 +535,35 @@ export const NoVncViewer = forwardRef<NoVncViewerHandle, NoVncViewerProps>(
         if (el) {
           while (el.firstChild) el.removeChild(el.firstChild);
         }
+        // (v3.0.7) Re-arm the per-mount signals so the
+        // overlay is back up and the no-frame timer is
+        // rescheduled.
+        setShowOverlay(true);
+        setFirstFrameReceived(false);
+        setLastError(null);
+        firstFrameReceivedRef.current = false;
+        if (minShowTimerRef.current !== null) {
+          clearTimeout(minShowTimerRef.current);
+          minShowTimerRef.current = null;
+        }
+        minShowTimerRef.current = setTimeout(() => {
+          minShowTimerRef.current = null;
+          if (mountedRef.current) setShowOverlay(false);
+        }, MIN_OVERLAY_MS);
         connect();
       }, delay);
     }
+
+    // (v3.0.7) Derive the `data-show-overlay` signal from
+    // BOTH the min-show timer AND the first-frame
+    // signal. The overlay stays up until the floor
+    // elapses AND the framebuffer paints. If a hard
+    // error happens (`lastError` is set and no
+    // framebuffer ever arrived), show the red error
+    // overlay instead and drop the "Connecting to VM…"
+    // message.
+    const overlayActive =
+      showOverlay || (!firstFrameReceived && !lastError);
 
     return (
       <div
@@ -346,15 +573,33 @@ export const NoVncViewer = forwardRef<NoVncViewerHandle, NoVncViewerProps>(
         // screen div into the container; this wrapper just
         // sets the layout box.
         style={{
+          position: "relative",
           width: "100%",
           height: "100%",
-          position: "relative",
-          overflow: "hidden",
           background: "var(--bg-0)",
+          display: "flex",
         }}
         data-connected={connected ? "true" : "false"}
-        data-show-overlay={showOverlay ? "true" : "false"}
-      />
+        data-show-overlay={overlayActive ? "true" : "false"}
+      >
+        {/* (v3.0.7) Centered red error overlay. Shown when
+            `lastError` is set AND the framebuffer never
+            arrived (the silent-black-canvas case). When
+            the framebuffer arrives successfully the
+            `lastError` is cleared and the overlay unmounts. */}
+        {lastError && !firstFrameReceived ? (
+          <div
+            className="novnc-viewer__error"
+            data-testid="novnc-viewer-error"
+            role="alert"
+          >
+            <div className="novnc-viewer__error-title">
+              Console error
+            </div>
+            <div className="novnc-viewer__error-detail">{lastError}</div>
+          </div>
+        ) : null}
+      </div>
     );
   },
 );
