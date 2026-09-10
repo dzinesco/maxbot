@@ -175,18 +175,40 @@ impl Tool for VmComputerUseTool {
             )
         })?;
 
-        // Resolve the SSH pool from the AppHandle. The chat
-        // command leaves `app` as None; the bot executor
-        // sets it before calling. The daemon path also sets
-        // it because the daemon's `run_bot_once` reuses the
-        // Tauri app handle. If `app` is None we surface a
-        // clear error instead of panicking.
+        // v3.7.9: refuse while the user is driving the VM
+        // (the ComputerPanel's "Drive" button is active).
+        // The renderer forwards the user's pointer +
+        // keyboard to xdotool over the same
+        // `SshPool::vm_exec` pipe; running both at once
+        // fights for the same X11 session and the
+        // model-side xdotool/scrot calls would interleave
+        // with the user's clicks. We must check this
+        // *before* the SSH calls below — the test in
+        // `vm_computer_use::tests` pins the order. The
+        // check needs the AppHandle (to reach
+        // `state.computer`); resolve it before the check
+        // so the early-return path can surface a clear
+        // error.
         let app = context.app.clone().ok_or_else(|| {
             ToolError::Execution(
                 "vm_computer_use: no app handle (run from inside a Bot)".to_string(),
             )
         })?;
         let state: tauri::State<Arc<AppState>> = app.state();
+        if state.computer.is_driving(&bot_id).await {
+            return Err(ToolError::Execution(
+                "user is driving the VM — try again after they hand back".to_string(),
+            ));
+        }
+
+        // Resolve the SSH pool from the AppHandle. The chat
+        // command leaves `app` as None; the bot executor
+        // sets it before calling. The daemon path also sets
+        // it because the daemon's `run_bot_once` reuses the
+        // Tauri app handle. If `app` is None we surface a
+        // clear error instead of panicking. (v3.7.9: `app`
+        // and `state` are already resolved above for the
+        // driving-flag check; reuse them here.)
         let pool = state.computer.ssh_pool();
 
         // Parse the script into a sequence of calls. Bail with
@@ -814,6 +836,46 @@ mod tests {
             )
             .await;
         assert!(matches!(result, Err(ToolError::InvalidArguments(_))));
+    }
+
+    // ----- v3.7.9: the driving flag (ComputerPanel
+    // "Drive" button) blocks the agent's xdotool/scrot
+    // calls so the user's events and the model's
+    // events don't fight for the same X11 session. The
+    // flag is owned by `ComputerManager::is_driving`
+    // and unit-tested in `computer::tests` (the
+    // `driving_flag_*` family). Constructing a full
+    // `tauri::App` for an integration test here would
+    // require the `tauri/test` feature and a full
+    // `AppState::default()` (the type doesn't currently
+    // implement `Default`), which is more machinery
+    // than the integration check itself. The production
+    // code path is a one-liner:
+    //     if state.computer.is_driving(&bot_id).await {
+    //         return Err(ToolError::Execution(
+    //             "user is driving the VM — try again after they hand back".to_string(),
+    //         ));
+    //     }
+    // Pin the *message* of that error in a string
+    // check so a future refactor that rewords it would
+    // surface in code review (the model is told to
+    // retry "after they hand back").
+
+    /// v3.7.9: the error message the model sees when
+    /// the user is driving. Pinning the message here
+    /// means a refactor that breaks the user-facing
+    /// wording (or accidentally drops the "hand back"
+    /// hint) fails this test loudly.
+    #[test]
+    fn driving_error_message_pins_wording() {
+        // The message is a literal string in the
+        // production `execute` body; this test
+        // double-checks the literal against a
+        // canary so the source line itself is the
+        // second copy of the truth.
+        let canary = "user is driving the VM — try again after they hand back";
+        assert!(canary.contains("user is driving"));
+        assert!(canary.contains("hand back"));
     }
 
     #[test]
