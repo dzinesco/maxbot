@@ -219,7 +219,14 @@ pub fn run() {
             commands::computer::computer_start,
             commands::computer::computer_stop,
             commands::computer::computer_destroy,
-            commands::computer::computer_console_url,
+            // v3.7.2: in-app preview is now a
+            // `virsh screenshot` poll on the host. The
+            // noVNC `computer_console_url` path is
+            // gone. Takeover uses macOS `Screen Sharing`
+            // via the existing `ssh -L` tunnel.
+            commands::computer::computer_screenshot,
+            commands::computer::computer_takeover_open,
+            commands::computer::computer_takeover_close,
             commands::computer::computer_test_connection,
             commands::computer::computer_file_list,
             commands::computer::computer_file_read,

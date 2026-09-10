@@ -4,6 +4,143 @@ All notable changes to MaxBot are documented in this file. The format
 follows [Keep a Changelog](https://keepachangelog.com/) and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## v3.7.2 — 2026-09-10
+
+### Changed — noVNC strip, host-side screenshot poll, LightDM-based guest desktop
+
+The ComputerPanel's in-app preview is no longer a
+noVNC stream. The Tauri webview (WKWebView) didn't
+render noVNC's canvas path reliably, and the v3.0.x
+path tunneled a separate x11vnc on `:1` while
+`virsh screenshot` of the QEMU virtual VGA showed
+nothing — a created-but-invisible VM. The new path
+is host-side:
+
+- `computer_screenshot(bot_id)` runs `virsh
+  screenshot <vm>` on the server and pipes the
+  bytes (JPEG when ImageMagick's `convert` is
+  installed, PPM-elsewhere) back to the Mac. The
+  panel polls every 300ms with a single in-flight
+  request, pauses on `document.hidden`, and revokes
+  the previous blob URL before setting a new one.
+  No QGA gate — the QEMU virtual VGA is always
+  available while the domain is `running`, including
+  during cloud-init's LightDM install (which is
+  exactly the boot phase the preview should show).
+- `computer_takeover_open` / `_close` replace the
+  v3.0.x `console_url`. The Tauri side spawns
+  `ssh -L <local>:127.0.0.1:<qemu_vnc>` from a
+  port in the configured VNC range, returns the
+  local port, and the renderer fires
+  `open vnc://127.0.0.1:<port>` to hand off to
+  macOS `Screen Sharing`. The tunnel lives until
+  the user clicks "Stop takeover". The local port
+  is allocated from `Settings.computer_vnc_local_port_range`
+  — never hardcoded `:5901`, so two Bots don't
+  collide.
+- The guest's cloud-init now installs `lightdm +
+  xfce4` with an autologin drop-in and
+  `systemctl enable --now lightdm`. Without
+  this, the QEMU virtual VGA stays at a text
+  console and `virsh screenshot` returns a black
+  frame. The previous `x11vnc` + `tigervnc-standalone-server`
+  + `.vnc/xstartup` + `@reboot x11vnc` crontab
+  is gone.
+- The new `SshExecutor::server_exec_bin` trait
+  method returns a `Vec<u8>` stdout (vs the
+  existing text `String`) so binary payloads
+  round-trip as bytes instead of a lossy UTF-8
+  string. The daemon's stdout path is unchanged
+  — text-by-construction.
+
+### Removed
+
+- `@novnc/novnc` dependency and
+  `src/components/noVncViewer.{tsx,test.tsx}`.
+- `src/novnc.d.ts` (the hand-rolled type
+  declarations for the noVNC package).
+- The `VncProxy` map on `ComputerManager` and
+  its `serve()` WebSocket-bridge loop in
+  `computer/vnc.rs`. Replaced with a
+  `takeover_tunnels: HashMap<BotId, TakeoverHandle>`
+  map that holds just the SSH child + the local
+  port.
+- `tokio-tungstenite` (only the noVNC bridge used
+  it).
+- `computer_console_url` Tauri command. Replaced
+  with `computer_screenshot` +
+  `computer_takeover_open` +
+  `computer_takeover_close`.
+
+### Migration
+
+Existing VMs that lack `lightdm` (i.e. any VM
+provisioned before v3.7.2) need to be
+**destroyed + re-provisioned** to pick up the
+new cloud-init user-data. cloud-init only runs
+once per VM (at first boot), so the only way
+to apply the new packages + lightdm config is a
+fresh provision. A `bootstrap-desktop.sh`
+helper is opt-in (NOT a Tauri command) for
+admins who need to retrofit an existing VM
+without losing its disk; see
+`docs/server-setup.md` for the one-shot.
+
+### Cargo
+
+- `Cargo.toml`: drop `tokio-tungstenite`, add
+  `image = "0.25"` (PPM + JPEG codecs only,
+  no PNG/GIF/WebP) for the local PPM→JPEG
+  fallback when the server's ImageMagick
+  `convert` is missing.
+
+### Why the screenshot-path not a noVNC replacement
+
+The first instinct was to fix noVNC. We tried
+that for two slices and it kept regressing
+because the Tauri webview is the wrong host for
+noVNC's canvas path, and the noVNC package's
+ESM module loader fights WKWebView's CSP. The
+screenshot poll sidesteps both — it's a static
+`<img>` with a fresh `blob:` URL every 300ms,
+no canvas, no WebSocket, no module loader. The
+takeover path uses macOS `Screen Sharing` for
+full keyboard + mouse control; the in-app
+preview stays up so the Bot can resume
+regardless of who has the mouse.
+
+### Acceptance
+
+The v3.7.2 brief calls for the Mac app's
+ComputerPanel to show a real screenshot of
+the VM desktop within 5-8s of opening on a
+running VM, with a ~300ms poll, single
+in-flight, `document.hidden` pause, blob URL
+revocation, and takeover over a port from the
+configured VNC range (no hardcoded `:5901`).
+The smoke test against `crispy` confirms the
+end-to-end path.
+
+### v3.7.2 (amended) — "VM not provisioned" state in the Computer panel
+
+When the libvirt domain is missing on the host
+(Bot exists in MaxBot's SQLite but the VM was
+never provisioned, was destroyed outside MaxBot,
+or lives on a different host), `virsh screenshot`
+exits non-zero with stderr
+`error: failed to get domain '<vm>'`. The
+screenshot path now matches that pattern and
+surfaces a `ComputerError::DomainNotFound`
+variant instead of the raw libvirt error. The
+ComputerPanel renders a clear "VM not
+provisioned" state with a Provision button (and
+a secondary "Destroy + re-provision" link) so
+the user has a one-click fix instead of a raw
+stderr dump. The screenshot poll auto-retries
+once the VM reaches `running`. Amended on the
+v3.7.2 commit per the "Screenshot saved" fix
+precedent.
+
 ## v3.7.1 — 2026-09-10
 
 ### Added — Cross-machine shared_fs routing + maxbotd CORS gap (deferred follow-up)

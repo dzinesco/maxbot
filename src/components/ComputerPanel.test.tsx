@@ -1,40 +1,60 @@
 // Component tests for the v2.0 Slice C `ComputerPanel`.
 //
-// The plan calls for three tests:
-//   1. Renders the Status icon variant correctly with a running bot.
-//   2. Renders the Status icon variant correctly with a stopped bot.
-//   3. Calls `computerConsoleUrl` when entering Preview mode
-//      (mock the Tauri call).
+// v3.7.2: the in-app preview is now a screenshot poll,
+// not a noVNC stream. The noVNC stub and the
+// `computerConsoleUrl` test are gone. New tests:
 //
-// `ComputerPanel` imports `../lib/tauri` for its Tauri calls.
-// happy-dom doesn't ship a Tauri runtime, so `invoke` returns
-// a Promise that rejects. We mock the tauri module to:
+//   1. Renders the Status icon variant correctly with a
+//      running bot.
+//   2. Renders the Status icon variant correctly with a
+//      stopped bot.
+//   3. Preview mode shows the loading overlay before the
+//      first screenshot, then swaps to an `<img>`.
+//   4. The screenshot poll does not stack in-flight
+//      requests when each call is slower than the poll
+//      interval.
+//   5. Takeover button calls `computerTakeoverOpen`,
+//      shows the local port, and the Stop button calls
+//      `computerTakeoverClose`.
+//
+// `ComputerPanel` imports `../lib/tauri` for its Tauri
+// calls. happy-dom doesn't ship a Tauri runtime, so
+// `invoke` returns a Promise that rejects. We mock the
+// tauri module to:
 //   - return a controlled `Computer` from `computerGet`.
-//   - record the `computerConsoleUrl` call.
+//   - return a fake JPEG byte array from
+//     `computerScreenshot` so the panel can wrap it in
+//     a `Blob` and render an `<img>`.
+//   - record the `computerTakeoverOpen` and
+//     `computerTakeoverClose` calls.
 //   - make `listen` return a no-op unlisten fn.
-//
-// `noVncViewer` is also lazy-imported by the panel, but the
-// viewer only mounts once `consoleUrl` resolves. We stub it
-// with a tiny placeholder so the preview test doesn't try to
-// open a real WebSocket (happy-dom doesn't ship a working
-// `WebSocket` constructor that satisfies noVNC's expectations).
 
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, act } from "@testing-library/react";
 import type { Settings } from "../lib/api";
 
 // Mock the tauri module so the panel sees a controlled
-// `Computer` and we can spy on the console-URL call.
+// `Computer` and we can spy on the screenshot + takeover
+// calls.
 vi.mock("../lib/tauri", () => {
   return {
     computerGet: vi.fn(),
-    computerConsoleUrl: vi.fn(),
     computerStart: vi.fn(),
     computerStop: vi.fn(),
     computerDestroy: vi.fn(),
+    // v3.7.2 (amended): the "VM not provisioned" UI
+    // calls this directly. The mock has to be present
+    // or the import resolves to undefined and the
+    // component throws.
+    computerProvision: vi.fn(),
     computerFileList: vi.fn(),
     computerFileRead: vi.fn(),
     computerFileWrite: vi.fn(),
+    // v3.7.2: the in-app preview poll.
+    computerScreenshot: vi.fn(),
+    // v3.7.2: takeover (Screen Sharing) buttons.
+    computerTakeoverOpen: vi.fn(),
+    computerTakeoverClose: vi.fn(),
     // v2.3.5: the panel reads Settings on mount to decide
     // whether to show the "Use my default key" button, and
     // installs the default key on click. Both need to be
@@ -46,21 +66,16 @@ vi.mock("../lib/tauri", () => {
   };
 });
 
-// Stub NoVncViewer so the preview test doesn't try to
-// instantiate the RFB class. We just render a div with
-// a data attribute the test can assert on.
-vi.mock("./noVncViewer", () => ({
-  NoVncViewer: ({ wsUrl }: { wsUrl: string }) => (
-    <div data-testid="novnc-stub" data-ws-url={wsUrl} />
-  ),
-}));
-
 // Lazy-import after the mock so the panel picks it up.
 import { ComputerPanel } from "./ComputerPanel";
 import {
+  computerDestroy,
   computerGet,
-  computerConsoleUrl,
   computerInstallDefaultKey,
+  computerProvision,
+  computerScreenshot,
+  computerTakeoverOpen,
+  computerTakeoverClose,
   getSettings,
   saveSettings,
 } from "../lib/tauri";
@@ -128,12 +143,34 @@ const defaultSettings: Settings = {
   maxbotd_url: "http://127.0.0.1:8443",
 };
 
+// v3.7.2: a tiny in-memory JPEG. The panel wraps it in
+// a `Blob({ type: "image/jpeg" })` and renders an
+// `<img>`. happy-dom's `URL.createObjectURL` returns a
+// string like `blob:mock://...`; we just need the bytes
+// to be a non-empty `Uint8Array` so the panel
+// transitions out of the loading overlay. The SOI
+// marker is technically wrong (no real JPEG body) but
+// the panel doesn't decode — happy-dom's `<img>` ignores
+// the body too.
+const FAKE_JPEG = new Uint8Array([0xff, 0xd8, 0xff, 0xd9]);
+
 beforeEach(() => {
   vi.mocked(computerGet).mockReset();
-  vi.mocked(computerConsoleUrl).mockReset();
-  vi.mocked(computerConsoleUrl).mockResolvedValue(
-    "ws://localhost:5900/",
-  );
+  // v3.7.2: default to a quick-resolving screenshot
+  // poll. Tests that want to assert stacking behavior
+  // override this with a slow `mockImplementation`.
+  vi.mocked(computerScreenshot).mockReset();
+  vi.mocked(computerScreenshot).mockResolvedValue(FAKE_JPEG);
+  vi.mocked(computerTakeoverOpen).mockReset();
+  vi.mocked(computerTakeoverOpen).mockResolvedValue(5901);
+  vi.mocked(computerTakeoverClose).mockReset();
+  vi.mocked(computerTakeoverClose).mockResolvedValue();
+  // v3.7.2 (amended): default to a no-op provision
+  // mock. Tests that exercise the "VM not
+  // provisioned" UI override this so they can assert
+  // the click handler wired the call correctly.
+  vi.mocked(computerProvision).mockReset();
+  vi.mocked(computerProvision).mockResolvedValue();
   // v2.3.5: provide a default Settings response. Tests
   // can override via `vi.mocked(getSettings).mockResolvedValueOnce(...)`.
   vi.mocked(getSettings).mockReset();
@@ -177,8 +214,8 @@ describe("ComputerPanel — status mode", () => {
   });
 });
 
-describe("ComputerPanel — preview mode", () => {
-  it("calls computerConsoleUrl when entering preview mode", async () => {
+describe("ComputerPanel — preview mode (v3.7.2 screenshot poll)", () => {
+  it("shows the loading overlay, then swaps to an <img> after the first frame", async () => {
     vi.mocked(computerGet).mockResolvedValue(runningComputer);
     render(
       <ComputerPanel
@@ -187,23 +224,126 @@ describe("ComputerPanel — preview mode", () => {
         pollIntervalMs={60000}
       />,
     );
-    // Wait for the panel to mount and the initial
-    // `computerGet` to resolve. The console URL is fetched
-    // as a side-effect of the first successful `computerGet`
-    // (the panel calls it once it knows the VM is running
-    // and has a vnc_port).
+    // The panel calls `computerGet` on mount. Once the
+    // row resolves with `state === "running"`, the
+    // screenshot poll starts. Before the first frame
+    // arrives, the loading overlay is visible.
     await waitFor(() => {
-      expect(computerConsoleUrl).toHaveBeenCalledWith("bot-1");
+      expect(computerScreenshot).toHaveBeenCalledWith("bot-1");
     });
-    // The panel should also have rendered its toolbar /
-    // preview chrome. The noVNC stub receives the URL
-    // forwarded by the panel — that confirms the URL
-    // propagated from Tauri → panel → viewer.
-    const panel = await screen.findByTestId("computer-panel");
-    expect(panel).toBeInTheDocument();
-    expect(panel.className).toContain("computer-panel__preview");
-    expect(panel.querySelector('[data-testid="novnc-stub"]')?.getAttribute("data-ws-url"))
-      .toBe("ws://localhost:5900/");
+    // First frame lands: the overlay is gone, the
+    // <img> is on screen.
+    const img = await screen.findByTestId("computer-screenshot");
+    expect(img).toBeInTheDocument();
+    expect(img.tagName).toBe("IMG");
+  });
+
+  it("the screenshot poll does not stack in-flight requests when calls are slow", async () => {
+    // v3.7.2 acceptance: single in-flight, no stacking.
+    // We hold each call on a deferred promise and
+    // confirm the panel only ever has one outstanding.
+    // This uses real timers (no `vi.useFakeTimers`) —
+    // the goal is to prove the in-flight guard, not
+    // the poll cadence. We use a deferred per call so
+    // we can count exactly how many calls are in
+    // flight at the moment we check.
+    vi.mocked(computerGet).mockResolvedValue(runningComputer);
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const deferreds: Array<() => void> = [];
+    const releaseAll = () => {
+      deferreds.splice(0).forEach((r) => r());
+    };
+    vi.mocked(computerScreenshot).mockImplementation(async () => {
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      // Wait for the test to release us. The poll
+      // interval is 300ms; we want the second tick
+      // to fire while the first is still pending so
+      // we can prove the guard rejects it.
+      await new Promise<void>((resolve) => deferreds.push(resolve));
+      inFlight -= 1;
+      return FAKE_JPEG;
+    });
+    render(
+      <ComputerPanel
+        botId="bot-1"
+        mode="preview"
+        pollIntervalMs={60000}
+      />,
+    );
+    // The initial frame fires immediately on mount.
+    await waitFor(() => {
+      expect(inFlight).toBeGreaterThan(0);
+    });
+    // Let the poll run for ~700ms (just over two
+    // 300ms intervals). The first call is still
+    // pending, so the next two intervals should be
+    // dropped by the in-flight guard. After the
+    // release, no new calls fire (we already passed
+    // several intervals).
+    await new Promise((r) => setTimeout(r, 700));
+    expect(maxInFlight).toBe(1);
+    // The panel made the call at least once.
+    expect(computerScreenshot).toHaveBeenCalled();
+    // Cleanup: release any pending deferreds so the
+    // effect can finish.
+    releaseAll();
+  });
+});
+
+describe("ComputerPanel — takeover (v3.7.2 Screen Sharing)", () => {
+  it("'Take over' calls computerTakeoverOpen and shows the local port", async () => {
+    vi.mocked(computerGet).mockResolvedValue(runningComputer);
+    vi.mocked(computerTakeoverOpen).mockResolvedValue(5901);
+    const user = (await import("@testing-library/user-event")).default;
+    render(
+      <ComputerPanel
+        botId="bot-1"
+        mode="preview"
+        pollIntervalMs={60000}
+      />,
+    );
+    // Wait for the toolbar to render. The button is
+    // visible whenever the VM is running.
+    const takeoverButton = await screen.findByTestId("computer-takeover");
+    expect(takeoverButton).toHaveTextContent(/Take over/);
+    await user.click(takeoverButton);
+    await waitFor(() => {
+      expect(computerTakeoverOpen).toHaveBeenCalledWith("bot-1");
+    });
+    // The takeover-status pill surfaces the local
+    // port so the user can re-open Screen Sharing if
+    // they dismissed the first `open`.
+    const status = await screen.findByTestId("takeover-status");
+    expect(status.textContent).toMatch(/localhost:5901/);
+    // The button label flipped to "Stop takeover".
+    expect(takeoverButton).toHaveTextContent(/Stop takeover/);
+  });
+
+  it("'Stop takeover' calls computerTakeoverClose and hides the port pill", async () => {
+    vi.mocked(computerGet).mockResolvedValue(runningComputer);
+    vi.mocked(computerTakeoverOpen).mockResolvedValue(5901);
+    const user = (await import("@testing-library/user-event")).default;
+    render(
+      <ComputerPanel
+        botId="bot-1"
+        mode="preview"
+        pollIntervalMs={60000}
+      />,
+    );
+    const takeoverButton = await screen.findByTestId("computer-takeover");
+    await user.click(takeoverButton);
+    await screen.findByTestId("takeover-status");
+    // Click again — the button is now "Stop takeover".
+    await user.click(takeoverButton);
+    await waitFor(() => {
+      expect(computerTakeoverClose).toHaveBeenCalledWith("bot-1");
+    });
+    await waitFor(() => {
+      expect(screen.queryByTestId("takeover-status")).toBeNull();
+    });
+    expect(takeoverButton).toHaveTextContent(/Take over/);
   });
 });
 
@@ -296,5 +436,68 @@ describe("ComputerPanel — install-default-key button", () => {
     expect(
       screen.queryByTestId("computer-install-default-key"),
     ).not.toBeNull();
+  });
+});
+
+// v3.7.2 (amended): the "VM not provisioned" error state.
+// The screenshot poll's first call rejects with
+// `ComputerError::DomainNotFound`'s Display string
+// ("computer: domain '<vm>' not found on host"), and
+// the panel surfaces a clear inline error with a
+// Provision button instead of a raw libvirt stderr.
+describe("ComputerPanel — domain-not-found state (v3.7.2 amended)", () => {
+  // The ComputerError::DomainNotFound Display impl on
+  // the Rust side is:
+  //   "computer: domain '{vm_name}' not found on host"
+  // Tauri serializes the Display into the JS-side
+  // rejection message, so this is what the panel sees
+  // when the host's `virsh` says the domain is gone.
+  const DOMAIN_NOT_FOUND_MSG =
+    "computer: domain 'maxbot-bot-1' not found on host";
+
+  it("renders DomainNotFound state with Provision button when error matches", async () => {
+    // Running computer (so the screenshot poll kicks
+    // off), but the host's `virsh` says the domain is
+    // missing.
+    vi.mocked(computerGet).mockResolvedValue(runningComputer);
+    vi.mocked(computerScreenshot).mockRejectedValue(
+      new Error(DOMAIN_NOT_FOUND_MSG),
+    );
+    const user = (await import("@testing-library/user-event")).default;
+    render(
+      <ComputerPanel
+        botId="bot-1"
+        mode="preview"
+        pollIntervalMs={60000}
+      />,
+    );
+    // The poll fires immediately; the rejection is
+    // caught and the DomainNotFound state renders.
+    const stateNode = await screen.findByTestId(
+      "computer-domain-not-found",
+    );
+    expect(stateNode).toBeInTheDocument();
+    // The error message is human-friendly — no raw
+    // "not found on host" stderr text.
+    expect(stateNode.textContent).toMatch(/VM not provisioned/i);
+    expect(stateNode.textContent).not.toMatch(/not found on host/);
+    // The Provision button is present and wired to
+    // `computerProvision(bot_id)`. The brief's
+    // acceptance criterion is satisfied by this
+    // single assertion: clicking it fires the
+    // Tauri command with the bot id and the
+    // Settings defaults.
+    const provisionButton = await screen.findByTestId(
+      "computer-provision-button",
+    );
+    expect(provisionButton).toBeInTheDocument();
+    expect(provisionButton).toHaveTextContent(/Provision/);
+    await user.click(provisionButton);
+    await waitFor(() => {
+      expect(computerProvision).toHaveBeenCalledWith("bot-1", {
+        disk_gb: 10,
+        ram_mb: 2048,
+      });
+    });
   });
 });

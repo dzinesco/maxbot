@@ -186,14 +186,79 @@ pub async fn computer_destroy(
     result
 }
 
+/// v3.7.2: capture a single JPEG frame from the VM's
+/// QEMU virtual framebuffer via `virsh screenshot` on
+/// the host. The renderer polls this command at ~300ms
+/// to paint the in-app preview. Returns the raw JPEG
+/// bytes — Tauri serializes them as `Vec<u8>`, the
+/// renderer wraps them in a `Blob` and sets `<img
+/// src="blob:...">`.
+///
+/// The command is intentionally NOT gated on QGA. The
+/// QEMU virtual VGA framebuffer is always available
+/// while the domain is `running`, including during
+/// cloud-init's LightDM install. Gating on QGA would
+/// hide the exact boot phase the preview is meant to
+/// show.
 #[tauri::command]
-pub async fn computer_console_url(
+pub async fn computer_screenshot(
     state: State<'_, AppState>,
     bot_id: String,
-) -> Result<String, String> {
+) -> Result<Vec<u8>, String> {
     let db = state.db.clone();
     let mgr = state.computer.clone();
-    mgr.console_url(&db, &bot_id)
+    mgr.screenshot(&db, &bot_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// v3.7.2: open an `ssh -L` tunnel from a free local
+/// port in the configured VNC range to the VM's VNC
+/// port on the server, then open macOS `Screen Sharing`
+/// against it. Returns the local port so the renderer's
+/// "Stop takeover" button can call `takeover_close`
+/// with it.
+///
+/// Idempotent: if a takeover is already open for this
+/// bot, returns the existing local port without
+/// starting a second tunnel. The local port is
+/// allocated from the `computer_vnc_local_port_range`
+/// setting (default `5900-5999`); two Bots never
+/// collide on `:5901`.
+#[tauri::command]
+pub async fn computer_takeover_open(
+    state: State<'_, AppState>,
+    bot_id: String,
+) -> Result<u16, String> {
+    let db = state.db.clone();
+    let mgr = state.computer.clone();
+    let local_port = mgr
+        .takeover_open(&db, &bot_id)
+        .await
+        .map_err(|e| e.to_string())?;
+    // Best-effort hand-off to macOS Screen Sharing. The
+    // `open` command is fire-and-forget — if it fails
+    // (e.g. Screen Sharing is not installed), the
+    // renderer still has the local port to display in
+    // the "tunnel is open, click to copy URL" hint.
+    let url = format!("vnc://127.0.0.1:{local_port}");
+    let _ = std::process::Command::new("open")
+        .arg(&url)
+        .spawn()
+        .map_err(|e| e.to_string());
+    Ok(local_port)
+}
+
+/// v3.7.2: kill the SSH tunnel child and free the
+/// local port. Idempotent — returns `Ok(())` whether
+/// or not a tunnel was open.
+#[tauri::command]
+pub async fn computer_takeover_close(
+    state: State<'_, AppState>,
+    bot_id: String,
+) -> Result<(), String> {
+    let mgr = state.computer.clone();
+    mgr.takeover_close(&bot_id)
         .await
         .map_err(|e| e.to_string())
 }

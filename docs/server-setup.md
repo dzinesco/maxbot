@@ -211,6 +211,17 @@ ssh $SERVER_USER@$SERVER 'sudo mkdir -p /opt/maxbot && \
 The last command should exit with `1` (usage error, no args) — confirms
 the script is callable as root without a password.
 
+> **v3.7.2 note — lightdm + cloud-init is one-shot.** The provision
+> script writes a `seed.iso` and the VM only ever runs cloud-init
+> once. If you have a v3.0.x or v3.7.0 Bot provisioned before v3.7.2,
+> its VM was built without `lightdm` and won't have a desktop on the
+> QEMU framebuffer. **You must destroy + re-provision** that Bot to
+> pick up the new lightdm + xfce4 + autologin config. The Brief has
+> an opt-in `bootstrap-desktop.sh` helper as a one-liner for an
+> existing VM (apt install the same packages + write the lightdm
+> drop-in + `systemctl enable --now lightdm`), but a fresh provision
+> is the supported path.
+
 ## Step 5 — End-to-end smoke test
 
 Run a full provision → start → IP poll → destroy cycle, all from the

@@ -1,33 +1,50 @@
 // ComputerPanel — the three-mode UI for the per-Bot VM
-// (v2.0 Slice C).
+// (v2.0 Slice C, v3.7.2 re-render).
 //
 // Modes (per the Grok Bot essay):
 //   - status    : tiny chip (icon + dot + uptime). Used in the
 //                 title bar (`App.tsx` chrome wires this; we
 //                 just expose the standalone component).
-//   - preview   : pinned side panel, ~30% width, noVNC viewer.
-//                 Bot is still driving; viewer is read-only by
-//                 default (the user can choose to take input).
-//   - takeover  : full-window noVNC viewer with a "Hand back
-//                 to Bot" button. Local input is on (the user
-//                 can use the mouse + keyboard); noVNC is a
-//                 passive viewer so the Bot can resume control
-//                 regardless of whether the human has the mouse.
+//   - preview   : pinned side panel, ~30% width, view-only
+//                 screenshot poll. The Bot is still driving;
+//                 the user is a passive observer. "Take over
+//                 with Screen Sharing" button is available.
+//   - takeover  : full-window preview with the same
+//                 screenshot poll, plus a "Take over with
+//                 Screen Sharing" / "Stop takeover" pair.
+//                 Takeover hands off to macOS `Screen
+//                 Sharing` via an `ssh -L` tunnel; the
+//                 in-app preview stays up so the Bot can
+//                 resume regardless of whether the human
+//                 has the mouse.
+//
+// v3.7.2 changes from v3.0.x:
+//   - The noVNC↔RFB WebSocket bridge is gone. The Tauri
+//     webview (WKWebView) didn't render noVNC's canvas
+//     path reliably, and the QEMU virtual framebuffer
+//     is what `virsh screenshot` captures anyway.
+//   - The preview is now a JPEG poll at ~300ms via
+//     `computerScreenshot(botId)`. The Tauri side runs
+//     `virsh screenshot <vm> /tmp/...ppm` (or PPM→JPEG
+//     via ImageMagick) and pipes the bytes back.
+//   - Takeover uses the existing SSH `-L` tunnel, opened
+//     by `computerTakeoverOpen(botId)`. The returned
+//     local port is what `open vnc://127.0.0.1:<port>`
+//     hands to macOS `Screen Sharing`.
 //
 // Data flow:
-//   1. `computerGet(botId)` is called on mount and every 5s in
-//      Preview / Takeover mode.
-//   2. We also subscribe to the `computer://state-changed`
-//      event so a state transition (e.g. start/stop from the
-//      toolbar) flips the panel without waiting for the next
-//      poll.
-//   3. The noVNC viewer is only mounted once
-//      `computerConsoleUrl(botId)` resolves to a URL — that
-//      also gives us the per-call port the Tauri side picked
-//      from `Settings.computer_vnc_local_port_range`.
-//   4. Toolbar buttons (Start / Stop / Restart / Destroy) call
-//      the corresponding Tauri commands; they disable while
-//      the VM is in `provisioning` (or `error`).
+//   1. `computerGet(botId)` is called on mount and every
+//      `pollIntervalMs` (default 5s) in Preview / Takeover.
+//   2. We also subscribe to `computer://state-changed`
+//      so a state transition flips the panel without
+//      waiting for the next poll.
+//   3. `computerScreenshot(botId)` is polled at 300ms
+//      whenever `computer.state === "running"`. The
+//      poll pauses on `document.hidden` and never stacks
+//      more than one in-flight request.
+//   4. Toolbar buttons (Start / Stop / Restart / Destroy)
+//      call the corresponding Tauri commands; they disable
+//      while the VM is in `provisioning` (or `error`).
 //
 // Restart is a thin convenience: Stop + Start with a small
 // delay between them so libvirt's `virsh start` after a clean
@@ -36,17 +53,19 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { Computer, Settings } from "../lib/api";
 import {
-  computerConsoleUrl,
   computerDestroy,
   computerGet,
   computerInstallDefaultKey,
+  computerProvision,
+  computerScreenshot,
   computerStart,
   computerStop,
+  computerTakeoverClose,
+  computerTakeoverOpen,
   getSettings,
   onComputerStateChanged,
   saveSettings,
 } from "../lib/tauri";
-import { NoVncViewer } from "./noVncViewer";
 import { ComputerFileBrowser } from "./ComputerFileBrowser";
 
 export type ComputerMode = "status" | "preview" | "takeover";
@@ -57,12 +76,15 @@ export interface ComputerPanelProps {
   /** Used in preview / takeover modes. Called when the user
    * clicks the close button (or "Hand back to Bot"). */
   onClose?: () => void;
-  /** Override the default poll interval (ms). The plan calls
-   * for 5s; tests pass a smaller value. */
+  /** Override the default poll interval (ms) for
+   * `computerGet`. The preview screenshot poll has its
+   * own 300ms cadence. The plan calls for 5s; tests pass
+   * a smaller value. */
   pollIntervalMs?: number;
 }
 
 const DEFAULT_POLL_MS = 5000;
+const SCREENSHOT_POLL_MS = 300;
 
 /** Format seconds → "1h 2m" / "12m" / "47s". Used in status
  * mode for the uptime chip. */
@@ -169,28 +191,55 @@ function FullComputerPanel({
   const [computer, setComputer] = useState<Computer | null>(null);
   const [loading, setLoading] = useState(true);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
-  const [consoleUrl, setConsoleUrl] = useState<string | null>(null);
-  // `consoleUrlError` is set when the Tauri `computer_console_url`
-  // command itself fails — typically because the SSH tunnel
-  // child exited before the readiness window elapsed (auth
-  // failed, no passphrase, etc.). We surface this in the
-  // Console tab body so the user sees a real reason instead
-  // of a black noVNC canvas.
-  const [consoleUrlError, setConsoleUrlError] = useState<string | null>(null);
-  // `viewerError` is the noVNC RFB/WebSocket error. Distinct
-  // from `errorMsg`, which is reserved for the computer.state
-  // === "error" path. The viewer's failure is the most
-  // common failure mode in practice (VNC password, tunnel
-  // drop, etc.) and previously rendered a silent blank
-  // viewer with no visible feedback.
+  // v3.7.2: in-app preview is a screenshot poll, not a
+  // noVNC stream. `frameUrl` is a `blob:` URL pointing at
+  // the most recent JPEG; `firstFrame` is set after the
+  // first successful pull so the panel can swap from the
+  // loading overlay to the `<img>`.
+  const [frameUrl, setFrameUrl] = useState<string | null>(null);
+  const [firstFrame, setFirstFrame] = useState(false);
+  // v3.7.2: takeover (Screen Sharing) state. `takeoverOpen`
+  // is true while an `ssh -L` tunnel is alive;
+  // `takeoverPort` is the local port the renderer (and
+  // the user) can hand to `open vnc://127.0.0.1:<port>`.
+  // `takeoverError` surfaces the Tauri command failure
+  // (e.g. NoFreePort, auth failure after auto-recover).
+  const [takeoverOpen, setTakeoverOpen] = useState(false);
+  const [takeoverPort, setTakeoverPort] = useState<number | null>(null);
+  const [takeoverError, setTakeoverError] = useState<string | null>(null);
+  // `viewerError` is set when the screenshot poll fails.
+  // Distinct from `errorMsg`, which is reserved for the
+  // computer.state === "error" path. The poll failure
+  // is the most common failure mode in practice (passphrase
+  // missing, host unreachable, VM in wrong state) and
+  // previously rendered a silent blank panel.
   const [viewerError, setViewerError] = useState<string | null>(null);
+  // v3.7.2 (amended): `domainNotFound` is set when the
+  // screenshot poll fails with `ComputerError::DomainNotFound`
+  // — the libvirt domain is missing on the host. The
+  // message comes through as a stringified Rust error
+  // (Tauri serializes the Display output, not a typed
+  // payload), so we detect by substring. The vm name is
+  // carried alongside so the "VM not provisioned" UI can
+  // quote it back to the user.
+  //
+  // When this is set, the panel renders a clear "VM not
+  // provisioned" state with a Provision button (calls
+  // `computerProvision`) and a secondary "Destroy + re-
+  // provision" link. The auto-retry is implicit: the
+  // screenshot poll re-runs every 300ms, so as soon as
+  // the VM transitions to `running` (which the
+  // `computer://state-changed` listener picks up via
+  // `loadComputer`), the panel swaps back to the live
+  // preview.
+  const [domainNotFound, setDomainNotFound] = useState<string | null>(null);
   const [actionPending, setActionPending] = useState(false);
   const [uptime, setUptime] = useState<number | null>(null);
-  // Body tab: "console" (noVNC viewer) vs "files" (SFTP
-  // browser). The Files tab only does real work when the
-  // VM has an SSH endpoint and a known ssh_key row, but
-  // the browser is mounted regardless and shows its own
-  // error if the listing fails.
+  // Body tab: "console" (screenshot preview) vs "files"
+  // (SFTP browser). The Files tab only does real work
+  // when the VM has an SSH endpoint and a known ssh_key
+  // row, but the browser is mounted regardless and shows
+  // its own error if the listing fails.
   const [bodyTab, setBodyTab] = useState<"console" | "files">("console");
   // v2.3.5: settings snapshot. Used to decide whether to
   // show the "Use my default key" button in the toolbar.
@@ -205,44 +254,22 @@ function FullComputerPanel({
   // refresh the displayed uptime in status / preview modes.
   const lastSeenAt = computer?.last_seen_at ?? null;
   const uptimeTimer = useRef<ReturnType<typeof setInterval> | null>(null);
+  // v3.7.2: refs for the screenshot poll. `inFlight` is
+  // the "don't stack requests" guard. `blobRef` is the
+  // previous blob URL we need to revoke before swapping
+  // in a new one (otherwise the previous JPEG stays
+  // pinned in memory until the next unmount).
+  const inFlight = useRef(false);
+  const blobRef = useRef<string | null>(null);
 
   // --- data loading ---
-  // `loadComputer` fetches the persisted row. In preview /
-  // takeover mode we also kick off the console URL on the
-  // first successful load.
+  // `loadComputer` fetches the persisted row. The
+  // screenshot poll is its own effect (below).
   const loadComputer = useCallback(async () => {
     try {
       const c = await computerGet(botId);
       setComputer(c);
       setErrorMsg(null);
-      if (c) {
-        // Fire-and-forget the console URL. We re-fetch on
-        // every poll so the proxy stays fresh (the Tauri
-        // side spawns a new proxy per `console_url` call;
-        // the prior one dies when the WS closes).
-        if (c.state === "running" && c.vnc_port !== null) {
-          try {
-            const url = await computerConsoleUrl(botId);
-            setConsoleUrl(url);
-            setConsoleUrlError(null);
-          } catch (e) {
-            // The Rust side waited for the SSH tunnel to
-            // be ready (3s window) and refused to return a
-            // URL because the tunnel child had already
-            // exited. Surface the real reason — usually
-            // the passphrase is missing, or the key was
-            // rejected, or the host key didn't match.
-            setConsoleUrl(null);
-            setConsoleUrlError(String(e));
-          }
-        } else {
-          setConsoleUrl(null);
-          setConsoleUrlError(null);
-        }
-      } else {
-        setConsoleUrl(null);
-        setConsoleUrlError(null);
-      }
     } catch (e) {
       setErrorMsg(String(e));
     } finally {
@@ -342,6 +369,177 @@ function FullComputerPanel({
     };
   }, [lastSeenAt]);
 
+  // v3.7.2: screenshot poll. Pulls a fresh JPEG from
+  // the host's QEMU framebuffer every 300ms whenever
+  // the VM is in `running` state. Single in-flight
+  // request (no stacking). Pauses on `document.hidden`
+  // so backgrounded tabs don't burn SSH + virsh. The
+  // previous blob URL is revoked before the next one
+  // is set; otherwise the prior frame stays pinned
+  // until unmount.
+  //
+  // The poll is keyed on `computer?.state` — flipping
+  // to `stopped` / `provisioning` / `error` cancels
+  // the interval (cleanup in the return) and clears
+  // any in-flight ref. When state flips back to
+  // `running`, the effect re-runs and the interval
+  // comes back automatically.
+  useEffect(() => {
+    let intervalId: ReturnType<typeof setInterval> | null = null;
+    let cancelled = false;
+    const pullFrame = async () => {
+      if (cancelled) return;
+      // Don't stack. The Tauri side returns ~10-30KB
+      // of JPEG and the SSH round-trip is ~100-200ms
+      // on the same LAN; if a request takes longer than
+      // 300ms (e.g. cloud-init is busy), we'd rather
+      // wait for it than pile on.
+      if (inFlight.current) return;
+      // Pause when the tab is backgrounded. The browser
+      // may throttle timers anyway, but `document.hidden`
+      // is the explicit signal.
+      if (typeof document !== "undefined" && document.hidden) return;
+      inFlight.current = true;
+      try {
+        const bytes = await computerScreenshot(botId);
+        if (cancelled) return;
+        // Wrap the bytes in a `Blob` for the
+        // `URL.createObjectURL(blob)` call below. The
+        // `bytes` array may be a `Uint8Array` (our
+        // default) or a plain `number[]` (if Tauri
+        // ever returns a JSON array directly). The
+        // explicit `new Uint8Array(bytes)` ensures
+        // the Blob constructor receives an
+        // `ArrayBuffer`-backed `Uint8Array` rather
+        // than a `SharedArrayBuffer`-flavored one,
+        // which the DOM lib types treat as
+        // `ArrayBufferLike` and reject at the type
+        // level (the runtime works either way, but
+        // TypeScript 5.x + the latest `@types/...`
+        // tightened the constraint).
+        const u8 = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+        // `BlobPart` is `Uint8Array<ArrayBuffer> | ...`
+        // and our `u8` is `Uint8Array<ArrayBufferLike>`
+        // (the DOM lib types tightened the bound in TS
+        // 5.x). The runtime accepts either, so cast
+        // through `unknown` to keep the call site short.
+        const blob = new Blob([u8 as BlobPart], { type: "image/jpeg" });
+        const url = URL.createObjectURL(blob);
+        // Revoke the previous blob URL so it doesn't
+        // leak. The image is rendered synchronously from
+        // the new URL by the time React re-paints.
+        if (blobRef.current) {
+          URL.revokeObjectURL(blobRef.current);
+        }
+        blobRef.current = url;
+        setFrameUrl(url);
+        setFirstFrame(true);
+        setViewerError(null);
+        setDomainNotFound(null);
+      } catch (e) {
+        if (cancelled) return;
+        const msg = String(e);
+        // v3.7.2 (amended): detect the
+        // `ComputerError::DomainNotFound` string the
+        // Rust side emits. The Display impl is
+        // "computer: domain '{vm_name}' not found on
+        // host" — we extract the vm name in parens for
+        // the "VM not provisioned" UI. The match is
+        // case-insensitive because Tauri's `invoke`
+        // rejection can be lower-cased on some
+        // platforms.
+        if (/domain\s+'([^']+)'\s+not found on host/i.test(msg)) {
+          const m = msg.match(/'([^']+)'/);
+          setDomainNotFound(m?.[1] ?? null);
+          setViewerError(null);
+        } else {
+          setViewerError(msg);
+          setDomainNotFound(null);
+        }
+      } finally {
+        inFlight.current = false;
+      }
+    };
+    if (computer?.state === "running") {
+      // Kick a frame immediately, then poll.
+      void pullFrame();
+      intervalId = setInterval(pullFrame, SCREENSHOT_POLL_MS);
+    }
+    const onVis = () => {
+      // When the tab becomes visible again, force a
+      // frame so the user doesn't have to wait 300ms
+      // for the first paint after returning.
+      if (
+        !document.hidden &&
+        computer?.state === "running" &&
+        !inFlight.current
+      ) {
+        void pullFrame();
+      }
+    };
+    if (typeof document !== "undefined") {
+      document.addEventListener("visibilitychange", onVis);
+    }
+    return () => {
+      cancelled = true;
+      if (intervalId !== null) {
+        clearInterval(intervalId);
+      }
+      if (typeof document !== "undefined") {
+        document.removeEventListener("visibilitychange", onVis);
+      }
+    };
+  }, [botId, computer?.state]);
+
+  // v3.7.2: revoke the most recent blob URL on unmount.
+  // The interval-cleanup already clears the timer; this
+  // is the symmetric cleanup for the blob ref so the
+  // last frame doesn't pin its bytes after the panel
+  // closes.
+  useEffect(() => {
+    return () => {
+      if (blobRef.current) {
+        URL.revokeObjectURL(blobRef.current);
+        blobRef.current = null;
+      }
+    };
+  }, []);
+
+  // v3.7.2: takeover (Screen Sharing) handlers. The
+  // Tauri command returns the local port after spawning
+  // the `ssh -L` tunnel; it also fires `open vnc://...`
+  // on the Mac as a best-effort hand-off. The user
+  // can re-open Screen Sharing from the toolbar if
+  // they dismiss the first `open`.
+  const handleTakeoverOpen = useCallback(async () => {
+    setActionPending(true);
+    setTakeoverError(null);
+    try {
+      const port = await computerTakeoverOpen(botId);
+      setTakeoverOpen(true);
+      setTakeoverPort(port);
+    } catch (e) {
+      setTakeoverError(String(e));
+      setTakeoverOpen(false);
+      setTakeoverPort(null);
+    } finally {
+      setActionPending(false);
+    }
+  }, [botId]);
+
+  const handleTakeoverClose = useCallback(async () => {
+    setActionPending(true);
+    try {
+      await computerTakeoverClose(botId);
+    } catch (e) {
+      setTakeoverError(String(e));
+    } finally {
+      setTakeoverOpen(false);
+      setTakeoverPort(null);
+      setActionPending(false);
+    }
+  }, [botId]);
+
   // --- toolbar handlers ---
   const handleStart = useCallback(async () => {
     setActionPending(true);
@@ -399,6 +597,71 @@ function FullComputerPanel({
     }
   }, [botId, loadComputer]);
 
+  // v3.7.2 (amended): handle the "VM not provisioned" error
+  // state. The user clicks Provision and the Tauri
+  // `computer_provision` command runs the same
+  // orchestrator the editor's "Provision a computer"
+  // button kicks off. Settings carry the disk/RAM
+  // defaults so we don't need to expose them here.
+  //
+  // On success, the `computer://state-changed` listener
+  // re-fetches the row, the panel flips to
+  // `provisioning` (existing branch), and the screenshot
+  // poll re-engages once the VM reaches `running`. We
+  // clear `domainNotFound` immediately so the error
+  // banner disappears.
+  const handleProvision = useCallback(async () => {
+    setActionPending(true);
+    setErrorMsg(null);
+    try {
+      const current = settings ?? (await getSettings());
+      await computerProvision(botId, {
+        disk_gb: current.computer_default_disk_gb,
+        ram_mb: current.computer_default_ram_mb,
+      });
+      setDomainNotFound(null);
+      await loadComputer();
+    } catch (e) {
+      setErrorMsg(String(e));
+    } finally {
+      setActionPending(false);
+    }
+  }, [botId, loadComputer, settings]);
+
+  // v3.7.2 (amended): "Destroy + re-provision" — for the
+  // case where the local SQLite has a stale row pointing
+  // at a domain that doesn't exist on the host (e.g. the
+  // user destroyed the VM outside MaxBot, or moved the
+  // host). Destroy drops the row, provision re-creates
+  // the VM. The destroy is best-effort: if the local row
+  // already says "no computer" we skip straight to
+  // provision.
+  const handleDestroyAndReprovision = useCallback(async () => {
+    setActionPending(true);
+    setErrorMsg(null);
+    try {
+      // The Tauri command errors if the row is already
+      // gone; we ignore that case so the user doesn't
+      // see a confusing "no computer to destroy" error.
+      try {
+        await computerDestroy(botId);
+      } catch {
+        // ignore — the row may not exist, that's fine
+      }
+      const current = settings ?? (await getSettings());
+      await computerProvision(botId, {
+        disk_gb: current.computer_default_disk_gb,
+        ram_mb: current.computer_default_ram_mb,
+      });
+      setDomainNotFound(null);
+      await loadComputer();
+    } catch (e) {
+      setErrorMsg(String(e));
+    } finally {
+      setActionPending(false);
+    }
+  }, [botId, loadComputer, settings]);
+
   // v2.3.5: install the user's default SSH public key into
   // the VM via the QEMU guest agent, then flip the
   // `computer_use_default_ssh_key` flag so the next
@@ -438,7 +701,6 @@ function FullComputerPanel({
     mode === "takeover"
       ? "computer-panel computer-panel__takeover"
       : "computer-panel computer-panel__preview";
-  const viewOnly = mode === "preview";
 
   if (loading) {
     return (
@@ -535,6 +797,97 @@ function FullComputerPanel({
     );
   }
 
+  // v3.7.2 (amended): the libvirt domain is missing on
+  // the host. The Bot exists in MaxBot's SQLite, the
+  // row says `state === "running"` (because the local
+  // row is the source of truth for the UI), but the
+  // host's `virsh screenshot` says the domain is
+  // gone. Show a clear "VM not provisioned" state with
+  // a Provision button (calls `computerProvision`) and
+  // a secondary "Destroy + re-provision" link.
+  //
+  // The screenshot poll re-engages on the next render
+  // after the VM transitions to `running` via the
+  // `computer://state-changed` event, so the user
+  // doesn't need to click anything to see the desktop
+  // frame once provision completes.
+  if (domainNotFound) {
+    return (
+      <div
+        className={wrapClass}
+        data-mode={mode}
+        data-testid="computer-panel"
+        data-domain-not-found="true"
+      >
+        <ComputerToolbar
+          mode={mode}
+          computer={computer}
+          onClose={onClose}
+          onStart={handleStart}
+          onStop={handleStop}
+          onRestart={handleRestart}
+          onDestroy={handleDestroy}
+          disabled={actionPending}
+        />
+        <div
+          className="computer-panel__body computer-panel__body--error"
+          data-testid="computer-domain-not-found"
+        >
+          <div className="computer-panel__error-title">
+            VM not provisioned
+          </div>
+          <div className="computer-panel__error-detail" style={{ opacity: 1 }}>
+            The libvirt domain
+            {domainNotFound ? ` "${domainNotFound}"` : ""} is missing on the
+            host. This can happen if the VM was never provisioned, was
+            destroyed outside of MaxBot, or lives on a different host. Click
+            Provision to create the VM, or Destroy + re-provision to start
+            fresh.
+          </div>
+          {errorMsg ? (
+            <div
+              className="computer-panel__error-detail"
+              data-testid="computer-domain-not-found-error"
+              style={{ marginTop: 8 }}
+            >
+              {errorMsg}
+            </div>
+          ) : null}
+          <div
+            className="computer-panel__actions"
+            style={{
+              display: "flex",
+              gap: 8,
+              marginTop: 12,
+              alignItems: "center",
+              justifyContent: "center",
+              flexWrap: "wrap",
+            }}
+          >
+            <button
+              type="button"
+              className="primary small"
+              onClick={handleProvision}
+              disabled={actionPending}
+              data-testid="computer-provision-button"
+            >
+              {actionPending ? "Provisioning…" : "Provision"}
+            </button>
+            <button
+              type="button"
+              className="ghost small"
+              onClick={handleDestroyAndReprovision}
+              disabled={actionPending}
+              data-testid="computer-destroy-reprovision-button"
+            >
+              {actionPending ? "Working…" : "Destroy + re-provision"}
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className={wrapClass} data-mode={mode} data-testid="computer-panel">
       <ComputerToolbar
@@ -545,6 +898,15 @@ function FullComputerPanel({
         onStop={handleStop}
         onRestart={handleRestart}
         onDestroy={handleDestroy}
+        // v3.7.2: takeover (Screen Sharing) buttons.
+        // The pair replaces the v3.0.x "Open console" /
+        // "Hand back to Bot" buttons. The SSH tunnel
+        // lives until the user clicks Stop; the in-app
+        // preview stays up the whole time so the Bot
+        // can resume regardless of who has the mouse.
+        onTakeoverOpen={handleTakeoverOpen}
+        onTakeoverClose={handleTakeoverClose}
+        takeoverOpen={takeoverOpen}
         // v2.3.5: only show the "Use my default key"
         // button when the user is still on the per-Bot
         // key path. After a successful install the
@@ -601,86 +963,93 @@ function FullComputerPanel({
         </div>
         <div className="computer-panel__body-pane">
           {bodyTab === "console" ? (
-            consoleUrl ? (
-              // (v3.0.7) `key={consoleUrl}` forces a clean
-              // remount whenever the Tauri side hands us a
-              // fresh WebSocket URL. This is the common
-              // path after a VM restart (the previous
-              // session's proxy dies when its WS closes,
-              // and the new proxy comes back on a new
-              // port). The single-effect design in
-              // noVncViewer handles wsUrl changes without a
-              // remount, but the key guarantees a hard
-              // teardown of any stale noVNC state
-              // (in-flight timers, ResizeObserver) that
-              // the effect's cleanup might miss under
-              // React 19 Strict Mode.
-              //
-              // `credentials` is not currently passed —
-              // there's no `vnc_password` field on the
-              // Computer API row, and the Tauri proxy
-              // handles auth in 99% of cases. When VNC
-              // passwords are wired through Settings (or
-              // a per-Bot key), pass them here as
-              // `credentials={{ password: "..." }}`.
-              <NoVncViewer
-                key={consoleUrl}
-                wsUrl={consoleUrl}
-                viewOnly={viewOnly}
-                scaleViewport
-                onError={(e) => setViewerError(e)}
-                onConnect={() => setViewerError(null)}
-              />
-            ) : consoleUrlError ? (
-              <div
-                className="computer-panel__body--error"
-                data-testid="console-url-error"
-              >
-                <div className="computer-panel__error-title">
-                  Console unavailable
-                </div>
-                <div className="computer-panel__error-detail">
-                  {consoleUrlError}
-                </div>
-                <div
-                  className="computer-panel__error-detail"
-                  style={{ opacity: 0.7, marginTop: 8 }}
-                >
-                  {/* v2.3.6: hint updated. v2.3.5 hides the
-                    passphrase field when the default-key
-                    flag is on, so the v2.3.4 hint
-                    ("check the passphrase") is no longer
-                    actionable for the common case. Point
-                    users at the install-default-key button
-                    (which is always visible on a running
-                    VM) and the terminal smoke test. */}
-                  Most common cause: the SSH tunnel could not
-                  authenticate. Try the terminal smoke test
-                  (<code>ssh crispy</code>) from your shell —
-                  if that works, click "Use my default key"
-                  in the toolbar to bootstrap the VM's
-                  <code>authorized_keys</code> for MaxBot.
-                </div>
-              </div>
-            ) : (
+            // v3.7.2: in-app preview is a screenshot
+            // poll, not a noVNC stream. We render a
+            // single `<img>` and let the poll effect
+            // (above) update its `src`. Before the
+            // first frame arrives, show a spinner so
+            // the user knows we're still working.
+            !firstFrame ? (
               <div className="computer-panel__body--loading">
                 <div className="computer-panel__spinner" />
-                <div>Opening console…</div>
+                <div>Connecting to VM…</div>
+                {viewerError && (
+                  <div
+                    className="computer-panel__error-detail"
+                    data-testid="viewer-error"
+                  >
+                    {viewerError}
+                  </div>
+                )}
               </div>
+            ) : (
+              <img
+                src={frameUrl ?? undefined}
+                alt="VM display"
+                className="computer-panel__screenshot"
+                draggable={false}
+                data-testid="computer-screenshot"
+              />
             )
           ) : (
             <ComputerFileBrowser botId={botId} />
           )}
         </div>
-        {bodyTab === "console" && consoleUrl && viewerError ? (
-          <div className="computer-panel__viewer-error" data-testid="viewer-error">
-            <div className="computer-panel__error-title">Console error</div>
-            <div className="computer-panel__error-detail">{viewerError}</div>
-            <div className="computer-panel__error-detail" style={{ opacity: 0.7, marginTop: 8 }}>
-              The WebSocket proxy may have failed to start, the SSH tunnel
-              may have dropped, or the VNC server may have refused the
-              connection. Try Hand back and re-open, or Restart the
-              computer.
+        {/* v3.7.2: takeover status pill. Sits below the
+            preview body, above the footer. Shows the
+            local port so the user can re-open Screen
+            Sharing if they dismissed the first `open`.
+            The `open` button here is the same
+            `vnc://127.0.0.1:<port>` URL — macOS
+            re-runs Screen Sharing against it. */}
+        {bodyTab === "console" && takeoverOpen && takeoverPort !== null ? (
+          <div
+            className="computer-panel__takeover-status"
+            data-testid="takeover-status"
+          >
+            <span>
+              Takeover tunnel open on localhost:{takeoverPort}
+            </span>
+            <button
+              type="button"
+              className="computer-panel__takeover-reopen"
+              onClick={() => {
+                // Best-effort: re-launch Screen Sharing
+                // with the existing tunnel.
+                const url = `vnc://127.0.0.1:${takeoverPort}`;
+                // Use a hidden anchor + click to avoid a
+                // pop-up blocker on programmatic `open`.
+                const a = document.createElement("a");
+                a.href = url;
+                a.rel = "noopener noreferrer";
+                a.click();
+              }}
+            >
+              Open Screen Sharing
+            </button>
+          </div>
+        ) : null}
+        {bodyTab === "console" && takeoverError ? (
+          <div
+            className="computer-panel__viewer-error"
+            data-testid="takeover-error"
+          >
+            <div className="computer-panel__error-title">
+              Takeover failed
+            </div>
+            <div className="computer-panel__error-detail">
+              {takeoverError}
+            </div>
+            <div
+              className="computer-panel__error-detail"
+              style={{ opacity: 0.7, marginTop: 8 }}
+            >
+              Most common cause: the SSH tunnel could not
+              authenticate. Try the terminal smoke test
+              (<code>ssh crispy</code>) from your shell —
+              if that works, click "Use my default key"
+              in the toolbar to bootstrap the VM's
+              <code>authorized_keys</code> for MaxBot.
             </div>
           </div>
         ) : null}
@@ -721,6 +1090,18 @@ interface ComputerToolbarProps {
   onStop: () => void;
   onRestart: () => void;
   onDestroy: () => void;
+  /** v3.7.2: takeover (Screen Sharing) handlers. The
+   * pair replaces the v3.0.x "Open console" / "Hand
+   * back to Bot" buttons. The takeover tunnel lives
+   * until the user clicks Stop; the in-app preview
+   * stays up the whole time. Optional because the
+   * early-return states (loading / no computer /
+   * provisioning / error) reuse this toolbar but
+   * don't expose takeover actions — the VM isn't
+   * in a state where takeover would do anything. */
+  onTakeoverOpen?: () => void;
+  onTakeoverClose?: () => void;
+  takeoverOpen?: boolean;
   /** v2.3.5: show the "Use my default key" button when
    * the user is still on the per-Bot key path. Clicking
    * it installs the user's default public key into the
@@ -737,6 +1118,9 @@ function ComputerToolbar({
   onStop,
   onRestart,
   onDestroy,
+  onTakeoverOpen,
+  onTakeoverClose,
+  takeoverOpen = false,
   onInstallDefaultKey,
   disabled,
 }: ComputerToolbarProps) {
@@ -800,6 +1184,26 @@ function ComputerToolbar({
           Use my default key
         </button>
       )}
+      {/* v3.7.2: Take over with Screen Sharing. The
+          single button flips between open and close.
+          The actual `open vnc://...` happens on the
+          Rust side (the Tauri command spawns it as a
+          best-effort handoff). The user can re-open
+          from the takeover-status pill if they
+          dismissed the first launch. */}
+      <button
+        className="ghost small"
+        onClick={takeoverOpen ? onTakeoverClose : onTakeoverOpen}
+        disabled={stateDisabled || state !== "running" || !onTakeoverOpen}
+        title={
+          takeoverOpen
+            ? "Stop the SSH tunnel; macOS Screen Sharing will lose its connection"
+            : "Open macOS Screen Sharing against an ssh -L tunnel to the VM"
+        }
+        data-testid="computer-takeover"
+      >
+        {takeoverOpen ? "Stop takeover" : "Take over with Screen Sharing"}
+      </button>
       <button
         className="danger small"
         onClick={onDestroy}

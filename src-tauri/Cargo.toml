@@ -1,6 +1,6 @@
 [package]
 name = "maxbot"
-version = "3.7.1"
+version = "3.7.2"
 description = "MaxBot — a MiniMax-powered desktop chat, tool, and Computer Use client."
 authors = ["Tyler Martinez"]
 edition = "2021"
@@ -72,12 +72,22 @@ base64 = "0.22"
 # for a ~1500-crate lighter dep tree and a simpler SFTP path. See
 # `computer::ssh` for the trait surface and `computer::keys` for the
 # keypair generation/encryption.
-tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 ed25519-dalek = { version = "2", features = ["pkcs8", "rand_core"] }
 argon2 = "0.5"
 chacha20poly1305 = "0.10"
 rand = "0.8"
 zeroize = "1"
+
+# v3.7.2 — Computer preview screenshots. The Tauri side
+# decodes `virsh screenshot` output (PPM, PNG, or JPEG
+# depending on the QEMU version) and re-encodes as JPEG
+# (only when the server's ImageMagick `convert` is
+# missing). The `image` crate is a small, pure-Rust codec
+# library with no system deps. We pull the JPEG + PPM +
+# PNG codecs — PNG is the default `virsh screenshot`
+# output on Ubuntu 25.10's QEMU (the cloud image we
+# provision from). GIF, WebP, TIFF, etc. are unused.
+image = { version = "0.25", default-features = false, features = ["jpeg", "pnm", "png"] }
 
 # v2.8.0 — Always-on Daemon (24/7). `axum` powers the
 # `maxbotd` binary's tiny HTTP server: a single

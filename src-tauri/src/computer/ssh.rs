@@ -88,6 +88,21 @@ pub struct RemoteCommandOutput {
     pub success: bool,
 }
 
+/// v3.7.2: same shape as `RemoteCommandOutput` but the
+/// stdout is the raw `Vec<u8>` instead of a UTF-8 lossy
+/// string. Used by `server_exec_bin` for binary payloads
+/// (screenshots, downloads). The trait stays type-safe:
+/// `server_exec` is text-by-construction (commands that
+/// want bytes use `server_exec_bin`), and the daemon's
+/// stdout path is unchanged.
+#[derive(Debug, Clone)]
+pub struct RemoteBinaryOutput {
+    pub stdout: Vec<u8>,
+    pub stderr: String,
+    pub exit_code: Option<i32>,
+    pub success: bool,
+}
+
 /// Result of a directory listing via SFTP. Each entry is the
 /// bare filename (no path prefix, no permission bits) — the
 /// renderer can join with the parent path if needed.
@@ -105,6 +120,17 @@ pub struct SftpEntry {
 #[async_trait]
 pub trait SshExecutor: Send + Sync {
     async fn server_exec(&self, cmd: &str) -> Result<RemoteCommandOutput, SshError>;
+
+    /// v3.7.2: server-side exec that returns the raw stdout
+    /// bytes instead of a UTF-8 lossy `String`. Used by
+    /// `screenshot::capture_jpeg` to ferry the host's
+    /// `virsh screenshot` output (PPM or JPEG) back to the
+    /// Mac. The alternative — base64-encoding on the server
+    /// shell and decoding here — adds a 33% size penalty
+    /// plus a JSON-parse step; the daemon's stdout path is
+    /// text-by-construction, so the daemon doesn't need a
+    /// binary variant.
+    async fn server_exec_bin(&self, cmd: &str) -> Result<RemoteBinaryOutput, SshError>;
 
     async fn vm_exec(
         &self,
@@ -377,6 +403,16 @@ impl SshExecutor for SshPool {
         run_ssh(&self.server, None, cmd).await
     }
 
+    async fn server_exec_bin(
+        &self,
+        cmd: &str,
+    ) -> Result<RemoteBinaryOutput, SshError> {
+        if !self.server.is_configured() {
+            return Err(SshError::ServerNotConfigured);
+        }
+        run_ssh_bin(&self.server, cmd).await
+    }
+
     async fn vm_exec(
         &self,
         bot_id: &str,
@@ -528,6 +564,43 @@ async fn run_ssh_command(
     })
 }
 
+/// v3.7.2: same plumbing as `run_ssh_command` but the
+/// stdout is the raw `Vec<u8>` instead of a lossy
+/// `String`. Used by `server_exec_bin` to ferry binary
+/// payloads (e.g. JPEG screenshots piped back from the
+/// Linux server) without UTF-8 round-tripping.
+async fn run_ssh_command_bin(
+    mut cmd: Command,
+) -> Result<RemoteBinaryOutput, SshError> {
+    cmd.stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .stdin(Stdio::null())
+        .kill_on_drop(true);
+    let output = cmd
+        .output()
+        .await
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                SshError::BinaryMissing
+            } else {
+                SshError::Spawn(e.to_string())
+            }
+        })?;
+    let stdout = output.stdout;
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let exit = output.status.code();
+    let success = output.status.success();
+    if !success && stderr.contains("Permission denied") {
+        return Err(SshError::Auth(stderr.trim().to_string()));
+    }
+    Ok(RemoteBinaryOutput {
+        stdout,
+        stderr,
+        exit_code: exit,
+        success,
+    })
+}
+
 /// Server-side exec: run `cmd` on the server using the OS
 /// keychain. We avoid `-F /dev/stdin` complexity by passing
 /// the options as `-o` flags inline.
@@ -552,6 +625,31 @@ async fn run_ssh(
     c.arg(format!("{}@{}", cfg.user, cfg.host));
     c.arg(cmd);
     run_ssh_command(c).await
+}
+
+/// v3.7.2: binary variant of `run_ssh`. Same flags, same
+/// auth, but stdout is the raw byte stream instead of a
+/// lossy UTF-8 string. Used by `screenshot::capture_jpeg`
+/// to pipe `virsh screenshot` (and the optional
+/// ImageMagick `convert` PPM→JPEG) back to the Mac without
+/// round-tripping through text.
+async fn run_ssh_bin(
+    cfg: &ServerConfig,
+    cmd: &str,
+) -> Result<RemoteBinaryOutput, SshError> {
+    let mut c = Command::new("ssh");
+    c.arg("-o").arg("BatchMode=yes");
+    c.arg("-o").arg("LogLevel=ERROR");
+    c.arg("-o").arg("StrictHostKeyChecking=accept-new");
+    c.arg("-o").arg("ConnectTimeout=10");
+    c.arg("-o").arg("ServerAliveInterval=30");
+    c.arg("-o").arg("ServerAliveCountMax=3");
+    if !cfg.identity_file.is_empty() {
+        c.arg("-i").arg(&cfg.identity_file);
+    }
+    c.arg(format!("{}@{}", cfg.user, cfg.host));
+    c.arg(cmd);
+    run_ssh_command_bin(c).await
 }
 
 /// Per-Bot exec: same as `run_ssh` but uses the per-Bot key

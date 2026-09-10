@@ -3048,6 +3048,57 @@ button.link:hover {
   max-width: 480px;
 }
 
+/* v3.7.2: in-app preview is now a screenshot poll,
+   not a noVNC stream. The `<img>` fills the body
+   pane and is the actual frame the user is looking
+   at — no canvas, no RFB handshake, no WebSocket.
+   `object-fit: contain` keeps the aspect ratio
+   (QEMU's default is 16:9 but xfce can change it). */
+.computer-panel__screenshot {
+  flex: 1 1 auto;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  object-fit: contain;
+  background: #000;
+  user-select: none;
+  -webkit-user-drag: none;
+}
+
+/* v3.7.2: takeover (Screen Sharing) status pill. Sits
+   below the screenshot body, above the footer. Shows
+   the local port so the user can re-open Screen
+   Sharing if they dismissed the first `open`. */
+.computer-panel__takeover-status {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 12px;
+  background: rgba(99, 102, 241, 0.08);
+  border-top: 1px solid rgba(99, 102, 241, 0.4);
+  font-size: 12px;
+  color: var(--text-1);
+  font-family: var(--font-mono);
+}
+
+.computer-panel__takeover-reopen {
+  appearance: none;
+  background: transparent;
+  border: 1px solid rgba(99, 102, 241, 0.4);
+  border-radius: var(--radius-sm);
+  color: var(--text-1);
+  padding: 3px 8px;
+  font-family: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.computer-panel__takeover-reopen:hover {
+  background: rgba(99, 102, 241, 0.12);
+}
+
 .computer-panel__empty-title {
   font-size: 14px;
   font-weight: 600;

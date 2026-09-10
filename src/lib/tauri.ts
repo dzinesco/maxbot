@@ -331,13 +331,52 @@ export async function computerDestroy(botId: string): Promise<void> {
   await invoke("computer_destroy", { botId });
 }
 
-/** Return the `ws://localhost:<port>/` URL noVNC should connect
- * to. The Tauri side spawns a per-Bot SSH-tunneled VNC proxy and
- * returns the local WebSocket URL — never the server-side address
- * (security-critical: the renderer must not see
- * `ws://192.168.0.49:...`). */
-export async function computerConsoleUrl(botId: string): Promise<string> {
-  return invoke<string>("computer_console_url", { botId });
+/** v3.7.2: capture a single JPEG frame from the VM's
+ * QEMU virtual framebuffer via `virsh screenshot` on the
+ * host. The renderer polls this every 300ms to paint the
+ * in-app preview; the returned bytes are wrapped in a
+ * `Blob` and rendered as an `<img>`.
+ *
+ * The Tauri side is intentionally NOT gated on QGA. The
+ * QEMU virtual VGA is always available while the domain
+ * is `running`, including during cloud-init's LightDM
+ * install. Gating on QGA would hide the exact boot
+ * phase the preview is meant to show.
+ */
+export async function computerScreenshot(botId: string): Promise<Uint8Array> {
+  const bytes = await invoke<number[] | Uint8Array>("computer_screenshot", {
+    botId,
+  });
+  // Tauri serializes `Vec<u8>` as a JSON array of
+  // numbers by default. Convert to `Uint8Array` so the
+  // renderer can wrap in a `Blob` without an extra
+  // hop. If the backend ever switches to binary
+  // transport, the cast below handles that too.
+  return bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+}
+
+/** v3.7.2: open an `ssh -L` tunnel from a free local
+ * port in the configured VNC range to the VM's VNC
+ * port on the server, then `open vnc://127.0.0.1:<port>`
+ * to launch macOS `Screen Sharing`. Returns the local
+ * port so the renderer's "Stop takeover" button can
+ * kill the tunnel child.
+ *
+ * Idempotent: returns the existing local port if a
+ * tunnel is already open for this Bot. The local port
+ * is allocated from `Settings.computer_vnc_local_port_range`
+ * (default `5900-5999`); two Bots never collide on
+ * `:5901`.
+ */
+export async function computerTakeoverOpen(botId: string): Promise<number> {
+  return invoke<number>("computer_takeover_open", { botId });
+}
+
+/** v3.7.2: kill the SSH tunnel child and free the
+ * local port. Idempotent. macOS `Screen Sharing` will
+ * lose its connection the next time it polls. */
+export async function computerTakeoverClose(botId: string): Promise<void> {
+  await invoke("computer_takeover_close", { botId });
 }
 
 /** Smoke-test the libvirt connection. Returns the number of

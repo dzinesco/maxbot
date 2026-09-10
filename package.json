@@ -1,6 +1,6 @@
 {
   "name": "maxbot",
-  "version": "3.7.1",
+  "version": "3.7.2",
   "private": true,
   "type": "module",
   "description": "MaxBot — a MiniMax-powered desktop chat, tool, and Computer Use client.",
@@ -14,7 +14,6 @@
     "tauri:build": "tauri build"
   },
   "dependencies": {
-    "@novnc/novnc": "^1.7.0",
     "@tauri-apps/api": "^2.5.0",
     "@tauri-apps/plugin-dialog": "^2.0.0",
     "react": "^19.0.0",

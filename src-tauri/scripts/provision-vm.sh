@@ -126,10 +126,26 @@ users:
     ssh_authorized_keys:
       - $SSH_PUB
 packages:
+  # v3.7.2: replaced x11vnc + tigervnc-standalone-server
+  # with lightdm + xfce4. The v3.0.x noVNC path tunneled
+  # a separate x11vnc instance bound to `:1`, but the
+  # Tauri webview (WKWebView) doesn't render noVNC's
+  # canvas path reliably and the two-screen mismatch
+  # (QEMU virtual VGA + x11vnc on :1) is what kept the
+  # preview showing a created-but-invisible VM. The
+  # new path: the in-app preview is a `virsh screenshot`
+  # poll on the QEMU virtual VGA, and takeover uses
+  # macOS `Screen Sharing` over the existing SSH `-L`
+  # tunnel — no in-VM VNC server needed.
+  #
+  # LightDM + xfce4 autologin brings up a real desktop
+  # on the QEMU display so `virsh screenshot` returns
+  # a real frame (not a text console / black canvas)
+  # once cloud-init finishes.
+  - lightdm
   - xfce4
   - xfce4-goodies
-  - x11vnc
-  - tigervnc-standalone-server
+  - dbus-x11
   - qemu-guest-agent
   - openssh-server
   # v3.2.0 — in-VM Computer Use. The `vm_computer_use` tool
@@ -158,11 +174,25 @@ packages:
   - xdotool
   - scrot
 runcmd:
+  # v3.7.2: lightdm + xfce autologin. The noble cloud
+  # image doesn't ship a display manager — without
+  # this, the QEMU virtual VGA stays at a text console
+  # and `virsh screenshot` returns a black frame.
+  # The drop-in picks XFCE as the user session and
+  # autologs in as `bot` so the desktop is up by the
+  # time the first screenshot is taken.
+  - mkdir -p /etc/lightdm/lightdm.conf.d
+  - |
+      printf '%s\n' \
+        '[Seat:*]' \
+        'autologin-user=bot' \
+        'autologin-user-timeout=0' \
+        'user-session=xfce' \
+        > /etc/lightdm/lightdm.conf.d/50-maxbot.conf
+  - echo /usr/sbin/lightdm > /etc/X11/default-display-manager
   - systemctl set-default graphical.target
+  - systemctl enable lightdm
   - systemctl enable --now qemu-guest-agent
-  - sudo -u bot mkdir -p /home/bot/.vnc
-  - sudo -u bot bash -c 'echo "x11vnc -display :1 -forever -nopw -bg -o /home/bot/.vnc/x11vnc.log" > /home/bot/.vnc/xstartup'
-  - sudo -u bot bash -c '( crontab -l 2>/dev/null | grep -v x11vnc; echo "@reboot x11vnc -display :1 -forever -nopw -bg -o /home/bot/.vnc/x11vnc.log" ) | crontab -'
   # Safety net: re-start sshd in case the openssh-server
   # package upgrade in the packages: block (or any other
   # service install) left it in a bad state. systemctl
