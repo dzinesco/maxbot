@@ -794,6 +794,29 @@ export async function memoryList(
   return invoke<MemEntry[]>("memory_list", { botId, kind });
 }
 
+/** v3.7.8 — Back up a Bot's full memory (Facts +
+ *  Preferences + History) to the host's
+ *  `~/bots/_shared/memory/<bot_id>/<timestamp>.jsonl`.
+ *  Returns the absolute path on the host plus the
+ *  number of entries written, so the renderer can
+ *  show a confirmation toast. */
+export interface MemoryBackup {
+  botId: string;
+  /** Absolute path on the host (NOT `~/...`). User can
+   *  `ssh <host> cat <path>` to inspect. */
+  path: string;
+  /** Total entries across all 3 kinds. */
+  entries: number;
+  /** RFC3339-ish host timestamp, also the filename stem. */
+  timestamp: string;
+}
+
+export async function backupMemory(
+  botId: string,
+): Promise<MemoryBackup> {
+  return invoke<MemoryBackup>("backup_memory", { botId });
+}
+
 // ---- v2.6.0 — Approval flows ----
 //
 // IPC wrappers for `src-tauri/src/commands/approvals.rs`.

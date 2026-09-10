@@ -12,10 +12,12 @@
 
 import { useCallback, useEffect, useState } from "react";
 import {
+  backupMemory,
   memoryForget,
   memoryList,
   memoryRemember,
 } from "../lib/tauri";
+import type { MemoryBackup } from "../lib/tauri";
 import type { MemEntry, MemKind } from "../lib/api";
 
 interface MemoryPanelProps {
@@ -50,6 +52,12 @@ export function MemoryPanel({ botId }: MemoryPanelProps) {
   const [prefKey, setPrefKey] = useState("");
   const [prefContent, setPrefContent] = useState("");
   const [savedFlash, setSavedFlash] = useState<{ id: number; text: string } | null>(null);
+  // v3.7.8: backup-to-shared state. `backupPending`
+  // gates the button while the SSH round-trip + base64
+  // write is in flight; `lastBackup` holds the result
+  // for the success toast.
+  const [backupPending, setBackupPending] = useState(false);
+  const [lastBackup, setLastBackup] = useState<MemoryBackup | null>(null);
 
   const refresh = useCallback(async () => {
     if (!botId) return;
@@ -131,6 +139,39 @@ export function MemoryPanel({ botId }: MemoryPanelProps) {
     [botId, refresh],
   );
 
+  // v3.7.8: back up the Bot's full memory (Facts +
+  // Preferences + History) to the host's
+  // `~/bots/_shared/memory/<bot_id>/<timestamp>.jsonl`.
+  // The shared folder is the same one the `shared_fs`
+  // Bot tool writes to, so other Bots in the same group
+  // can read this backup without a new permissions grant.
+  //
+  // We don't gate the button on a "is the shared path
+  // writable" check — the Tauri command's failure path
+  // already surfaces the underlying SSH error, and the
+  // user has clearly opted in by clicking the button.
+  const handleBackup = useCallback(async () => {
+    if (!botId || backupPending) return;
+    setBackupPending(true);
+    setError(null);
+    try {
+      const result = await backupMemory(botId);
+      setLastBackup(result);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBackupPending(false);
+    }
+  }, [botId, backupPending]);
+
+  // The "✓ Backed up N entries" toast auto-clears after
+  // a few seconds, the same as `savedFlash`.
+  useEffect(() => {
+    if (!lastBackup) return;
+    const t = setTimeout(() => setLastBackup(null), 5000);
+    return () => clearTimeout(t);
+  }, [lastBackup]);
+
   if (!botId) {
     return (
       <div className="memory-panel empty">
@@ -153,8 +194,34 @@ export function MemoryPanel({ botId }: MemoryPanelProps) {
             ✓ {savedFlash.text}
           </div>
         )}
+        {lastBackup && (
+          <div className="memory-panel-flash" data-testid="memory-backup-flash">
+            ✓ Backed up {lastBackup.entries} entries to{" "}
+            <code className="memory-panel-path">{lastBackup.path}</code>
+          </div>
+        )}
         {error && <p className="memory-panel-error">Error: {error}</p>}
         {loading && <p className="memory-panel-loading">Loading…</p>}
+        {/* v3.7.8: one-click backup. The Rust side
+            handles empty-memory as a no-op (writes
+            an empty file with the timestamp) so the
+            button is always enabled for a non-null
+            botId. The pending state gates against
+            double-clicks. */}
+        <div className="memory-panel-actions">
+          <button
+            type="button"
+            className="primary small"
+            onClick={() => void handleBackup()}
+            disabled={backupPending}
+            data-testid="memory-backup"
+            title="Copy this Bot's full memory to ~/bots/_shared/memory/ on the host. Other Bots in the same group can read it from there."
+          >
+            {backupPending
+              ? "Backing up…"
+              : "Back up to shared/"}
+          </button>
+        </div>
       </header>
 
       <div className="memory-panel-columns">

@@ -299,6 +299,10 @@ pub fn run() {
             commands::memory::memory_remember,
             commands::memory::memory_forget,
             commands::memory::memory_list,
+            // v3.7.8 — back up a Bot's memory to the
+            // host's shared/ tree so other Bots (or a
+            // future restore) can read it.
+            commands::memory::backup_memory,
             // v3.6.0 (Phase 7) — Reflect-step
             // companion. Thin alias for `memory_forget`
             // exposed under the brief's literal name.

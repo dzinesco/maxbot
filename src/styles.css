@@ -4922,6 +4922,57 @@ button.link:hover {
   gap: 8px;
 }
 
+/* --- Memory panel (v3.7.8: actions row + path) --- */
+
+.memory-panel {
+  padding: 12px;
+}
+
+.memory-panel-header h2 {
+  margin: 0 0 4px;
+  font-size: 16px;
+}
+
+.memory-panel-sub {
+  margin: 0 0 8px;
+  color: var(--text-2, #888);
+  font-size: 12px;
+}
+
+.memory-panel-flash {
+  display: inline-block;
+  margin: 6px 0;
+  padding: 4px 8px;
+  border-radius: 4px;
+  background: var(--accent-bg, #1e3a5f);
+  color: var(--accent-fg, #cfe5ff);
+  font-size: 12px;
+}
+
+.memory-panel-path {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  word-break: break-all;
+}
+
+.memory-panel-error {
+  color: var(--danger, #d33);
+  font-size: 12px;
+  margin: 6px 0;
+}
+
+.memory-panel-loading {
+  color: var(--text-2, #888);
+  font-size: 12px;
+  margin: 6px 0;
+}
+
+.memory-panel-actions {
+  display: flex;
+  gap: 6px;
+  margin: 8px 0 12px;
+}
+
 .routines-panel__loading,
 .routines-panel__error {
   color: var(--text-2, #888);

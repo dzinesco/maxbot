@@ -135,3 +135,116 @@ describe("MemoryPanel", () => {
     });
   });
 });
+
+// v3.7.8 — backup-to-shared tests. The panel calls
+// `backup_memory` (the IPC command name in the mock is
+// `"backup_memory"`) when the user clicks the new "Back
+// up to shared/" button. On success the panel shows a
+// flash with the resolved path + entry count.
+
+describe("MemoryPanel — backup to shared/ (v3.7.8)", () => {
+  it("renders a 'Back up to shared/' button when a Bot is selected", async () => {
+    render(<MemoryPanel botId="bot-1" />);
+    const button = await screen.findByTestId("memory-backup");
+    expect(button).toBeInTheDocument();
+    expect(button).toHaveTextContent(/Back up to shared/);
+  });
+
+  it("does NOT render a backup button when no Bot is selected", () => {
+    render(<MemoryPanel botId={null} />);
+    // The empty state is the placeholder, not the panel.
+    expect(screen.queryByTestId("memory-backup")).toBeNull();
+  });
+
+  it("calls backup_memory with the Bot id and shows a success flash", async () => {
+    const user = userEvent.setup();
+    let backupArgs: Record<string, unknown> | undefined;
+    invokeMock.mockImplementation(
+      async (cmd: string, args?: Record<string, unknown>) => {
+        if (cmd === "backup_memory") {
+          backupArgs = args;
+          return {
+            botId: "bot-1",
+            path: "/home/tyler/bots/_shared/memory/bot-1/20260910-123904.jsonl",
+            entries: 7,
+            timestamp: "20260910-123904",
+          };
+        }
+        if (cmd === "memory_list") return [];
+        return null;
+      },
+    );
+    render(<MemoryPanel botId="bot-1" />);
+    const button = await screen.findByTestId("memory-backup");
+    await user.click(button);
+    await waitFor(() => {
+      expect(backupArgs).toBeTruthy();
+      expect(backupArgs?.botId).toBe("bot-1");
+    });
+    // Success flash shows entry count + absolute path.
+    const flash = await screen.findByTestId("memory-backup-flash");
+    expect(flash).toHaveTextContent(/Backed up 7 entries/);
+    expect(flash).toHaveTextContent(
+      /\/home\/tyler\/bots\/_shared\/memory\/bot-1\/20260910-123904\.jsonl/,
+    );
+  });
+
+  it("shows an error when backup_memory fails", async () => {
+    const user = userEvent.setup();
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "backup_memory") {
+        throw new Error("ssh: auth failed");
+      }
+      if (cmd === "memory_list") return [];
+      return null;
+    });
+    render(<MemoryPanel botId="bot-1" />);
+    const button = await screen.findByTestId("memory-backup");
+    await user.click(button);
+    await waitFor(() => {
+      expect(screen.getByText(/Error:.*auth failed/)).toBeInTheDocument();
+    });
+    // No success flash on failure.
+    expect(screen.queryByTestId("memory-backup-flash")).toBeNull();
+  });
+
+  it("gates the button while a backup is in flight (no double-click)", async () => {
+    const user = userEvent.setup();
+    let resolveBackup: (value: unknown) => void = () => {};
+    const backupPromise = new Promise((resolve) => {
+      resolveBackup = resolve;
+    });
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "backup_memory") return backupPromise;
+      if (cmd === "memory_list") return [];
+      return null;
+    });
+    render(<MemoryPanel botId="bot-1" />);
+    const button = await screen.findByTestId("memory-backup");
+    // First click starts the in-flight backup.
+    await user.click(button);
+    // While pending, the button is disabled and shows
+    // the pending label.
+    await waitFor(() => {
+      expect(button).toBeDisabled();
+      expect(button).toHaveTextContent(/Backing up/);
+    });
+    // Second click must not fire a second backup_memory
+    // call (we resolve the first to keep the assertion
+    // order stable).
+    resolveBackup({
+      botId: "bot-1",
+      path: "/x.jsonl",
+      entries: 0,
+      timestamp: "t",
+    });
+    await waitFor(() => {
+      expect(button).not.toBeDisabled();
+    });
+    // The invoke counter for backup_memory should be 1.
+    const backupCalls = invokeMock.mock.calls.filter(
+      (c) => c[0] === "backup_memory",
+    );
+    expect(backupCalls.length).toBe(1);
+  });
+});

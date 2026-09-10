@@ -191,7 +191,43 @@ locally on the Mac (the v1.0 behavior).
 
 Click a bot in the roster to reopen the editor. Delete is a
 destructive action that wipes the bot's folder on disk **and
-destroys its VM** (if any).
+destroys its VM** (if any). A confirmation prompt fires
+before either path runs (v3.7.6).
+
+### Back up a Bot's memory to shared/ (v3.7.8)
+
+In the Memory tab, click **Back up to shared/**. MaxBot
+collects the Bot's Facts, Preferences, and History (across
+all three JSONL files on the Bot's VM), concatenates them
+into a single JSONL stream, and writes it to the host's
+`~/bots/_shared/memory/<bot_id>/<timestamp>.jsonl` over
+the existing SSH connection (one round-trip, base64-
+encoded so the file write is binary-safe).
+
+The path appears in a toast so you can verify it landed.
+Other Bots in the same group can read the file with the
+`shared_fs` Bot tool, so the canonical use cases are:
+
+- Sharing a Bot's confirmed facts with a new Bot that
+  should know the same things (avoid re-asking the user)
+- Preserving memory before destroying a Bot's VM (the
+  per-Bot memory files live on the VM, so destroying the
+  VM deletes the per-Bot memory unless you back it up
+  first)
+- One Bot dropping a "here's what I learned today" note
+  that another Bot should pick up on its next run
+
+The backup file is plain JSONL with one entry per line;
+the `kind` field is on each line so a future restore
+step can split by kind. The host's `$HOME` is whatever
+`/etc/passwd` says for the SSH user; the path returned
+in the toast is the absolute (resolved) path, not
+`~/...`.
+
+The button is enabled for any selected Bot, even one
+with no memory yet — empty memory writes an empty
+file with the timestamp marker so you get a clear
+"0 entries" toast instead of an error.
 
 ### Schedule a bot
 
