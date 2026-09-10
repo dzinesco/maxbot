@@ -4,6 +4,49 @@ All notable changes to MaxBot are documented in this file. The format
 follows [Keep a Changelog](https://keepachangelog.com/) and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## v3.0.3 — 2026-09-09
+
+### Fixed
+- **Console auto-installs the user's default SSH key on
+  tunnel auth failure.** Clicking Console on a fresh VM
+  no longer fails on the first try with
+  `vnc: vnc tunnel auth failed: (no stderr output captured)`
+  and asks the user to click "Use my default key" in the
+  toolbar — `console_url` now detects the `TunnelAuthFailed`
+  from `vnc::start`, runs the same QGA-based
+  `install_default_key_via_qga` recovery that the
+  toolbar button triggers, and retries the tunnel
+  automatically. The user never sees the auth error;
+  Console just works. The "Use my default key" button
+  is preserved as a manual override for users with
+  non-default keys or VMs that need a refresh. v3.0.3
+  extracts the QGA install logic from
+  `install_default_key` (steps 1–3, lines ~543–610 of
+  `src-tauri/src/computer/mod.rs`) into a private
+  `pub(crate) async fn install_default_key_via_qga`
+  helper; the public Tauri command is now a thin
+  wrapper around the helper, with identical signature
+  and error behavior. The auto-recover logic is
+  scoped to `TunnelAuthFailed` only; any other
+  `VncError` is propagated unchanged. The auto-recover
+  is invisible to the user — no UI changes, no toast,
+  no log spam (the only log line is
+  `vnc tunnel auth failed, attempting default key
+  install for {bot_id}: {stderr}` at `info` level).
+  If the QGA install also fails, the user gets a clear
+  error that names both failure modes: `tunnel auth
+  failed and default key install failed: ... —
+  check that ~/.ssh/id_ed25519.pub (or id_rsa.pub /
+  id_ecdsa.pub) exists`. If the retry tunnel still
+  fails with `TunnelAuthFailed`, the error is:
+  `tunnel auth failed even after default key install:
+  ... — verify the VM has accepted the new key (try
+  'ssh bot@<vm-ip>' from your shell)`.
+
+### Changed
+- **Bumped to 3.0.3** in `package.json`,
+  `src-tauri/Cargo.toml`, and `src-tauri/tauri.conf.json`.
+
 ## v3.0.2 — 2026-09-09
 
 ### Added

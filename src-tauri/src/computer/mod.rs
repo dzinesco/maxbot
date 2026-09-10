@@ -446,6 +446,15 @@ impl ComputerManager {
     /// proxy and return the local WebSocket URL. The
     /// proxy is stored in `self.proxies` so the
     /// `Drop` impl on the manager cleans them up.
+    ///
+    /// v3.0.3: on `TunnelAuthFailed` (the case where
+    /// the VM's `authorized_keys` doesn't yet contain
+    /// the user's default pubkey), we auto-install the
+    /// default pubkey via the QEMU guest agent and
+    /// retry the tunnel. The user never sees the auth
+    /// error; they just click Console and it works.
+    /// Manual override via the "Use my default key"
+    /// button is unchanged.
     pub async fn console_url(
         &self,
         db: &Database,
@@ -457,7 +466,48 @@ impl ComputerManager {
             .vnc_port
             .ok_or_else(|| ComputerError::NoComputer(bot_id.into()))?;
         let range = *self.port_range.lock().await;
-        let proxy = vnc::start(&*self.pool, vnc_port, range).await?;
+        let proxy = match vnc::start(&*self.pool, vnc_port, range).await {
+            Ok(p) => p,
+            Err(VncError::TunnelAuthFailed(stderr)) => {
+                // v3.0.3: silent auto-recover. The first
+                // attempt to bring up the SSH tunnel
+                // failed because the VM doesn't yet
+                // have the user's default pubkey
+                // authorized. Install it via QGA and
+                // retry once. If either step fails,
+                // surface a clear error that names
+                // both failure modes.
+                log::info!(
+                    "vnc tunnel auth failed, attempting default key install for {bot_id}: {stderr}"
+                );
+                if let Err(install_err) = self
+                    .install_default_key_via_qga(db, bot_id)
+                    .await
+                {
+                    return Err(ComputerError::Vnc(format!(
+                        "tunnel auth failed and default key install failed: {install_err} \
+                         — check that ~/.ssh/id_ed25519.pub (or id_rsa.pub / id_ecdsa.pub) exists"
+                    )));
+                }
+                // Retry the tunnel start. If it now
+                // succeeds, fall through to the normal
+                // "register proxy + return URL" path
+                // below.
+                match vnc::start(&*self.pool, vnc_port, range).await {
+                    Ok(p) => p,
+                    Err(VncError::TunnelAuthFailed(stderr2)) => {
+                        return Err(ComputerError::Vnc(format!(
+                            "tunnel auth failed even after default key install: {stderr2} \
+                             — verify the VM has accepted the new key (try 'ssh bot@<vm-ip>' from your shell)"
+                        )));
+                    }
+                    Err(other_vnc_err) => {
+                        return Err(ComputerError::Vnc(other_vnc_err.to_string()));
+                    }
+                }
+            }
+            Err(e) => return Err(ComputerError::from(e)),
+        };
         let url = proxy.console_url();
         // Spawn the accept loop. The task runs
         // forever; the proxy's Drop kills the tunnel
@@ -532,15 +582,31 @@ impl ComputerManager {
     /// existing VM (provisioned with a per-Bot key) can
     /// switch to the default-key path without Destroy.
     ///
+    /// v3.0.3: this is now a thin wrapper around
+    /// `install_default_key_via_qga`. The Tauri command
+    /// surface (the "Use my default key" toolbar button)
+    /// still calls this; the auto-recover path inside
+    /// `console_url` calls the helper directly.
+    pub async fn install_default_key(
+        &self,
+        db: &Database,
+        bot_id: &str,
+    ) -> Result<String, ComputerError> {
+        self.install_default_key_via_qga(db, bot_id).await
+    }
+
+    /// v3.0.3: the QGA-based key-install logic, extracted
+    /// so `console_url` can call it on `TunnelAuthFailed`
+    /// without going through the public Tauri command.
     /// We send the install via the QEMU guest agent so we
     /// don't need SSH access — the chicken-and-egg case
     /// for a user whose passphrase is empty. The QGA
     /// command is idempotent (`grep -qxF` short-circuits
     /// when the key line already exists), so multiple
-    /// clicks are safe.
+    /// calls are safe.
     ///
     /// Returns the QGA's JSON response on success.
-    pub async fn install_default_key(
+    pub(crate) async fn install_default_key_via_qga(
         &self,
         db: &Database,
         bot_id: &str,
@@ -982,5 +1048,242 @@ mod tests {
         // temp dir.
         drop(db);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ----- v3.0.3: install_default_key refactor + console_url
+    // auto-recover. The QGA success path is covered by
+    // `provision_e2e_against_crispy` (which exercises the real
+    // SSH tunnel → QGA → libvirt flow); the unit tests below
+    // pin the refactor and the error paths.
+
+    /// v3.0.3: the helper and the public wrapper both
+    /// read `$HOME` to find the user's default SSH pubkey.
+    /// Rust tests run in parallel by default, so the
+    /// HOME-modifying tests below race each other. We
+    /// serialize them with a single static mutex — the
+    /// critical sections are short, so this doesn't
+    /// noticeably slow the suite.
+    static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// RAII guard that restores the `$HOME` env var to its
+    /// prior value when dropped. Test panics would
+    /// otherwise leak the temp-dir HOME to subsequent
+    /// tests, causing confusing failures.
+    struct HomeGuard(Option<std::ffi::OsString>);
+    impl HomeGuard {
+        fn set(new_path: &std::path::Path) -> Self {
+            let prev = std::env::var_os("HOME");
+            std::env::set_var("HOME", new_path);
+            Self(prev)
+        }
+    }
+    impl Drop for HomeGuard {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+    }
+
+    /// Build a fresh ComputerManager pointed at a fresh
+    /// empty DB. Server config is unconfigured by default
+    /// (we never reach the SSH path in these tests).
+    fn make_test_manager(db_path: &std::path::Path) -> ComputerManager {
+        let _ = crate::storage::db::Database::open(db_path).expect("open test db");
+        let s = crate::storage::Settings::default();
+        ComputerManager::new(&s)
+    }
+
+    /// Insert a minimal bot row so the `computers.bot_id`
+    /// FK to `bots.id` is satisfied for tests that need
+    /// a real computer row.
+    fn insert_test_bot(db: &crate::storage::db::Database, bot_id: &str) {
+        let now = chrono::Utc::now();
+        let bot = crate::bots::Bot {
+            id: bot_id.into(),
+            name: "test".into(),
+            description: String::new(),
+            system_prompt: String::new(),
+            default_model: "MiniMax-M3".into(),
+            allowed_tools: vec![],
+            icon: String::new(),
+            color: String::new(),
+            avatar_color: String::new(),
+            last_active_at: None,
+            state: crate::bots::BotState::Idle,
+            created_at: now,
+            updated_at: now,
+        };
+        db.upsert_bot(&bot).expect("upsert test bot");
+    }
+
+    #[tokio::test]
+    async fn install_default_key_via_qga_no_pubkey_returns_ssh_error() {
+        let _lock = HOME_LOCK.lock().expect("HOME_LOCK poisoned");
+        // Point HOME at an empty temp dir — the helper
+        // looks for ~/.ssh/id_{ed25519,rsa,ecdsa}.pub and
+        // should return a ComputerError::Ssh with the
+        // "no default SSH public key" message.
+        let home = tempfile::TempDir::new().expect("tempdir");
+        let _home = HomeGuard::set(home.path());
+        let db_dir = tempfile::TempDir::new().expect("tempdir");
+        let db_path = db_dir.path().join("test.sqlite");
+        let mgr = make_test_manager(&db_path);
+        let db = crate::storage::db::Database::open(&db_path).expect("db");
+        let result = mgr.install_default_key_via_qga(&db, "any-bot").await;
+        match result {
+            Err(ComputerError::Ssh(msg)) => {
+                assert!(
+                    msg.contains("no default SSH public key"),
+                    "expected 'no default SSH public key' in error, got: {msg}"
+                );
+            }
+            other => panic!(
+                "expected ComputerError::Ssh with 'no default SSH public key', got: {other:?}"
+            ),
+        }
+    }
+
+    #[tokio::test]
+    async fn install_default_key_wrapper_matches_helper_on_no_pubkey() {
+        let _lock = HOME_LOCK.lock().expect("HOME_LOCK poisoned");
+        // v3.0.3 refactor: the public Tauri command
+        // `install_default_key` is a thin wrapper around
+        // `install_default_key_via_qga`. The two must
+        // produce identical errors for the same inputs so
+        // the manual "Use my default key" toolbar button
+        // behaves exactly as it did before the refactor.
+        let home = tempfile::TempDir::new().expect("tempdir");
+        let _home = HomeGuard::set(home.path());
+        let db_dir = tempfile::TempDir::new().expect("tempdir");
+        let db_path = db_dir.path().join("test.sqlite");
+        let mgr = make_test_manager(&db_path);
+        let db = crate::storage::db::Database::open(&db_path).expect("db");
+        let wrapper_err = mgr
+            .install_default_key(&db, "any-bot")
+            .await
+            .expect_err("wrapper should fail on no-pubkey");
+        match wrapper_err {
+            ComputerError::Ssh(msg) => {
+                assert!(
+                    msg.contains("no default SSH public key"),
+                    "wrapper diverged from helper: {msg}"
+                );
+            }
+            other => panic!("wrapper should return Ssh, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn install_default_key_via_qga_no_computer_returns_no_computer() {
+        let _lock = HOME_LOCK.lock().expect("HOME_LOCK poisoned");
+        // HOME has a valid pubkey, so the helper reaches
+        // its DB lookup. The DB has no computer row →
+        // NoComputer error. Proves the helper does the
+        // DB lookup the same way the original did.
+        let home = tempfile::TempDir::new().expect("tempdir");
+        let ssh_dir = home.path().join(".ssh");
+        std::fs::create_dir_all(&ssh_dir).expect("mkdir .ssh");
+        std::fs::write(
+            ssh_dir.join("id_ed25519.pub"),
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITESTKEY test@local\n",
+        )
+        .expect("write pub");
+        let _home = HomeGuard::set(home.path());
+        let db_dir = tempfile::TempDir::new().expect("tempdir");
+        let db_path = db_dir.path().join("test.sqlite");
+        let mgr = make_test_manager(&db_path);
+        let db = crate::storage::db::Database::open(&db_path).expect("db");
+        let result = mgr
+            .install_default_key_via_qga(&db, "no-such-bot")
+            .await;
+        match result {
+            Err(ComputerError::NoComputer(bot)) => {
+                assert_eq!(bot, "no-such-bot");
+            }
+            other => panic!(
+                "expected NoComputer(\"no-such-bot\"), got: {other:?}"
+            ),
+        }
+    }
+
+    #[tokio::test]
+    async fn console_url_passes_through_non_auth_errors_without_recover() {
+        let _lock = HOME_LOCK.lock().expect("HOME_LOCK poisoned");
+        // v3.0.3: the auto-recover path in console_url is
+        // scoped to `TunnelAuthFailed` only. For any other
+        // VncError (e.g. NoFreePort because the port
+        // range is exhausted), console_url must propagate
+        // the error directly — we don't burn a QGA install
+        // attempt on unrelated failures. We force NoFreePort
+        // by pre-binding the only port in a 1-port range.
+        use std::net::TcpListener as StdTcpListener;
+        use std::sync::Mutex as StdMutex;
+        // Pick a port the OS gives us, then hold the
+        // listener for the test duration so vnc::start
+        // can't bind it.
+        let probe = StdTcpListener::bind("127.0.0.1:0").expect("probe");
+        let port = probe.local_addr().expect("local_addr").port();
+        let held = StdMutex::new(Some(probe));
+        // Build a manager + DB with a running computer
+        // row. Need a HOME with a pubkey (so a stray
+        // QGA install attempt — if our recover logic
+        // were mis-scoped — wouldn't crash with
+        // ComputerError::Ssh, masking the actual
+        // NoFreePort signal).
+        let home = tempfile::TempDir::new().expect("tempdir");
+        let ssh_dir = home.path().join(".ssh");
+        std::fs::create_dir_all(&ssh_dir).expect("mkdir .ssh");
+        std::fs::write(
+            ssh_dir.join("id_ed25519.pub"),
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITESTKEY test@local\n",
+        )
+        .expect("write pub");
+        let _home = HomeGuard::set(home.path());
+        let db_dir = tempfile::TempDir::new().expect("tempdir");
+        let db_path = db_dir.path().join("test.sqlite");
+        let mgr = make_test_manager(&db_path);
+        let db = crate::storage::db::Database::open(&db_path).expect("db");
+        let bot_id = "console-test-bot";
+        insert_test_bot(&db, bot_id);
+        let now = chrono::Utc::now();
+        db.upsert_computer(&Computer {
+            bot_id: bot_id.into(),
+            vm_name: "test-vm".into(),
+            vm_ip: Some("192.168.122.10".into()),
+            vnc_port: Some(5900),
+            ssh_key_id: String::new(),
+            state: ComputerState::Running.as_str().into(),
+            last_seen_at: Some(now),
+            created_at: now,
+        })
+        .expect("upsert computer");
+        // Set the port range to the single port we
+        // pre-bound so vnc::start will fail with NoFreePort.
+        mgr.set_port_range(port, port).await;
+        let result = mgr.console_url(&db, bot_id).await;
+        // Release the held listener. The test still owns
+        // the HOME_LOCK so no other test will read HOME
+        // before our drop guard runs.
+        drop(held.lock().expect("held lock").take());
+        // vnc::start returns NoFreePort which console_url
+        // must surface as-is (it does NOT trigger the
+        // TunnelAuthFailed auto-recover path).
+        match result {
+            Err(ComputerError::Vnc(msg)) => {
+                assert!(
+                    msg.contains("port allocator exhausted")
+                        || msg.contains("no free ports"),
+                    "expected NoFreePort-style message, got: {msg}"
+                );
+            }
+            Err(other) => panic!(
+                "expected Vnc error from NoFreePort, got: {other:?}"
+            ),
+            Ok(url) => panic!(
+                "expected error from exhausted port range, got ok: {url}"
+            ),
+        }
     }
 }
