@@ -4,6 +4,31 @@ All notable changes to MaxBot are documented in this file. The format
 follows [Keep a Changelog](https://keepachangelog.com/) and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## v3.0.6 — 2026-09-09
+
+### Docs
+- **`docs/v3-grand-tour.md` — per-panel walkthrough with
+  screenshot placeholders.** A 13-section tour that covers
+  every surface in MaxBot v3: the sidebar (Bot roster +
+  version pill + ActivityFeed), the Bot Editor's 8 sections
+  (Identity, Brain, Workspace, Computer, Capabilities, Rules,
+  Schedule, Daemon), the chat panel, the Computer panel
+  (Status / Preview / Takeover + Files), the Skills panel, the
+  Memory panel, the Approval Queue, the Routines panel, the
+  Activity Feed, the Settings drawer and the <kbd>⌘</kbd>+<kbd>K</kbd>
+  command palette, the "What's new in v3" overlay, and closing
+  notes on the v3 polish theme. Five real screenshots landed
+  (Overview, Chat, Computer Console in loading state, the
+  Memory panel, and the <kbd>⌘</kbd>+<kbd>K</kbd> command
+  palette open over the Memory panel) — the rest are
+  placeholders pending a hand-capture pass by Tyler (the
+  worker shell context does not have macOS Screen Recording
+  permission, so `screencapture` fails with "cannot write
+  file to intended destination"). The expected filenames are
+  enumerated in `docs/v3-grand-tour/screenshots/.gitkeep`.
+  No source code changes; the `/Applications/MaxBot.app`
+  binary stays at v3.0.5.
+
 ## v3.0.5 — 2026-09-09
 
 ### Fixed

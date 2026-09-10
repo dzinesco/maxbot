@@ -1,0 +1,27 @@
+# Per-panel screenshots for docs/v3-grand-tour.md.
+#
+# v3.0.6 captured two of these (overview.png, chat.png); the
+# rest are still pending a hand-capture pass by Tyler. The
+# macOS Screen Recording permission in the worker shell context
+# is not granted, so `screencapture` fails with "cannot write
+# file to intended destination" for any further panels. The
+# grand-tour doc references each panel as
+# `docs/v3-grand-tour/screenshots/<panel>.png`; the doc renders
+# the missing ones as inline "Screenshot pending" notes until
+# Tyler fills them in.
+#
+# Expected filenames (one per tour-doc section):
+#   overview.png           ✓ captured 2026-09-09 (v3.0.6 retry)
+#   sidebar.png            pending
+#   bot-editor.png         pending
+#   chat.png               ✓ captured 2026-09-09 (v3.0.6 retry)
+#   computer-console.png   ✓ captured 2026-09-09 (v3.0.6 retry)
+#   computer-files.png     pending
+#   skills.png             pending
+#   memory.png             ✓ captured 2026-09-09 (v3.0.6 retry)
+#   approval-queue.png     pending
+#   routines.png           pending
+#   activity-feed.png      pending
+#   settings.png           pending
+#   settings-palette.png   ✓ captured 2026-09-09 (v3.0.6 retry)
+#   whats-new.png          pending
