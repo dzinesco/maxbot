@@ -57,6 +57,18 @@ pub struct AppState {
     /// session is active; `skill_record_stop` drains the
     /// captured calls into a candidate Skill.
     pub recorder: Arc<RecorderState>,
+    /// v3.7.3 — LLM key override. The Mac app pushes
+    /// its `Settings.minimax_api_key` to the daemon on
+    /// launch and on every Settings save; the daemon
+    /// stores the key in memory only (never persisted)
+    /// and shares this `Arc<RwLock>` into the executor's
+    /// `AppState`. The executor checks this lock first
+    /// when reading the API key; if `None`, it falls
+    /// back to the DB-loaded `Settings.minimax_api_key`.
+    /// The Mac app's own `AppState` initializes the
+    /// lock to `None` — the in-memory override is a
+    /// daemon-only path.
+    pub llm_key_override: Arc<std::sync::RwLock<Option<String>>>,
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -132,6 +144,12 @@ pub fn run() {
                 db: Arc::new(db),
                 mcp: mcp_registry,
                 bot_runs: std::sync::Arc::new(bots::registry::BotRunRegistry::new()),
+                // v3.7.3 — LLM key override lock. The Mac
+                // app never sets this; the daemon sets it
+                // to the key it received via `POST /settings`.
+                // Initialized to `None` so the executor's
+                // fallback (DB-loaded Settings) applies.
+                llm_key_override: std::sync::Arc::new(std::sync::RwLock::new(None)),
                 // v2.0 Slice B: build the ComputerManager
                 // from the current Settings. The
                 // manager is cheap to construct (it
@@ -320,6 +338,14 @@ pub fn run() {
             commands::daemon::list_recent_activity,
             commands::daemon::get_daemon_token,
             commands::daemon::rotate_daemon_token,
+            // v3.7.3 — Push the Mac app's LLM settings
+            // to the daemon on launch + on Settings
+            // save. Best-effort: the function logs a
+            // warning and returns `Ok(())` if the
+            // daemon is unreachable, so the Mac app
+            // continues to work even when the daemon
+            // is down.
+            commands::daemon::push_settings_to_daemon,
         ])
         .run(tauri::generate_context!())
         .expect("error while running MaxBot");

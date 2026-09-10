@@ -230,6 +230,7 @@ pub async fn skill_run(
         bot_runs: state.bot_runs.clone(),
         computer: state.computer.clone(),
         recorder: state.recorder.clone(),
+        llm_key_override: state.llm_key_override.clone(),
     });
     let cancel = CancellationToken::new();
     // Capture the user inputs as the trace's trigger
@@ -367,6 +368,7 @@ pub async fn skill_record_start(
         bot_runs: state.bot_runs.clone(),
         computer: state.computer.clone(),
         recorder: state.recorder.clone(),
+        llm_key_override: state.llm_key_override.clone(),
     });
     // We need the bot_run_id *before* the run completes
     // so the UI can show progress events. The executor

@@ -43,7 +43,7 @@
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use axum::{
@@ -78,8 +78,19 @@ const SCHEDULER_TICK_SECONDS: u64 = 30;
 /// doesn't run any MCP tools for v2.8 — the per-Bot
 /// tool registry is allowed_tools-filtered and the
 /// webhook payload is a single user message.)
+///
+/// v3.7.3 — Adds `llm_key`, the in-memory LLM
+/// credential store. The Mac app pushes its
+/// `Settings.minimax_api_key` to the daemon on launch
+/// and on every Settings save (via `POST /settings`).
+/// The daemon stores the key in memory only — it is
+/// never written to disk. Each per-request `AppState`
+/// passed to `run_bot_once` shares this `Arc<RwLock>`,
+/// so the executor's `provider_for_settings` reads
+/// the pushed key without needing a DB round-trip.
 struct DaemonState {
     db: Arc<Database>,
+    llm_key: Arc<RwLock<Option<String>>>,
 }
 
 #[derive(Serialize)]
@@ -148,7 +159,10 @@ fn print_help() {
              POST /shared?bot_id=<bot_id>              Auth: Authorization: Bearer <token>\n  \
                                                      Body: {{verb: read|write|list, path?, content?}}\n  \
                                                      Routes the Mac app's shared_* tools to the\n  \
-                                                     daemon's ~/bots/_shared/ (v3.7.1)"
+                                                     daemon's ~/bots/_shared/ (v3.7.1)\n  \
+             POST /settings?bot_id=<bot_id>            Auth: Authorization: Bearer <token>\n  \
+                                                     Body: {{\"minimax_api_key\": \"...\"}}\n  \
+                                                     Stores the LLM key in memory only (v3.7.3)"
     );
 }
 
@@ -191,27 +205,40 @@ async fn main() {
     };
     log::info!("maxbotd: db = {}", args.db.display());
 
-    let state = Arc::new(DaemonState { db: db.clone() });
+    let state = Arc::new(DaemonState {
+        db: db.clone(),
+        // v3.7.3 — In-memory LLM key. The Mac app
+        // pushes the key on launch + on Settings
+        // save. Initialized to `None` so the
+        // executor's error message points the user
+        // at the right fix when the Mac app hasn't
+        // pushed yet.
+        llm_key: Arc::new(RwLock::new(None)),
+    });
 
     // Background scheduler: same 30s cadence as the
     // Tauri app's `bots::scheduler`. Reuses the same
     // `run_bot_once` (Option<AppHandle>::None variant).
-    spawn_scheduler(db.clone());
+    spawn_scheduler(state.clone());
 
     // HTTP server: webhook (POST) + liveness (GET /health,
     // no auth) + per-Bot recent-runs (GET, bearer auth) +
     // v3.7.1 shared-folder (POST /shared, bearer auth,
-    // body-driven verb). The CORS layer is added at the
-    // outer level so every response (including 401s and
-    // error JSONs) carries `Access-Control-Allow-Origin: *`,
-    // unblocking the in-app Test-webhook button in
-    // `BotEditor.tsx` (v3.1.0) and the in-app shared_*
-    // tool calls (v3.7.1) from the same-origin webview.
+    // body-driven verb) + v3.7.3 settings push
+    // (`POST /settings`, bearer auth, JSON body with
+    // `{"minimax_api_key": "..."}`, stored in memory).
+    // The CORS layer is added at the outer level so
+    // every response (including 401s and error JSONs)
+    // carries `Access-Control-Allow-Origin: *`, unblocking
+    // the in-app Test-webhook button in `BotEditor.tsx`
+    // (v3.1.0) and the in-app shared_* tool calls
+    // (v3.7.1) from the same-origin webview.
     let app = Router::new()
         .route("/health", get(handle_health))
         .route("/hooks/:bot_id", post(handle_webhook))
         .route("/bots/:bot_id/recent_runs", get(handle_recent_runs))
         .route("/shared", post(handle_shared))
+        .route("/settings", post(handle_settings))
         .layer(middleware::from_fn(cors_layer))
         .with_state(state);
 
@@ -244,6 +271,155 @@ async fn handle_health() -> impl IntoResponse {
             "version": env!("CARGO_PKG_VERSION"),
         })),
     )
+}
+
+// =====================================================================
+//  v3.7.3 — Settings push route (POST /settings)
+// =====================================================================
+//
+// Body shape (JSON):
+//   {
+//     "minimax_api_key": "..."
+//   }
+//
+// Auth: bearer token. The Mac app reads the per-Bot
+// `daemon_tokens` row (any Bot) and sends that token —
+// same pattern as the other authenticated routes. The
+// daemon verifies the token against the per-Bot
+// `daemon_tokens.bot_id` row using the
+// `?bot_id=<bot_id>` query param, so the route knows
+// which row to check. (Without the query param, the
+// Mac app would need to expose a global admin token
+// we don't have.)
+//
+// Storage: in-memory only. The key is stored in
+// `DaemonState.llm_key` and shared into the executor's
+// `AppState.llm_key_override` for every run. Never
+// persisted to disk — the key is sensitive and the
+// Mac app re-pushes on every launch and on every
+// Settings save, so a stale on-disk copy has no
+// value.
+///
+/// v3.7.3 — Body for `POST /settings`. `minimax_api_key`
+/// is the only field the Mac app currently pushes;
+/// adding more fields here is a backwards-compatible
+/// JSON add (the renderer will only send what it has).
+#[derive(Deserialize)]
+struct SettingsRequest {
+    /// MiniMax API key. `None` is treated as "don't
+    /// change" so a partial push from a future Mac
+    /// app version doesn't accidentally wipe the
+    /// key. An empty string clears the override.
+    #[serde(default)]
+    minimax_api_key: Option<String>,
+}
+
+/// v3.7.3 — Query string for `POST /settings`. `bot_id`
+/// pins the per-Bot token lookup, matching the
+/// existing `/shared?bot_id=` and `/hooks/<bot_id>`
+/// patterns.
+#[derive(Deserialize)]
+struct SettingsParams {
+    bot_id: String,
+}
+
+/// v3.7.3 — `POST /settings` handler. Stores the
+/// pushed LLM key in the daemon's in-memory
+/// `DaemonState.llm_key`. The next webhook /
+/// scheduled run picks it up via the executor's
+/// `AppState.llm_key_override` (shared from
+/// `DaemonState.llm_key` at AppState construction).
+async fn handle_settings(
+    AxumState(state): AxumState<Arc<DaemonState>>,
+    headers: HeaderMap,
+    Query(params): Query<SettingsParams>,
+    Json(body): Json<SettingsRequest>,
+) -> Response {
+    // 1. Bearer auth. Same shape as the other
+    //    authenticated routes.
+    let token = match extract_bearer(&headers) {
+        Some(t) => t,
+        None => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({ "error": "missing or malformed Authorization header" })),
+            )
+                .into_response();
+        }
+    };
+    let db = state.db.clone();
+    let bot_id_for_auth = params.bot_id.clone();
+    let stored = match tokio::task::spawn_blocking(move || {
+        db.get_daemon_token(&bot_id_for_auth)
+    })
+    .await
+    {
+        Ok(Ok(Some(t))) if t == token => t,
+        Ok(Ok(Some(_))) => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({ "error": "invalid token" })),
+            )
+                .into_response();
+        }
+        Ok(Ok(None)) => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({ "error": "no daemon token configured for this bot" })),
+            )
+                .into_response();
+        }
+        Ok(Err(e)) => {
+            log::error!("maxbotd: settings token lookup db error: {e}");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": "db error" })),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            log::error!("maxbotd: settings token lookup task panicked: {e}");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": "internal error" })),
+            )
+                .into_response();
+        }
+    };
+    drop(stored);
+
+    // 2. Update the in-memory key. `None` (field
+    //    absent) is a no-op so a partial push from a
+    //    future Mac app version doesn't wipe the key.
+    //    An empty string clears the override.
+    if let Some(k) = body.minimax_api_key.as_deref() {
+        if k.is_empty() {
+            if let Ok(mut guard) = state.llm_key.write() {
+                *guard = None;
+            }
+            log::info!("maxbotd: /settings cleared the in-memory LLM key");
+        } else {
+            if let Ok(mut guard) = state.llm_key.write() {
+                *guard = Some(k.to_string());
+            }
+            // Log the prefix + length only — never
+            // the key itself. The prefix is enough
+            // for an operator to confirm "yes, the
+            // key I just pushed is the one in memory"
+            // without exposing the secret to journald.
+            let prefix: String = k.chars().take(6).collect();
+            log::info!(
+                "maxbotd: /settings stored in-memory LLM key (prefix={prefix}, len={})",
+                k.len()
+            );
+        }
+    }
+
+    (
+        StatusCode::OK,
+        Json(json!({ "ok": true })),
+    )
+        .into_response()
 }
 
 /// v3.7.1 — CORS middleware. Adds
@@ -940,6 +1116,10 @@ async fn handle_webhook(
     //    allowed_tools list is enforced by the
     //    executor regardless), and the Computer
     //    manager / recorder are empty defaults.
+    //    v3.7.3 — Share the daemon's in-memory
+    //    LLM key into the executor's AppState so
+    //    webhook-driven runs reach the LLM
+    //    without a DB copy.
     let app_state = Arc::new(AppState {
         db: state.db.clone(),
         mcp: McpRegistry::default(),
@@ -948,6 +1128,7 @@ async fn handle_webhook(
             &maxbot_lib::storage::Settings::default(),
         )),
         recorder: Arc::new(maxbot_lib::skills::recorder::RecorderState::new()),
+        llm_key_override: state.llm_key.clone(),
     });
     let bot_for_task = bot.clone();
     let cancel = CancellationToken::new();
@@ -1069,19 +1250,25 @@ fn extract_bearer(headers: &HeaderMap) -> Option<String> {
 /// logic calls `Database::list_due_schedules` and
 /// then the existing `run_bot_once` (Option::None
 /// variant) per schedule.
-fn spawn_scheduler(db: Arc<Database>) {
+fn spawn_scheduler(state: Arc<DaemonState>) {
+    let db = state.db.clone();
     tokio::spawn(async move {
         let tick = Duration::from_secs(SCHEDULER_TICK_SECONDS);
         loop {
             tokio::time::sleep(tick).await;
-            if let Err(e) = scheduler_tick(&db).await {
+            if let Err(e) = scheduler_tick(&state).await {
                 log::warn!("maxbotd: scheduler tick failed: {e}");
             }
         }
     });
+    // `db` is intentionally moved into the loop above
+    // through `state`; this binding silences the
+    // unused-variable warning for the leftover clone.
+    let _ = db;
 }
 
-async fn scheduler_tick(db: &Arc<Database>) -> Result<(), String> {
+async fn scheduler_tick(state: &Arc<DaemonState>) -> Result<(), String> {
+    let db = &state.db;
     // Clone once so we can move into the lookup
     // closure and still have an `Arc<Database>` for
     // the for-loop iterations.
@@ -1108,7 +1295,11 @@ async fn scheduler_tick(db: &Arc<Database>) -> Result<(), String> {
         // Minimal AppState — same as the webhook
         // handler. The executor enforces the per-Bot
         // allowed_tools filter regardless of the
-        // registry contents.
+        // registry contents. v3.7.3 — Share the
+        // daemon's in-memory LLM key into the
+        // executor's AppState so scheduled runs
+        // launched while the Mac app is closed can
+        // still reach the LLM.
         let app_state = Arc::new(AppState {
             db: Arc::clone(db),
             mcp: McpRegistry::default(),
@@ -1117,6 +1308,7 @@ async fn scheduler_tick(db: &Arc<Database>) -> Result<(), String> {
                 &maxbot_lib::storage::Settings::default(),
             )),
             recorder: Arc::new(maxbot_lib::skills::recorder::RecorderState::new()),
+            llm_key_override: state.llm_key.clone(),
         });
         let cancel = CancellationToken::new();
         tokio::spawn(async move {
@@ -1219,7 +1411,10 @@ mod tests {
         // header" (401) and not "no token configured".
         db.set_daemon_token("bot-401", "secret").expect("set");
 
-        let state = Arc::new(DaemonState { db: db.clone() });
+        let state = Arc::new(DaemonState {
+            db: db.clone(),
+            llm_key: Arc::new(RwLock::new(None)),
+        });
         let app = Router::new()
             .route("/hooks/:bot_id", post(handle_webhook))
             .with_state(state);
@@ -1337,7 +1532,10 @@ mod tests {
         settings.minimax_api_key = Some("test-key".to_string());
         db.save_settings(&settings).expect("settings");
 
-        let state = Arc::new(DaemonState { db: db.clone() });
+        let state = Arc::new(DaemonState {
+            db: db.clone(),
+            llm_key: Arc::new(RwLock::new(None)),
+        });
         let app = Router::new()
             .route("/hooks/:bot_id", post(handle_webhook))
             .with_state(state);
@@ -1454,7 +1652,10 @@ mod tests {
         unsafe {
             std::env::set_var("MAXBOT_SHARED_DIR", tmp.path());
         }
-        let state = Arc::new(DaemonState { db: db.clone() });
+        let state = Arc::new(DaemonState {
+            db: db.clone(),
+            llm_key: Arc::new(RwLock::new(None)),
+        });
         let app = Router::new()
             .route("/health", get(handle_health))
             .route("/hooks/:bot_id", post(handle_webhook))
@@ -1807,6 +2008,108 @@ mod tests {
             .await
             .expect("send no-content");
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        server.abort();
+        restore_shared_dir(saved);
+    }
+
+    /// v3.7.3 — `settings_route_stores_key_in_memory`.
+    /// End-to-end: POST `/settings` with a bearer
+    /// token + JSON body → 200 OK, the in-memory
+    /// `DaemonState.llm_key` reflects the pushed key,
+    /// and the executor's `AppState.llm_key_override`
+    /// (sharing the same `Arc<RwLock>`) sees the
+    /// same value. This is the load-bearing
+    /// contract for "the Mac app pushes the key,
+    /// the daemon-driven run uses it."
+    #[tokio::test]
+    async fn settings_route_stores_key_in_memory() {
+        let _env_guard = lock_env();
+        let saved = std::env::var_os("MAXBOT_SHARED_DIR").map(|s| s.to_string_lossy().to_string());
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("settings.db");
+        let db = Arc::new(Database::open(&path).expect("open"));
+        seed_test_bot(&db, "bot-settings");
+        db.set_daemon_token("bot-settings", "tok-settings")
+            .expect("set token");
+
+        let state = Arc::new(DaemonState {
+            db: db.clone(),
+            llm_key: Arc::new(RwLock::new(None)),
+        });
+        let app = Router::new()
+            .route("/settings", post(handle_settings))
+            .with_state(state.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("local_addr");
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let client = reqwest::Client::new();
+
+        // 1. Missing Authorization header → 401.
+        let resp = client
+            .post(format!("http://{addr}/settings?bot_id=bot-settings"))
+            .json(&json!({ "minimax_api_key": "sk-test-1234" }))
+            .send()
+            .await
+            .expect("send no-auth");
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+        // 2. Wrong token → 401.
+        let resp = client
+            .post(format!("http://{addr}/settings?bot_id=bot-settings"))
+            .header("Authorization", "Bearer wrong-token")
+            .json(&json!({ "minimax_api_key": "sk-test-1234" }))
+            .send()
+            .await
+            .expect("send wrong-token");
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+        // 3. Correct token + key → 200, key stored.
+        let resp = client
+            .post(format!("http://{addr}/settings?bot_id=bot-settings"))
+            .header("Authorization", "Bearer tok-settings")
+            .json(&json!({ "minimax_api_key": "sk-test-1234" }))
+            .send()
+            .await
+            .expect("send ok");
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: serde_json::Value = resp.json().await.expect("json");
+        assert_eq!(body.get("ok").and_then(|v| v.as_bool()), Some(true));
+        // The shared lock should now read the pushed key.
+        let stored = state.llm_key.read().expect("read lock").clone();
+        assert_eq!(stored.as_deref(), Some("sk-test-1234"));
+
+        // 4. Empty string clears the override.
+        let resp = client
+            .post(format!("http://{addr}/settings?bot_id=bot-settings"))
+            .header("Authorization", "Bearer tok-settings")
+            .json(&json!({ "minimax_api_key": "" }))
+            .send()
+            .await
+            .expect("send clear");
+        assert_eq!(resp.status(), StatusCode::OK);
+        let stored = state.llm_key.read().expect("read lock").clone();
+        assert!(stored.is_none(), "empty string must clear the override");
+
+        // 5. Push again, then re-push a different key
+        //    — the latest write wins.
+        for key in ["sk-first", "sk-second"] {
+            let resp = client
+                .post(format!("http://{addr}/settings?bot_id=bot-settings"))
+                .header("Authorization", "Bearer tok-settings")
+                .json(&json!({ "minimax_api_key": key }))
+                .send()
+                .await
+                .expect("send repush");
+            assert_eq!(resp.status(), StatusCode::OK);
+        }
+        let stored = state.llm_key.read().expect("read lock").clone();
+        assert_eq!(stored.as_deref(), Some("sk-second"));
 
         server.abort();
         restore_shared_dir(saved);

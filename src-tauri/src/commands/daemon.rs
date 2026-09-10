@@ -99,6 +99,138 @@ pub async fn rotate_daemon_token(
         .map_err(|e| format!("rotate_daemon_token: {e}"))
 }
 
+/// v3.7.3 — Push the current LLM settings to the
+/// daemon's in-memory store. The Mac app calls this
+/// on launch and on every Settings save so the
+/// daemon-driven runs (webhooks + scheduler) can
+/// reach the LLM while the Mac is closed.
+///
+/// The push is best-effort: if the daemon is
+/// unreachable (laptop closed, daemon not yet
+/// booted, network glitch) the function logs a
+/// warning and returns `Ok(())` without surfacing
+/// the error to the renderer. The Mac app's local
+/// Bot runs still work — they use the locally-
+/// stored `Settings.minimax_api_key` directly. The
+/// daemon-driven runs will fail at the LLM call
+/// with the v3.7.3 "no LLM key configured; Mac app
+/// must POST /settings" error, which is surfaced
+/// in the activity feed.
+///
+/// Auth: the daemon's `/settings` route uses a
+/// per-Bot bearer token (same as `/shared`,
+/// `/hooks/<id>`, `/bots/<id>/recent_runs`). The
+/// Mac app picks any Bot's token from the local
+/// `daemon_tokens` table — first by sorted
+/// `created_at`, falling back to the first Bot
+/// with a token. The `?bot_id=<id>` query param
+/// pins the daemon's token-lookup row.
+#[tauri::command]
+pub async fn push_settings_to_daemon(
+    state: State<'_, Arc<AppState>>,
+) -> Result<(), String> {
+    let db = state.db.clone();
+    let (settings, bot_id, token) = tokio::task::spawn_blocking(move || {
+        let settings = db
+            .load_settings()
+            .map_err(|e| format!("db error reading settings: {e}"))?;
+        // Find a Bot with a configured daemon token.
+        // The daemon's `/settings` route uses the
+        // per-Bot token (same as the other auth'd
+        // routes), so the Mac app needs to send a
+        // valid `bot_id`. Pick the most-recently
+        // created Bot that has a token; if none
+        // exists, the push is a no-op (the daemon
+        // has no way to authenticate the request
+        // anyway).
+        let bots = db.list_bots().map_err(|e| format!("db error: {e}"))?;
+        let mut chosen: Option<(String, String)> = None;
+        for bot in &bots {
+            if let Ok(Some(tok)) = db.get_daemon_token(&bot.id) {
+                if !tok.is_empty() {
+                    chosen = Some((bot.id.clone(), tok));
+                    break;
+                }
+            }
+        }
+        let (bot_id, token) = match chosen {
+            Some(pair) => pair,
+            None => return Ok::<_, String>((settings, String::new(), String::new())),
+        };
+        Ok::<_, String>((settings, bot_id, token))
+    })
+    .await
+    .map_err(|e| format!("settings push task panicked: {e}"))??;
+
+    // No Bot with a token → can't push. This is
+    // normal for a fresh install before the user
+    // has opened a Bot editor and clicked
+    // "Generate token". Skip silently.
+    if token.is_empty() {
+        log::debug!("push_settings_to_daemon: no bot with a daemon token, skipping");
+        return Ok(());
+    }
+
+    // Build the request body. Sending `null` for
+    // `minimax_api_key` would be a no-op on the
+    // daemon side (the daemon only updates the
+    // in-memory key when the field is `Some`),
+    // but a missing field reads as "the Mac app
+    // hasn't set one yet" — which is also a no-op.
+    // The Mac app's launch + save flow always
+    // has a value to push, so we send `Some(_)`.
+    let body = serde_json::json!({
+        "minimax_api_key": settings.minimax_api_key,
+    });
+
+    let url = if settings.maxbotd_url.trim().is_empty() {
+        "http://127.0.0.1:8443/settings".to_string()
+    } else {
+        format!(
+            "{}/settings",
+            settings.maxbotd_url.trim().trim_end_matches('/')
+        )
+    };
+
+    // Fire and forget. The Tauri command returns
+    // `Ok(())` regardless of outcome so the
+    // Mac app's launch + save flow isn't blocked
+    // on a dead daemon. We log the result so an
+    // operator can grep `maxbotd:` in journald or
+    // the Tauri app's stdout and see what
+    // happened.
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(2))
+        .build()
+        .map_err(|e| format!("reqwest builder: {e}"))?;
+
+    let resp = match client
+        .post(&url)
+        .query(&[("bot_id", bot_id.as_str())])
+        .bearer_auth(&token)
+        .json(&body)
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            log::warn!(
+                "push_settings_to_daemon: POST {url} failed: {e} (daemon unreachable; daemon-driven runs will fail at the LLM call until the Mac app can reach the daemon)"
+            );
+            return Ok(());
+        }
+    };
+    if !resp.status().is_success() {
+        log::warn!(
+            "push_settings_to_daemon: POST {url} returned {} (daemon rejected the push)",
+            resp.status()
+        );
+    } else {
+        log::info!("push_settings_to_daemon: POST {url} ok (key stored in memory)");
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

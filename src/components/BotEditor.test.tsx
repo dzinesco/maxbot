@@ -545,4 +545,42 @@ describe("BotEditor — Daemon section (v2.8.0)", () => {
       expect(applyGrokBotDefaults).toHaveBeenCalledWith("bot-existing-1");
     });
   });
+
+  // v3.7.3 — The Daemon section surfaces the
+  // webhook URL. The renderer builds it from
+  // `daemonServerHost`, and the daemon listens
+  // on plain HTTP (not HTTPS — TLS is a later
+  // slice). An earlier typo had the URL hard-
+  // coded as `https://`, which caused the
+  // Test-webhook button to fail with a TLS
+  // error from the webview even after the
+  // v3.7.1 CORS fix. Regression guard: the
+  // rendered URL must start with `http://`,
+  // not `https://`.
+  it("webhook URL starts with http:// (not https://) for plain-HTTP daemon", async () => {
+    vi.mocked(getDaemonToken).mockResolvedValue("tok-url-shape-1");
+    const onSave = vi.fn((bot: Bot) => Promise.resolve(bot));
+    render(
+      <BotEditor
+        initial={blankBot({ id: "bot-url-1" })}
+        schedule={noSchedule}
+        availableTools={noTools}
+        isNew={false}
+        onClose={() => {}}
+        onSave={onSave}
+      />,
+    );
+    await waitFor(() => {
+      const input = screen.getByTestId(
+        "daemon-webhook-url",
+      ) as HTMLInputElement;
+      // The placeholder falls back when
+      // `daemonServerHost` is empty (a fresh
+      // user hasn't set `computer_server_host`).
+      // We assert on whichever path renders.
+      const rendered = input.value;
+      expect(rendered.startsWith("http://")).toBe(true);
+      expect(rendered.startsWith("https://")).toBe(false);
+    });
+  });
 });

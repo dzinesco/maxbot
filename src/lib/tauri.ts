@@ -120,6 +120,17 @@ export async function saveSettings(settings: Settings): Promise<void> {
   await invoke("save_settings", { settings });
 }
 
+// v3.7.3 — Push the current LLM settings to the
+// daemon. The Mac app calls this on launch and on
+// every Settings save so the daemon-driven runs
+// (webhooks + scheduler) can reach the LLM while
+// the Mac is closed. Best-effort: returns `Ok(())`
+// even if the daemon is unreachable (the Mac app's
+// local Bot runs still work).
+export async function pushSettingsToDaemon(): Promise<void> {
+  await invoke("push_settings_to_daemon");
+}
+
 export async function deleteApiKey(): Promise<void> {
   await invoke("delete_api_key");
 }

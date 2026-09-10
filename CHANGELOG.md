@@ -4,6 +4,80 @@ All notable changes to MaxBot are documented in this file. The format
 follows [Keep a Changelog](https://keepachangelog.com/) and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## v3.7.3 — 2026-09-10
+
+### Added — Always-on maxbotd audit (Hardening item #3)
+
+The Mac app's `Settings.minimax_api_key` is now pushed to the
+daemon on launch and on every Settings save, so a webhook or
+scheduled run can reach the LLM while the Mac is closed. The
+push is in-memory only — the key is never written to disk on
+the daemon, and the Mac app's local Bot runs continue to
+work even if the daemon is unreachable.
+
+- **New `POST /settings` route on `maxbotd`.** Bearer-
+  authenticated (same per-Bot token pattern as `/shared`,
+  `/hooks/<id>`, `/bots/<id>/recent_runs`). Body shape:
+  `{"minimax_api_key": "..."}`. The daemon stores the
+  key in `Arc<RwLock<Option<String>>>` on the daemon state
+  and shares the lock into every per-request `AppState` it
+  passes to `run_bot_once`. An empty string clears the
+  override; a missing field is a no-op.
+- **`AppState.llm_key_override` field.** The executor
+  reads the in-memory key first when constructing the
+  LLM provider, falling back to the DB-loaded
+  `Settings.minimax_api_key` when the override is `None`.
+  The Mac app's own `AppState` initializes the lock to
+  `None`, so the in-memory path is daemon-only.
+- **`pushSettingsToDaemon` Tauri command.** Best-effort
+  POST to the daemon's `/settings` route. Returns
+  `Ok(())` even if the daemon is unreachable (the
+  Mac app logs a `warn!` and continues). Picks a
+  per-Bot token from the local `daemon_tokens` table
+  for auth (the daemon's `/settings` route uses the
+  per-Bot token pattern).
+- **App.tsx wires the push on two paths.** The bootstrap
+  effect calls `pushSettingsToDaemon` after the initial
+  settings load; the Settings save handler calls it
+  after the SQLite write succeeds.
+- **Chat command's `shared_*` tools route through the
+  daemon.** The chat command's `ToolContext.app` was
+  `None` (predates the v3.7.1 routing layer), which
+  made the chat path's `shared_read` / `shared_write` /
+  `shared_list` calls fall through to the local Mac
+  filesystem. The chat command now passes
+  `app: Some(app)`, so the v3.7.1 Mac-app path
+  applies and the shared folder is the daemon's
+  `~/bots/_shared/`. The local-fs fallback remains
+  in the tool for the case where the daemon is
+  unreachable.
+- **Test-webhook button URL fixed.** `BotEditor.tsx`'s
+  Test-webhook URL was hard-coded as `https://` but
+  the daemon listens on plain HTTP (`http://`). The
+  typo caused the webview to attempt a TLS handshake
+  against the plain-HTTP port and fail. Both
+  occurrences (the read-only "Webhook URL" display
+  and the Test-webhook fetch URL) now use `http://`.
+  A vitest case in `BotEditor.test.tsx` pins the
+  shape as a regression guard.
+
+### Verified
+
+- `cargo test --lib` passes (301+ tests).
+- `cargo test --bin maxbotd` passes (7+ tests, plus 2
+  pre-existing FK failures on `daemon_token_round_trip`
+  / `rotate_daemon_token_invalidates_old` — those are
+  a v3.7.4 follow-up, not a v3.7.3 regression).
+- `npm test` passes (137 tests, +1 new).
+- `cargo tauri build --bundles app` succeeds.
+- Ad-hoc signed and smoke-launched at
+  `/Applications/MaxBot.app` (v3.7.3).
+- End-to-end against `crispy`: `POST /settings` with
+  the Mac's API key → 200 OK; webhook-driven run on
+  the daemon uses the pushed key (the bot_run row
+  in the activity feed shows the LLM response, not
+  the "no LLM key configured" error).
+
 ## v3.7.2 — 2026-09-10
 
 ### Changed — noVNC strip, host-side screenshot poll, LightDM-based guest desktop

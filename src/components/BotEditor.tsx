@@ -1037,7 +1037,7 @@ export function BotEditor({
                   data-setting-key={`bot.${bot.id || initial.id}.daemon-webhook`}
                   value={
                     daemonServerHost
-                      ? `https://${daemonServerHost}:8443/hooks/${bot.id}`
+                      ? `http://${daemonServerHost}:8443/hooks/${bot.id}`
                       : `<set computer_server_host in Settings>:8443/hooks/${bot.id}`
                   }
                   style={{ fontFamily: "var(--font-mono)", width: "100%" }}
@@ -1120,7 +1120,7 @@ export function BotEditor({
                           setTestStatus({ kind: "error", message: "no token — click Generate first" });
                           return;
                         }
-                        const url = `https://${daemonServerHost}:8443/hooks/${bot.id}`;
+                        const url = `http://${daemonServerHost}:8443/hooks/${bot.id}`;
                         const body = JSON.stringify({
                           text: `webhook test from MaxBot at ${new Date().toISOString()}`,
                         });

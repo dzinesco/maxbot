@@ -157,6 +157,7 @@ fn build_test_state(db: Arc<Database>) -> Arc<AppState> {
         bot_runs: Arc::new(BotRunRegistry::new()),
         computer: Arc::new(ComputerManager::new(&Settings::default())),
         recorder: Arc::new(RecorderState::new()),
+        llm_key_override: Arc::new(std::sync::RwLock::new(None)),
     })
 }
 

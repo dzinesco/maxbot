@@ -591,6 +591,7 @@ async fn resume_bot_after_decide(
         bot_runs: state.bot_runs.clone(),
         computer: state.computer.clone(),
         recorder: state.recorder.clone(),
+        llm_key_override: state.llm_key_override.clone(),
     });
     let conversation_id_for_task = conversation_id;
     // `tool_call_id_owned` is moved into the task to

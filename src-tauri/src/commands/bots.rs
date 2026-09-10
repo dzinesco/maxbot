@@ -320,6 +320,11 @@ pub async fn run_bot_now(
         // not a recording path so this is a no-op for
         // normal runs.
         recorder: state.recorder.clone(),
+        // v3.7.3 — share the LLM key override so
+        // the executor reads the same in-memory key
+        // (typically `None` for the Tauri app; the
+        // daemon sets it via `POST /settings`).
+        llm_key_override: state.llm_key_override.clone(),
     });
     // The bot runs to completion here; cancel is a no-op for now (UI
     // doesn't yet expose a per-run Stop button).
@@ -429,6 +434,7 @@ pub async fn send_to_bot(
             bot_runs: state.bot_runs.clone(),
             computer: state.computer.clone(),
             recorder: state.recorder.clone(),
+            llm_key_override: state.llm_key_override.clone(),
         });
         let db_for_lookup = state.db.clone();
         let id_for_lookup = to_bot_id.clone();

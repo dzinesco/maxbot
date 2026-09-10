@@ -148,6 +148,7 @@ mod tests {
             bot_runs: Arc::new(BotRunRegistry::new()),
             computer,
             recorder: Arc::new(RecorderState::new()),
+            llm_key_override: Arc::new(std::sync::RwLock::new(None)),
         });
         (state, dir)
     }

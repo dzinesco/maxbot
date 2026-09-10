@@ -45,6 +45,7 @@ import {
   getMessages,
   searchMessages,
   getSettings,
+  pushSettingsToDaemon,
   groupGet,
   groupHistory,
   groupList,
@@ -484,6 +485,18 @@ export default function App() {
         const unread: Record<string, number> = {};
         for (const [id, n] of inboxEntries) if (n > 0) unread[id] = n;
         setUnreadCounts(unread);
+        // v3.7.3 — Push the Mac app's LLM settings
+        // to the daemon on launch. The daemon
+        // stores the key in memory only; if the
+        // daemon is unreachable, this is a no-op
+        // and the Mac app's local Bot runs still
+        // work. The push gives the daemon-driven
+        // runs (webhook + scheduler) the key they
+        // need to call the LLM while the Mac is
+        // closed.
+        pushSettingsToDaemon().catch((e) => {
+          console.warn("pushSettingsToDaemon (boot) failed:", e);
+        });
       } catch (e) {
         setBootError(String(e));
       }
@@ -1311,6 +1324,15 @@ export default function App() {
   const handleSaveSettings = useCallback(async (next: SettingsT) => {
     await saveSettings(next);
     setSettings(next);
+    // v3.7.3 — Push the new settings to the daemon
+    // so the in-memory LLM key is up to date. The
+    // push is best-effort: if the daemon is
+    // unreachable, the local Mac Bot runs still
+    // work and the next launch (or the next time
+    // the daemon comes back) will re-push.
+    pushSettingsToDaemon().catch((e) => {
+      console.warn("pushSettingsToDaemon (save) failed:", e);
+    });
   }, []);
 
   // --- bot handlers ---

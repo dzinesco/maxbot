@@ -593,7 +593,18 @@ async fn run_agent_loop(
                     ToolContext {
                         consent_granted,
                         consent_prompt: None,
-                        app: None,
+                        // v3.7.3 — Pass the chat command's
+                        // `AppHandle` so the v3.7.1 Mac-app
+                        // path applies to shared_* tool calls
+                        // (otherwise the chat path's `app: None`
+                        // made them fall through to the local
+                        // Mac filesystem, which is wrong when
+                        // the daemon is the source of truth for
+                        // the shared folder). The Mac app
+                        // process always has an `AppHandle`;
+                        // the original `app: None` predates
+                        // the v3.7.1 routing layer.
+                        app: Some(app.clone()),
                     },
                 )
                 .await;

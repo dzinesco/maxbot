@@ -166,6 +166,7 @@ pub async fn group_run_turn(
         bot_runs: state.bot_runs.clone(),
         computer: state.computer.clone(),
         recorder: state.recorder.clone(),
+        llm_key_override: state.llm_key_override.clone(),
     });
     groups::run_group_turn(app, state_arc, group_id, bot_id, handoff_from_message_id).await
 }

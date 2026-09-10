@@ -246,7 +246,7 @@ pub async fn run_bot_once(
     let _ = state.db.upsert_bot_run(&run);
 
     // 2. Build the LLM provider from the global settings.
-    let settings = match state.db.load_settings() {
+    let mut settings = match state.db.load_settings() {
         Ok(s) => s,
         Err(e) => {
             return fail_run(
@@ -257,15 +257,42 @@ pub async fn run_bot_once(
             );
         }
     };
+    // v3.7.3 — LLM key override. The Mac app pushes its
+    // `Settings.minimax_api_key` to the daemon on launch
+    // and on every Settings save (via `POST /settings`).
+    // The daemon stores the pushed key in memory only
+    // (never persisted to disk) and shares it into the
+    // executor's `AppState.llm_key_override`. If the
+    // override is `Some`, it takes precedence over the
+    // DB-loaded `settings.minimax_api_key` so a key
+    // change on the Mac app reaches the daemon-driven
+    // run without a DB copy. The Mac app's own runs
+    // (Tauri process) initialize the lock to `None`, so
+    // this branch is daemon-only.
+    if let Ok(guard) = state.llm_key_override.read() {
+        if let Some(k) = guard.as_ref() {
+            if !k.is_empty() {
+                settings.minimax_api_key = Some(k.clone());
+            }
+        }
+    }
     let api_key = match settings.minimax_api_key.clone() {
         Some(k) if !k.is_empty() => k,
         _ => {
-            return fail_run(
-                app.as_ref(),
-                &state,
-                &mut run,
-                "set your MiniMax API key in Settings first".to_string(),
-            );
+            // v3.7.3 — Distinct error when the daemon
+            // has no key. The Mac app sets this on
+            // launch + on every Settings save; if the
+            // daemon was started before the Mac app
+            // booted, the Mac app's launch-time push
+            // fills it in. If neither side has a key,
+            // the Mac app is the only one that can fix
+            // it — surface that.
+            let msg = if app.is_none() {
+                "maxbotd: no LLM key configured; Mac app must POST /settings".to_string()
+            } else {
+                "set your MiniMax API key in Settings first".to_string()
+            };
+            return fail_run(app.as_ref(), &state, &mut run, msg);
         }
     };
     // Build the provider from the active settings (`provider_kind` +
