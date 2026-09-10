@@ -85,3 +85,29 @@ what you re-run), not buried in /tmp on someone's laptop.
   `/etc/postgresql/16/main/postgresql.conf` `listen_addresses`.
 - The `dev` user has Tyler's SSH key installed; `su - dev` from
   the `bot` shell works without a password.
+
+## v3.7.8: bochs-drm / linux-modules-extra (REQUIRED for graphical boot)
+
+If the VM boots to **tty1** (a text-mode login prompt) instead
+of the LightDM greeter, the most likely cause is a missing
+`bochs-drm` kernel module. The QEMU virtual VGA (PCI `1234:1111`)
+needs the `bochs` driver, which lives in
+`linux-modules-extra-$(uname -r)`. The Ubuntu 24.04 noble cloud
+image only ships `linux-image-virtual`, not the modules-extra;
+the install is required for LightDM + XFCE to come up.
+
+The fix (already in `dev-bootstrap.sh` step 1 + step 6 as of
+v3.7.8):
+
+```bash
+DEBIAN_FRONTEND=noninteractive apt-get install -y linux-modules-extra-$(uname -r)
+echo bochs > /etc/modules-load.d/bochs.conf
+modprobe bochs
+systemctl restart lightdm
+```
+
+`lightdm` shows as `indirect` under `is-enabled` — that's
+correct (it's pulled in by `graphical.target`, which is the
+default). `systemctl enable lightdm` returns a "no
+installation config" warning for the same reason; do not
+chase it.
