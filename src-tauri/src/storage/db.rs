@@ -653,6 +653,24 @@ impl Database {
              INSERT OR IGNORE INTO approval_rules (bot_id, tool_name, rule)
              SELECT id, 'shell_run', 'ask' FROM bots;",
         )?;
+        // v3.1.0 — `triggered_by` on `bot_runs`. New column
+        // for the Phase 2 maxbotd verification flow: tells the
+        // ActivityFeed whether a run came from the in-app
+        // "Run now" button (`"app"`), the always-on scheduler
+        // (`"daemon"`), or a webhook POST (`"webhook"`).
+        // Defaults to `"app"` for both new rows and existing
+        // legacy rows (existing rows get the column's DEFAULT
+        // via SQLite's add-column-with-default behavior). The
+        // executor + daemon read this back as a String and
+        // parse it into `BotRunTriggeredBy`; unknown values
+        // fall back to `App` so a future enum addition can't
+        // crash a row read.
+        add_column_if_missing(
+            &conn,
+            "bot_runs",
+            "triggered_by",
+            "TEXT NOT NULL DEFAULT 'app'",
+        )?;
         Ok(())
     }
 
@@ -1283,12 +1301,13 @@ impl Database {
             crate::bots::BotRunStatus::Cancelled => "cancelled",
         };
         conn.execute(
-            "INSERT INTO bot_runs (id, bot_id, conversation_id, status, started_at, finished_at, result_summary)
-             VALUES (?, ?, ?, ?, ?, ?, ?)
+            "INSERT INTO bot_runs (id, bot_id, conversation_id, status, started_at, finished_at, result_summary, triggered_by)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT(id) DO UPDATE SET
                 status = excluded.status,
                 finished_at = excluded.finished_at,
-                result_summary = excluded.result_summary",
+                result_summary = excluded.result_summary,
+                triggered_by = excluded.triggered_by",
             params![
                 run.id,
                 run.bot_id,
@@ -1297,6 +1316,7 @@ impl Database {
                 run.started_at.to_rfc3339(),
                 finished_at,
                 run.result_summary,
+                run.triggered_by,
             ],
         )?;
         Ok(())
@@ -1313,7 +1333,7 @@ impl Database {
     pub fn get_bot_run(&self, run_id: &str) -> rusqlite::Result<Option<crate::bots::BotRun>> {
         let conn = self.conn.lock().expect("db lock poisoned");
         let mut stmt = conn.prepare(
-            "SELECT id, bot_id, conversation_id, status, started_at, finished_at, result_summary
+            "SELECT id, bot_id, conversation_id, status, started_at, finished_at, result_summary, triggered_by
              FROM bot_runs WHERE id = ?",
         )?;
         let mut rows = stmt.query(params![run_id])?;
@@ -1337,13 +1357,14 @@ impl Database {
             started_at: parse_dt(row.get::<_, String>(4)?),
             finished_at: finished_str.map(parse_dt),
             result_summary: row.get(6)?,
+            triggered_by: row.get(7)?,
         }))
     }
 
     pub fn list_bot_runs(&self, bot_id: &str, limit: u32) -> rusqlite::Result<Vec<crate::bots::BotRun>> {
         let conn = self.conn.lock().expect("db lock poisoned");
         let mut stmt = conn.prepare(
-            "SELECT id, bot_id, conversation_id, status, started_at, finished_at, result_summary
+            "SELECT id, bot_id, conversation_id, status, started_at, finished_at, result_summary, triggered_by
              FROM bot_runs WHERE bot_id = ?
              ORDER BY started_at DESC LIMIT ?",
         )?;
@@ -1364,6 +1385,7 @@ impl Database {
                 started_at: parse_dt(row.get::<_, String>(4)?),
                 finished_at: finished_str.map(parse_dt),
                 result_summary: row.get(6)?,
+                triggered_by: row.get(7)?,
             })
         })?;
         let mut out = Vec::new();
@@ -1382,7 +1404,7 @@ impl Database {
     pub fn list_recent_bot_runs(&self, limit: u32) -> rusqlite::Result<Vec<crate::bots::BotRun>> {
         let conn = self.conn.lock().expect("db lock poisoned");
         let mut stmt = conn.prepare(
-            "SELECT id, bot_id, conversation_id, status, started_at, finished_at, result_summary
+            "SELECT id, bot_id, conversation_id, status, started_at, finished_at, result_summary, triggered_by
              FROM bot_runs
              ORDER BY started_at DESC LIMIT ?",
         )?;
@@ -1403,6 +1425,7 @@ impl Database {
                 started_at: parse_dt(row.get::<_, String>(4)?),
                 finished_at: finished_str.map(parse_dt),
                 result_summary: row.get(6)?,
+                triggered_by: row.get(7)?,
             })
         })?;
         let mut out = Vec::new();
@@ -2920,6 +2943,7 @@ mod tests {
                 started_at: parse_dt(started_at.to_string()),
                 finished_at: None,
                 result_summary: String::new(),
+                triggered_by: "app".to_string(),
             })
             .expect("upsert run");
         }

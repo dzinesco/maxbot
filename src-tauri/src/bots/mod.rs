@@ -150,6 +150,16 @@ pub struct BotRun {
     pub started_at: chrono::DateTime<chrono::Utc>,
     pub finished_at: Option<chrono::DateTime<chrono::Utc>>,
     pub result_summary: String,
+    /// v3.1.0 — which entry point fired this run.
+    /// `"app"` for in-app "Run now" / `send_to_bot`, `"daemon"`
+    /// for the always-on scheduler, `"webhook"` for a webhook
+    /// POST. Defaults to `"app"` for legacy rows.
+    #[serde(default = "default_triggered_by")]
+    pub triggered_by: String,
+}
+
+fn default_triggered_by() -> String {
+    "app".to_string()
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -159,6 +169,39 @@ pub enum BotRunStatus {
     Succeeded,
     Failed,
     Cancelled,
+}
+
+/// v3.1.0 — typed enum for the `bot_runs.triggered_by` column.
+/// The three values cover the only entry points that can fire a
+/// Bot run today. Anything not in this set is treated as `"app"`
+/// by the executor and the renderer.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BotRunTriggeredBy {
+    App,
+    Daemon,
+    Webhook,
+}
+
+impl BotRunTriggeredBy {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            BotRunTriggeredBy::App => "app",
+            BotRunTriggeredBy::Daemon => "daemon",
+            BotRunTriggeredBy::Webhook => "webhook",
+        }
+    }
+
+    /// Parse the stored value, falling back to `App` for any
+    /// unknown / null / empty string. Keeps reads tolerant of
+    /// legacy rows that predate the column.
+    pub fn parse(s: &str) -> Self {
+        match s {
+            "daemon" => BotRunTriggeredBy::Daemon,
+            "webhook" => BotRunTriggeredBy::Webhook,
+            _ => BotRunTriggeredBy::App,
+        }
+    }
 }
 
 /// Inter-agent message queued by a bot via the `message_bot` tool.

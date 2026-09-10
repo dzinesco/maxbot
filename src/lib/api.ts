@@ -368,6 +368,11 @@ export interface BotRun {
   started_at: string;
   finished_at: string | null;
   result_summary: string;
+  /** v3.1.0 — which entry point fired this run. `"app"` for
+   *  in-app "Run now" / `send_to_bot`, `"daemon"` for the
+   *  always-on scheduler, `"webhook"` for a webhook POST.
+   *  Defaults to `"app"` for legacy rows. */
+  triggered_by?: "app" | "daemon" | "webhook";
 }
 
 export interface BotSchedule {

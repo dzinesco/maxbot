@@ -237,6 +237,17 @@ export function BotEditor({
   // unless the user clicks Rotate).
   const [daemonToken, setDaemonToken] = useState<string | null>(null);
   const [daemonServerHost, setDaemonServerHost] = useState<string>("");
+  // v3.1.0 — Test-webhook status. `idle` means the button
+  // is fresh; `running` disables it; `ok` / `error` show a
+  // small inline message next to the button. Kept in
+  // component state (not a toast) so the user can see the
+  // result without dismissing anything.
+  const [testStatus, setTestStatus] = useState<
+    | { kind: "idle" }
+    | { kind: "running" }
+    | { kind: "ok"; message: string }
+    | { kind: "error"; message: string }
+  >({ kind: "idle" });
   useEffect(() => {
     let cancelled = false;
     if (isNew) {
@@ -946,6 +957,85 @@ export function BotEditor({
                 <div className="muted small">
                   Rotate invalidates the old token immediately. Anything
                   still using the old token will start receiving 401s.
+                </div>
+              </div>
+              {/* v3.1.0 — Test webhook. POSTs a tiny synthetic
+                  payload to the configured webhook URL with the
+                  current bearer token. The daemon returns 202
+                  with a `bot_run_id`; the run lands in Activity
+                  within a few seconds. The button is disabled
+                  until both the token and the server host are
+                  configured. CORS is the renderer's problem
+                  (the daemon is plain HTTP, no ACAO header) —
+                  the most common failure is a CORS error from
+                  the webview, which the toast surfaces verbatim. */}
+              <div className="form-row">
+                <label>Test webhook</label>
+                <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                  <button
+                    type="button"
+                    data-testid="daemon-test-webhook"
+                    data-setting-key={`bot.${bot.id || initial.id}.daemon-test-webhook`}
+                    disabled={!daemonToken || !daemonServerHost || testStatus.kind === "running"}
+                    onClick={async () => {
+                      setTestStatus({ kind: "running" });
+                      try {
+                        const tok = await getDaemonToken(bot.id);
+                        if (!tok) {
+                          setTestStatus({ kind: "error", message: "no token — click Generate first" });
+                          return;
+                        }
+                        const url = `https://${daemonServerHost}:8443/hooks/${bot.id}`;
+                        const body = JSON.stringify({
+                          text: `webhook test from MaxBot at ${new Date().toISOString()}`,
+                        });
+                        const resp = await fetch(url, {
+                          method: "POST",
+                          headers: {
+                            "Authorization": `Bearer ${tok}`,
+                            "Content-Type": "application/json",
+                          },
+                          body,
+                        });
+                        const text = await resp.text();
+                        if (resp.status === 202) {
+                          setTestStatus({ kind: "ok", message: `${resp.status} — Bot run started (${text.slice(0, 80)})` });
+                        } else {
+                          setTestStatus({ kind: "error", message: `${resp.status} — ${text.slice(0, 200)}` });
+                        }
+                      } catch (e) {
+                        setTestStatus({ kind: "error", message: `request failed: ${String(e)}` });
+                      }
+                    }}
+                  >
+                    {testStatus.kind === "running" ? "Sending…" : "Test webhook"}
+                  </button>
+                  {testStatus.kind === "ok" && (
+                    <span
+                      className="muted small"
+                      data-testid="daemon-test-webhook-status"
+                      data-status="ok"
+                      style={{ color: "rgb(134, 239, 172)" }}
+                    >
+                      {testStatus.message}
+                    </span>
+                  )}
+                  {testStatus.kind === "error" && (
+                    <span
+                      className="muted small"
+                      data-testid="daemon-test-webhook-status"
+                      data-status="error"
+                      style={{ color: "rgb(252, 165, 165)" }}
+                    >
+                      {testStatus.message}
+                    </span>
+                  )}
+                </div>
+                <div className="muted small">
+                  Sends a synthetic message to{" "}
+                  <code>POST /hooks/{bot.id}</code>. Expect a 202.
+                  The run shows up in Activity within ~5s with a
+                  "via webhook" badge.
                 </div>
               </div>
             </section>

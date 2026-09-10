@@ -4,6 +4,74 @@ All notable changes to MaxBot are documented in this file. The format
 follows [Keep a Changelog](https://keepachangelog.com/) and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## v3.1.0 — 2026-09-09
+
+### Added
+- **`docs/maxbotd-setup.md` — the install + verify runbook for the
+  always-on daemon.** Covers: what `maxbotd` is and the two paths
+  it serves (30 s scheduler poll + `POST /hooks/<bot_id>`
+  webhook), the one-time install on `crispy` (build on the Mac,
+  copy the binary, drop the systemd unit at
+  `/etc/systemd/system/maxbotd.service`, create the unprivileged
+  `maxbot` user, mount the shared SQLite file), a `tmux` /
+  `screen` fallback for ad-hoc poking, the `curl /health`
+  liveness probe, the "Connect a Bot" walkthrough
+  (Generate token → curl the webhook → see the 202), the
+  "Run a test" flow (Test-webhook button in the BotEditor),
+  the headline **"close the Mac app, work continues"** verification
+  flow (set a 1-minute routine, `Cmd+Q`, reopen, see the
+  `via daemon` badge), and a troubleshooting table covering
+  port collision, auth failure, missing `--db`, QGA not ready,
+  and the Tauri-webview CORS error from the Test-webhook button.
+- **`maxbotd` `GET /health` route** (liveness probe, no auth).
+  Returns `{ "ok": true, "version": <CARGO_PKG_VERSION> }` so
+  `curl` (or systemd, or the docs) can confirm the daemon is up
+  and the binary matches expectations.
+- **`maxbotd` `GET /bots/<id>/recent_runs?limit=N` route** (bearer
+  auth). Returns the most-recent `bot_runs` rows for the given
+  Bot, default 20, capped at 200. Used by the Test-webhook
+  verification flow and the `curl` examples in
+  `docs/maxbotd-setup.md`.
+- **`Test webhook` button in the BotEditor Daemon tab.** Sits
+  next to Generate / Rotate / Copy. POSTs a small
+  `{ "text": "webhook test from MaxBot at <iso8601>" }` payload
+  to the configured webhook URL with the current bearer token.
+  Shows the response inline (green for 202, red for anything
+  else, with the response body or the webview CORS error).
+  Disabled until both the token and `computer_server_host` are
+  configured.
+- **`triggered_by` column on `bot_runs`.** New `TEXT NOT NULL
+  DEFAULT 'app'` column with three values: `"app"` (in-app "Run
+  now" / `send_to_bot` / approval auto-resume), `"daemon"`
+  (`maxbotd` scheduler poll), `"webhook"` (`maxbotd` `POST
+  /hooks/<bot_id>`). Added via `add_column_if_missing` in
+  `Database::migrate()` so existing rows backfill to `"app"`
+  with the column's `DEFAULT`. Read everywhere `BotRun` is
+  read (get / list / list_recent).
+- **`BotRunTriggeredBy` enum on the Rust side**, with
+  `as_str()` + `parse()` helpers. `parse()` falls back to
+  `App` for any unknown value so a future enum addition
+  can't crash a row read.
+- **ActivityFeed row badge** — each Bot row in the sidebar's
+  Activity panel now shows a small pill: `via app` (subtle
+  default), `via daemon` (Electric Blue), `via webhook`
+  (cyan-leaning Blue). The two off-app variants are visually
+  distinct from the in-app default so the user can tell
+  "the Mac app fired this" apart from "the daemon fired
+  this while the Mac was closed" at a glance.
+
+### Changed
+- **`run_bot_once(...)` gains a 7th parameter**: `triggered_by:
+  Option<&'static str>`. Defaults to `"app"` for any caller
+  that still passes `None` (preserves pre-v3.1.0 behavior for
+  the 6 existing call sites: `run_with_timeout`, in-app
+  scheduler, `run_bot_now`, `send_to_bot`, `skill_record_start`,
+  `decide_approval` auto-resume). New daemon call sites pass
+  `Some("daemon")` (scheduler tick) or `Some("webhook")` (POST
+  handler). The 6-arg shape was a load-bearing contract for
+  the daemon (which uses `None` for `AppHandle`); the 7th
+  parameter is additive and doesn't break the type guard.
+
 ## v3.0.7 — 2026-09-09
 
 ### Fixed

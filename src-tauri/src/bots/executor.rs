@@ -91,6 +91,13 @@ pub struct BotRunOutput {
 /// v2.6.2 auto-resume path: after the user Approves a tool call,
 /// the Bot picks up where it left off in the same conversation —
 /// no new chat tab, no lost history.
+///
+/// `triggered_by` (v3.1.0) stamps the entry point on the
+/// `bot_runs` row so the ActivityFeed can show "via daemon" /
+/// "via webhook" / "via app" badges. Defaults to `"app"` for any
+/// caller that still passes `None` (preserves pre-v3.1.0
+/// behavior). The daemon path passes `"daemon"` (scheduler) or
+/// `"webhook"` (POST handler).
 pub async fn run_bot_once(
     app: Option<AppHandle>,
     state: Arc<AppState>,
@@ -98,7 +105,9 @@ pub async fn run_bot_once(
     cancel: CancellationToken,
     recording_id: Option<String>,
     existing_conversation_id: Option<String>,
+    triggered_by: Option<&'static str>,
 ) -> BotRunOutput {
+    let triggered_by = triggered_by.unwrap_or("app");
     let run_id = Uuid::new_v4().to_string();
     state.bot_runs.register(run_id.clone(), cancel.clone()).await;
     let started_at = Utc::now();
@@ -214,6 +223,7 @@ pub async fn run_bot_once(
         started_at,
         finished_at: None,
         result_summary: String::new(),
+        triggered_by: triggered_by.to_string(),
     };
     let _ = state.db.upsert_bot_run(&run);
 
@@ -1070,6 +1080,7 @@ pub async fn run_with_timeout(
             state_for_task,
             bot_for_task,
             cancel_for_timeout,
+            None,
             None,
             None,
         )

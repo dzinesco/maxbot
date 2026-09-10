@@ -47,10 +47,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::{
-    extract::{Path, State as AxumState},
+    extract::{Path, Query, State as AxumState},
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
-    routing::post,
+    routing::{get, post},
     Json, Router,
 };
 use chrono::Utc;
@@ -129,7 +129,7 @@ fn parse_args() -> Result<Args, String> {
 
 fn print_help() {
     eprintln!(
-        "maxbotd — MaxBot always-on daemon (v2.8.0)\n\
+        "maxbotd — MaxBot always-on daemon\n\
          \n\
          USAGE:\n  \
              maxbotd [--db <path>] [--bind <addr>]\n\
@@ -140,7 +140,9 @@ fn print_help() {
              -h, --help       Show this help\n\
          \n\
          ROUTES:\n  \
-             POST /hooks/<bot_id>   Auth: Authorization: Bearer <token>"
+             GET  /health                              Liveness probe (no auth)\n  \
+             POST /hooks/<bot_id>                      Auth: Authorization: Bearer <token>\n  \
+             GET  /bots/<bot_id>/recent_runs?limit=N   Auth: Authorization: Bearer <token>"
     );
 }
 
@@ -190,9 +192,12 @@ async fn main() {
     // `run_bot_once` (Option<AppHandle>::None variant).
     spawn_scheduler(db.clone());
 
-    // HTTP server: a single route, bearer-token auth.
+    // HTTP server: webhook (POST) + liveness (GET /health,
+    // no auth) + per-Bot recent-runs (GET, bearer auth).
     let app = Router::new()
+        .route("/health", get(handle_health))
         .route("/hooks/:bot_id", post(handle_webhook))
+        .route("/bots/:bot_id/recent_runs", get(handle_recent_runs))
         .with_state(state);
 
     let listener = match tokio::net::TcpListener::bind(args.bind).await {
@@ -208,6 +213,120 @@ async fn main() {
         log::error!("maxbotd: server crashed: {e}");
         std::process::exit(1);
     }
+}
+
+/// v3.1.0 — Liveness probe. No auth, no DB hit.
+/// Returns `{ ok: true, version: <CARGO_PKG_VERSION> }` so
+/// a quick `curl` (or a systemd `Type=notify` watcher, or
+/// the Mac app's setup doc) can confirm the daemon is up
+/// and the build matches expectations. Mirrors the shape
+/// the docs use in `docs/maxbotd-setup.md`.
+async fn handle_health() -> impl IntoResponse {
+    (
+        StatusCode::OK,
+        Json(json!({
+            "ok": true,
+            "version": env!("CARGO_PKG_VERSION"),
+        })),
+    )
+}
+
+/// v3.1.0 — Per-Bot recent-runs. Bearer-authenticated like
+/// `/hooks/<bot_id>`. Returns the most-recent `limit` rows
+/// for the given Bot (default 20, capped at 200 by
+/// `Database::list_bot_runs`). Used by the Mac app's
+/// BotEditor "Test webhook" verification flow and the
+/// external `curl` examples in `docs/maxbotd-setup.md`.
+async fn handle_recent_runs(
+    Path(bot_id): Path<String>,
+    AxumState(state): AxumState<Arc<DaemonState>>,
+    headers: HeaderMap,
+    Query(params): Query<RecentRunsParams>,
+) -> impl IntoResponse {
+    let token = match extract_bearer(&headers) {
+        Some(t) => t,
+        None => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({ "error": "missing or malformed Authorization header" })),
+            )
+                .into_response();
+        }
+    };
+    let db = state.db.clone();
+    let bot_id_for_auth = bot_id.clone();
+    let stored = match tokio::task::spawn_blocking(move || {
+        db.get_daemon_token(&bot_id_for_auth)
+    })
+    .await
+    {
+        Ok(Ok(Some(t))) if t == token => t,
+        Ok(Ok(Some(_))) => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({ "error": "invalid token" })),
+            )
+                .into_response();
+        }
+        Ok(Ok(None)) => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({ "error": "no daemon token configured for this bot" })),
+            )
+                .into_response();
+        }
+        Ok(Err(e)) => {
+            log::error!("maxbotd: db error during token lookup: {e}");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": "db error" })),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            log::error!("maxbotd: token lookup task panicked: {e}");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": "internal error" })),
+            )
+                .into_response();
+        }
+    };
+    drop(stored);
+    let limit = params.limit.unwrap_or(20).clamp(1, 200);
+    let db = state.db.clone();
+    let bot_id_for_list = bot_id.clone();
+    let runs = match tokio::task::spawn_blocking(move || {
+        db.list_bot_runs(&bot_id_for_list, limit)
+    })
+    .await
+    {
+        Ok(Ok(r)) => r,
+        Ok(Err(e)) => {
+            log::error!("maxbotd: list_bot_runs failed: {e}");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": "db error" })),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            log::error!("maxbotd: list_bot_runs task panicked: {e}");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": "internal error" })),
+            )
+                .into_response();
+        }
+    };
+    (StatusCode::OK, Json(runs)).into_response()
+}
+
+/// v3.1.0 — Query string for `handle_recent_runs`. `limit`
+/// is optional; default 20. Clamped server-side.
+#[derive(serde::Deserialize)]
+struct RecentRunsParams {
+    limit: Option<u32>,
 }
 
 /// Webhook handler. Returns 202 Accepted with
@@ -361,6 +480,7 @@ async fn handle_webhook(
             started_at: Utc::now(),
             finished_at: None,
             result_summary: String::new(),
+            triggered_by: "webhook".to_string(),
         };
         if let Err(e) = db.upsert_bot_run(&run) {
             log::warn!("maxbotd: upsert_bot_run failed: {e}");
@@ -394,6 +514,7 @@ async fn handle_webhook(
             cancel,
             None,
             Some(conversation_id),
+            Some("webhook"),
         )
         .await;
     });
@@ -561,6 +682,7 @@ async fn scheduler_tick(db: &Arc<Database>) -> Result<(), String> {
                 cancel,
                 None,
                 None,
+                Some("daemon"),
             )
             .await;
         });

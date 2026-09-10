@@ -454,6 +454,7 @@ async fn resume_bot_after_decide(
             CancellationToken::new(),
             None,
             Some(conversation_id_for_task),
+            Some("app"),
         )
         .await;
     });
@@ -552,6 +553,7 @@ mod tests {
             started_at: now,
             finished_at: None,
             result_summary: String::new(),
+            triggered_by: "app".to_string(),
         };
         db.upsert_bot_run(&run).expect("upsert bot_run");
         (db, dir)

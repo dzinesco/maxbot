@@ -313,6 +313,7 @@ pub async fn skill_record_start(
             CancellationToken::new(),
             Some(recording_id_for_task),
             None,
+            Some("app"),
         )
         .await;
     });

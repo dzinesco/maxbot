@@ -67,9 +67,27 @@ interface RowProps {
   secondary: string;
   status: string;
   when: string;
+  /** v3.1.0 — entry point that fired the run. Renders a small
+   *  pill so the user can tell "I closed the app and the
+   *  daemon still ran this" apart from "I clicked Run now
+   *  in the app." `undefined` (legacy row) → "via app" — the
+   *  default per the v3.1.0 column migration. */
+  triggeredBy?: "app" | "daemon" | "webhook";
 }
 
-function Row({ id, primary, secondary, status, when }: RowProps) {
+function triggeredByLabel(value: "app" | "daemon" | "webhook" | undefined): string {
+  switch (value) {
+    case "daemon":
+      return "via daemon";
+    case "webhook":
+      return "via webhook";
+    case "app":
+    default:
+      return "via app";
+  }
+}
+
+function Row({ id, primary, secondary, status, when, triggeredBy }: RowProps) {
   return (
     <li className="activity-row" data-testid="activity-row" data-row-id={id}>
       <span className={`activity-row-status status-${status}`}>
@@ -77,6 +95,13 @@ function Row({ id, primary, secondary, status, when }: RowProps) {
       </span>
       <span className="activity-row-primary">{primary}</span>
       <span className="activity-row-secondary">{secondary}</span>
+      <span
+        className={`activity-row-triggered-by triggered-by-${triggeredBy ?? "app"}`}
+        data-testid="activity-row-triggered-by"
+        data-triggered-by={triggeredBy ?? "app"}
+      >
+        {triggeredByLabel(triggeredBy)}
+      </span>
       <span className="activity-row-when">{when}</span>
     </li>
   );
@@ -174,6 +199,7 @@ export function ActivityFeed() {
                       secondary={r.bot_id}
                       status={r.status}
                       when={relativeTime(r.started_at)}
+                      triggeredBy={r.triggered_by}
                     />
                   ))}
                 </ul>
