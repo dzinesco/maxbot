@@ -1,6 +1,6 @@
 {
   "name": "maxbot",
-  "version": "3.7.11",
+  "version": "3.7.12",
   "private": true,
   "type": "module",
   "description": "MaxBot — a MiniMax-powered desktop chat, tool, and Computer Use client.",

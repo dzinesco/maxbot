@@ -173,6 +173,15 @@ const defaultSettings: Settings = {
   // exercise shared_* routing don't care; default
   // to the local-only URL.
   maxbotd_url: "http://127.0.0.1:8443",
+  // v3.7.12 — Google OAuth. Tests that don't
+  // exercise the Gmail / Calendar connector don't
+  // care; default to "not connected" (no refresh
+  // token, no client_id / client_secret).
+  google_oauth_client_id: null,
+  google_oauth_client_secret: null,
+  google_refresh_token: null,
+  google_access_token: null,
+  google_access_token_expiry: null,
 };
 
 // v3.7.2: a tiny in-memory JPEG. The panel wraps it in
