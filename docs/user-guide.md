@@ -140,6 +140,9 @@ responding) long before the desktop is fully ready.
 
 #### Three access levels (Status / Preview / Takeover)
 
+> See [`docs/first-bot-20-minutes.md`](first-bot-20-minutes.md) for
+> the canonical end-to-end "show me the new flow" walk-through.
+
 Once a Bot has a running computer, three ways to see what it's doing:
 
 - **Status** — a small chip in the title bar that turns purple
@@ -227,7 +230,12 @@ in the toast is the absolute (resolved) path, not
 The button is enabled for any selected Bot, even one
 with no memory yet — empty memory writes an empty
 file with the timestamp marker so you get a clear
-"0 entries" toast instead of an error.
+"0 entries" toast instead of an error. The backup
+file lands in the same `~/bots/_shared/` host path that
+the [Shared folder](#shared-folder-v350) section below
+describes — see that section for the underlying
+`shared_read` / `shared_write` / `shared_list` Bot
+tools and the path-safety guard.
 
 ### Schedule a bot
 

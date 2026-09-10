@@ -1,5 +1,7 @@
 # MaxBot
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
+
 MaxBot is a personal multi-provider AI desktop client with **per-Bot Linux computers**, browser automation, and the Grok Build CLI wired into the same chat surface. It's a Tauri 2 app (Rust core, React 19 / Vite 6 / TypeScript-strict renderer) that keeps conversations, bots, and their VMs on disk so a model can keep working across launches without leaning on a server.
 
 ## Features
@@ -73,7 +75,7 @@ Settings tabs (when the Settings modal is open):
 
 ## License
 
-<!-- Tyler: pick a license -->
+MIT — see [`LICENSE`](./LICENSE).
 
 ## Contributing
 
