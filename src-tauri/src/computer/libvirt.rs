@@ -215,6 +215,21 @@ impl LibvirtClient {
     /// is the QGA response (typically JSON). Errors come
     /// from libvirt: if the QGA channel isn't open, virsh
     /// returns `qemu-agent-command: Agent not available`.
+    ///
+    /// v3.0.5: after `provision_vm` returns, the VM is
+    /// `running` with a DHCP lease, but the QEMU guest
+    /// agent socket can take a fraction of a second to a
+    /// few seconds to fully connect. v3.0.4's e2e test
+    /// `console_e2e_against_crispy` hit this race — the
+    /// very first `qemu-agent-command` failed with
+    /// `Guest agent is not responding`. We retry on that
+    /// specific stderr pattern (only) with a small
+    /// backoff, so all QGA callers — provision, console
+    /// auto-recover, and any future ones — gracefully
+    /// wait for QGA readiness. Other QGA errors (command
+    /// not found, permission denied, parse failures)
+    /// are surfaced immediately; we don't paper over
+    /// real failures.
     pub async fn qemu_agent_command(
         &self,
         pool: &SshPool,
@@ -223,7 +238,62 @@ impl LibvirtClient {
     ) -> Result<String, LibvirtError> {
         // The QGA command body is a single arg; we pass it
         // quoted so the shell doesn't try to parse the JSON.
-        run_virsh(pool, &["qemu-agent-command", name, cmd_json]).await
+        let mut last_err: Option<LibvirtError> = None;
+        for attempt in 1..=QGA_RETRY_ATTEMPTS {
+            match run_virsh(pool, &["qemu-agent-command", name, cmd_json]).await {
+                Ok(stdout) => return Ok(stdout),
+                Err(e) if is_qga_not_ready(&e) && attempt < QGA_RETRY_ATTEMPTS => {
+                    eprintln!(
+                        "[maxbot] qemu_agent_command: QGA not ready (attempt {attempt}/{}): {e}; retrying in {:?}",
+                        QGA_RETRY_ATTEMPTS, QGA_RETRY_BACKOFF
+                    );
+                    last_err = Some(e);
+                    tokio::time::sleep(QGA_RETRY_BACKOFF).await;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        // Loop always runs at least once (QGA_RETRY_ATTEMPTS >= 1).
+        Err(last_err.expect("retry loop ran at least once"))
+    }
+}
+
+/// Tunable retry parameters for the QGA "not ready" race
+/// during VM boot. The brief's stated bounds are 3-5
+/// attempts at 200-500ms backoff (~2s total). Five
+/// attempts with 500ms backoff caps total wait at ~2s,
+/// the brief's stated budget. The brief expects this
+/// to be enough to span the QGA-connect window on
+/// crispy. **NOTE:** in practice the actual race on
+/// this VM is much larger — `provision_vm` only waits
+/// for `running` + DHCP lease, while cloud-init's
+/// `packages:` block (xfce4, x11vnc, qemu-guest-agent,
+/// openssh-server) + `runcmd:` `systemctl enable --now
+/// qemu-guest-agent` take 10s to several minutes to
+/// finish. The retry is still bounded — not a permanent
+/// loop — and only matches the specific "Guest agent is
+/// not responding" / "QEMU guest agent is not
+/// connected" stderr from virsh. Other QGA errors are
+/// surfaced immediately. v3.0.5.
+const QGA_RETRY_ATTEMPTS: usize = 5;
+const QGA_RETRY_BACKOFF: Duration = Duration::from_millis(500);
+
+/// `true` when a `LibvirtError` looks like the QGA socket
+/// isn't connected yet (rather than a real QGA failure
+/// like a bad command, permission denied, etc.). Matched
+/// on stderr text — `virsh` exits with code 1 either way
+/// and doesn't surface the structured libvirt error code
+/// in this path.
+fn is_qga_not_ready(err: &LibvirtError) -> bool {
+    match err {
+        LibvirtError::Command { stderr, .. } => {
+            stderr.contains("Guest agent is not responding")
+                || stderr.contains("QEMU guest agent is not connected")
+        }
+        // Ssh / Parse / Timeout / NotConfigured are
+        // caller-side problems, not QGA readiness — don't
+        // retry those.
+        _ => false,
     }
 }
 
@@ -414,6 +484,81 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&DomainState::Other).unwrap(),
             "\"other\""
+        );
+    }
+
+    // v3.0.5: pin the QGA "not ready" classifier so a
+    // future libvirt version changing the stderr wording
+    // is caught by the test suite, not by a flaky e2e
+    // run. The two patterns are the exact strings virsh
+    // emits on Ubuntu 24.10 / libvirt 9.x when the QEMU
+    // guest agent channel isn't connected yet. Anything
+    // else (command not found, permission denied, parse
+    // errors, ssh failures) must NOT classify as
+    // retryable — we don't want to paper over real
+    // QGA errors with a retry loop.
+    #[test]
+    fn is_qga_not_ready_matches_libvirt_stderr_patterns() {
+        // The exact stderr the v3.0.4 e2e hit.
+        let ready_err = LibvirtError::Command {
+            exit_code: Some(1),
+            stderr: "error: Guest agent is not responding: QEMU guest agent is not connected".to_string(),
+        };
+        assert!(is_qga_not_ready(&ready_err));
+
+        // The two halves separately (defensive — either
+        // wording could change in a future virsh).
+        let only_responding = LibvirtError::Command {
+            exit_code: Some(1),
+            stderr: "error: Guest agent is not responding".to_string(),
+        };
+        assert!(is_qga_not_ready(&only_responding));
+        let only_not_connected = LibvirtError::Command {
+            exit_code: Some(1),
+            stderr: "error: QEMU guest agent is not connected".to_string(),
+        };
+        assert!(is_qga_not_ready(&only_not_connected));
+
+        // Real QGA errors: command not found, permission
+        // denied, parse failure, etc. — must NOT retry.
+        let cmd_not_found = LibvirtError::Command {
+            exit_code: Some(1),
+            stderr: "error: Guest exec command not found: /no/such/binary".to_string(),
+        };
+        assert!(!is_qga_not_ready(&cmd_not_found));
+        let permission = LibvirtError::Command {
+            exit_code: Some(1),
+            stderr: "error: operation forbidden: read-only filesystem".to_string(),
+        };
+        assert!(!is_qga_not_ready(&permission));
+        let random = LibvirtError::Command {
+            exit_code: Some(1),
+            stderr: "error: domain not found: no domain with matching name".to_string(),
+        };
+        assert!(!is_qga_not_ready(&random));
+
+        // Other LibvirtError variants: never retry.
+        assert!(!is_qga_not_ready(&LibvirtError::Ssh("conn refused".into())));
+        assert!(!is_qga_not_ready(&LibvirtError::Parse("bad".into())));
+        assert!(!is_qga_not_ready(&LibvirtError::Timeout(Duration::from_secs(1))));
+        assert!(!is_qga_not_ready(&LibvirtError::NotConfigured));
+    }
+
+    // v3.0.5: the retry parameters must stay inside the
+    // brief's bounds (3-5 attempts, 200-500ms backoff).
+    // Catches accidental changes that would either slow
+    // down the e2e test (>30s budget) or weaken the fix
+    // (too few attempts).
+    #[test]
+    fn qga_retry_parameters_are_within_brief_bounds() {
+        assert!(
+            (3..=5).contains(&QGA_RETRY_ATTEMPTS),
+            "QGA_RETRY_ATTEMPTS={QGA_RETRY_ATTEMPTS} outside 3-5"
+        );
+        let backoff_ms = QGA_RETRY_BACKOFF.as_millis();
+        assert!(
+            (200..=500).contains(&backoff_ms),
+            "QGA_RETRY_BACKOFF={backoff_ms}ms outside 200-500ms"
         );
     }
 }

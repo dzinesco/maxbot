@@ -77,6 +77,12 @@ pub enum ComputerError {
     NoPort(u16, u16),
     #[error("invalid state transition: {from} -> {to}")]
     InvalidTransition { from: String, to: String },
+    #[error("qemu guest agent on {vm_name} did not respond within {waited:?} (last stderr: {last_stderr})")]
+    QgaTimeout {
+        vm_name: String,
+        waited: std::time::Duration,
+        last_stderr: String,
+    },
 }
 
 impl From<SshError> for ComputerError {
@@ -739,6 +745,90 @@ impl ComputerManager {
         }
         Ok(())
     }
+}
+
+/// v3.0.5: wait for the QEMU guest agent (QGA) on a
+/// freshly-provisioned VM to become responsive. The
+/// `provision_vm` orchestrator returns once the VM is
+/// `running` + has a DHCP lease, but cloud-init's
+/// `packages:` block (xfce4, x11vnc, qemu-guest-agent,
+/// openssh-server) and `runcmd:` `systemctl enable --now
+/// qemu-guest-agent` finish well after that. Without this
+/// wait, any QGA call made immediately after provision
+/// (e.g. the v3.0.3 console auto-recover's
+/// `install_default_key_via_qga`) hits a `Guest agent is
+/// not responding` stderr from virsh. The 5-attempt retry
+/// at the `qemu_agent_command` layer covers the brief
+/// socket-not-ready window after QGA is "ready"; this
+/// helper covers the much longer QGA-install window.
+///
+/// We poll with `virsh qemu-agent-command <name>
+/// '{"execute":"guest-ping"}'` every 3 seconds up to 5
+/// minutes. `guest-ping` is the cheapest QGA call (no
+/// side effects, just a round-trip). The 5-minute ceiling
+/// matches the typical worst-case cloud-init
+/// packages+runcmd time on the Ubuntu 24.04 noble cloud
+/// image used by `provision-vm.sh`; if it ever trips, the
+/// VM's cloud-init is genuinely broken, and the
+/// `ComputerError::QgaTimeout` surfaces that to the UI.
+///
+/// Reusable: the future console-recover path can call this
+/// before its first QGA call to avoid the retry loop
+/// entirely on warm-cache provisions.
+pub(crate) async fn wait_for_qga_ready(
+    pool: &SshPool,
+    vm_name: &str,
+) -> Result<(), ComputerError> {
+    use std::time::{Duration, Instant};
+
+    const POLL_INTERVAL: Duration = Duration::from_secs(3);
+    const TIMEOUT: Duration = Duration::from_secs(300); // 5 minutes
+
+    // `guest-ping` is the standard QGA liveness check.
+    // It returns `{"return":{}}` on success. The shell
+    // quoting is identical to `LibvirtClient::qemu_agent_command`:
+    // pass the JSON body as a single quoted arg so the
+    // server-side shell doesn't try to parse it.
+    let cmd = format!(
+        "sudo -n virsh qemu-agent-command {} '{{\"execute\":\"guest-ping\"}}'",
+        shell_quote(vm_name)
+    );
+
+    let start = Instant::now();
+    // Tracked across loop iterations so the QgaTimeout
+    // error carries the most recent stderr from virsh
+    // when we give up.
+    #[allow(unused_assignments)]
+    let mut last_err = String::new();
+    loop {
+        match SshExecutor::server_exec(pool, &cmd).await {
+            Ok(out) if out.success => return Ok(()),
+            Ok(out) => {
+                last_err = out.stderr.trim().to_string();
+            }
+            Err(e) => {
+                last_err = format!("ssh: {e}");
+            }
+        }
+        if start.elapsed() >= TIMEOUT {
+            return Err(ComputerError::QgaTimeout {
+                vm_name: vm_name.into(),
+                waited: start.elapsed(),
+                last_stderr: last_err,
+            });
+        }
+        tokio::time::sleep(POLL_INTERVAL).await;
+    }
+}
+
+/// Single-quote `s` for safe interpolation into a shell
+/// command. Used by `wait_for_qga_ready` (and the future
+/// console-recover path) to build the `virsh
+/// qemu-agent-command` invocation. Matches the
+/// `shell_quote` style used in `provision.rs`.
+fn shell_quote(s: &str) -> String {
+    let escaped = s.replace('\'', "'\\''");
+    format!("'{escaped}'")
 }
 
 // Helper: turn "5900-5999" into (5900, 5999). Bad

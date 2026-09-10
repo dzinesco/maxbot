@@ -4,6 +4,68 @@ All notable changes to MaxBot are documented in this file. The format
 follows [Keep a Changelog](https://keepachangelog.com/) and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## v3.0.5 — 2026-09-09
+
+### Fixed
+- **Console auto-recover waits for QEMU guest agent
+  readiness.** The v3.0.4 e2e test
+  `console_e2e_against_crispy` failed against a freshly
+  provisioned VM with
+  `Guest agent is not responding: QEMU guest agent is not connected`:
+  when `console_url` is called immediately after
+  `provision_vm` returns, the VM is `running` with a
+  DHCP lease, but the QGA socket hasn't fully connected
+  yet. v3.0.5 adds the fix in two parts:
+
+  1. **Provision waits for QGA** —
+     `src-tauri/src/computer/provision.rs` now calls a
+     new `wait_for_qga_ready` helper in
+     `src-tauri/src/computer/mod.rs` at the end of
+     `provision_vm`, right after the VNC-port poll. The
+     helper polls `virsh qemu-agent-command <name>
+     '{"execute":"guest-ping"}'` every 3 seconds up to
+     5 minutes. This is the actual fix for the race
+     the v3.0.4 e2e caught: `provision_vm` only waited
+     for `running` + DHCP, while cloud-init's
+     `packages:` block (xfce4, x11vnc,
+     qemu-guest-agent, openssh-server) + `runcmd:`
+     `systemctl enable --now qemu-guest-agent` finish
+     well after that. On a warm cloud-image cache the
+     wait is typically 30-90s; on a cold cache
+     (first provision) it can be several minutes.
+     The 5-minute timeout matches the typical
+     worst-case cloud-init packages+runcmd time on
+     the Ubuntu 24.04 noble cloud image used by
+     `provision-vm.sh`; if it ever trips, the VM's
+     cloud-init is genuinely broken, and the new
+     `ComputerError::QgaTimeout` surfaces that to the
+     UI with the last stderr from virsh.
+
+  2. **`qemu_agent_command` retries the brief
+     socket-not-ready window** —
+     `src-tauri/src/computer/libvirt.rs` adds a small
+     retry loop (5 attempts, 500ms backoff, ~2s worst
+     case) inside `qemu_agent_command` that retries
+     only on the specific `Guest agent is not
+     responding` / `QEMU guest agent is not connected`
+     stderr pattern from virsh. All other QGA errors
+     — command not found, permission denied, parse
+     failures, ssh errors — are surfaced immediately;
+     the retry does not paper over real failures.
+     Because the retry lives at the
+     `qemu_agent_command` layer, every QGA caller
+     benefits (provision, console auto-recover, and
+     any future ones), not just
+     `install_default_key_via_qga`. New unit tests
+     pin the classifier and the retry bounds (3-5
+     attempts, 200-500ms backoff) so a future libvirt
+     version changing the stderr wording is caught by
+     the test suite rather than a flaky e2e run.
+
+### Changed
+- **Bumped to 3.0.5** in `package.json`,
+  `src-tauri/Cargo.toml`, and `src-tauri/tauri.conf.json`.
+
 ## v3.0.4 — 2026-09-09
 
 ### Added

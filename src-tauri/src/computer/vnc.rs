@@ -81,6 +81,15 @@ pub struct VncProxy {
     /// `127.0.0.1:<port>` and is what we return to the
     /// renderer.
     pub local_addr: SocketAddr,
+    /// v3.0.5: port the SSH tunnel is listening on. This
+    /// is a DIFFERENT port from `local_addr.port()` —
+    /// the listener and the SSH tunnel can no longer
+    /// share a port because macOS won't let two
+    /// processes bind to the same port without
+    /// `SO_REUSEPORT` (which `ssh` doesn't set on
+    /// local-forward sockets). The bridge connects to
+    /// this port for the VNC side.
+    tunnel_port: u16,
 }
 
 impl VncProxy {
@@ -112,6 +121,7 @@ impl VncProxy {
             .as_ref()
             .ok_or_else(|| VncError::Bind("listener already consumed".into()))?;
         let local_port = self.local_addr.port();
+        let tunnel_port = self.tunnel_port;
         loop {
             let (tcp, peer) = listener.accept().await.map_err(|e| VncError::Io(e.to_string()))?;
             // The WebSocket must be from 127.0.0.1 — the
@@ -127,9 +137,8 @@ impl VncProxy {
                 drop(tcp);
                 continue;
             }
-            let port = local_port;
             tokio::spawn(async move {
-                if let Err(e) = bridge_one(tcp, port).await {
+                if let Err(e) = bridge_one(tcp, tunnel_port).await {
                     log::debug!("vnc proxy: connection ended: {e}");
                 }
             });
@@ -202,6 +211,16 @@ pub async fn start(
     remote_vnc_port: u16,
     port_range: (u16, u16),
 ) -> Result<VncProxy, VncError> {
+    // v3.0.5: pick TWO free ports — one for the WS
+    // listener (what the renderer connects to) and one
+    // for the SSH tunnel (what the bridge connects to
+    // for the VNC side). Earlier versions used the
+    // same port for both, which worked on Linux with
+    // `SO_REUSEPORT` but fails on macOS where `ssh`
+    // doesn't set that flag on local-forward sockets —
+    // the second bind hits "Address already in use"
+    // and the tunnel exits before `wait_for_tunnel_ready`
+    // can confirm it's up.
     let port = pick_free_port(port_range).await.ok_or_else(|| {
         VncError::NoFreePort(format!("{}..={}", port_range.0, port_range.1))
     })?;
@@ -216,7 +235,20 @@ pub async fn start(
     let actual = listener
         .local_addr()
         .map_err(|e| VncError::Bind(e.to_string()))?;
-    let mut tunnel = spawn_tunnel(pool, actual.port(), remote_vnc_port).await?;
+    // Pick a second port for the SSH tunnel, excluding
+    // the one the listener just took. Reuse the same
+    // range; if the range is exhausted (very rare —
+    // 100 ports for 2 picks), fall back to the next
+    // port above the range.
+    let tunnel_port = pick_free_port_excluding(port_range, actual.port())
+        .await
+        .ok_or_else(|| {
+            VncError::NoFreePort(format!(
+                "{}..={} (excluding {})",
+                port_range.0, port_range.1, actual.port()
+            ))
+        })?;
+    let mut tunnel = spawn_tunnel(pool, tunnel_port, remote_vnc_port).await?;
     // Wait for the SSH tunnel to be ready. The previous
     // design returned the proxy immediately and let the
     // bridge discover a dead VNC side on first WS — which
@@ -238,6 +270,7 @@ pub async fn start(
         tunnel: Arc::new(Mutex::new(Some(tunnel))),
         listener: Some(listener),
         local_addr: actual,
+        tunnel_port,
     })
 }
 
@@ -271,19 +304,35 @@ async fn wait_for_tunnel_ready(child: &mut Child) -> Result<bool, VncError> {
 /// pipe was already drained or empty. The caller is
 /// expected to have just observed the child exit.
 async fn read_child_stderr(child: &mut Child) -> String {
-    use std::io::Read;
+    use tokio::io::AsyncReadExt;
     let mut buf = String::new();
     if let Some(mut stderr) = child.stderr.take() {
-        // Use a short blocking read with a timeout via
-        // tokio's spawn_blocking. The child has already
-        // exited, so the pipe will close after we drain.
-        let _ = tokio::task::spawn_blocking(move || {
-            let mut s = String::new();
-            let _ = stderr.read_to_string(&mut s);
-            s
-        })
-        .await
-        .map(|s| buf = s);
+        // v3.0.5: read in a tight loop with a wall-clock
+        // timeout using the async API. The previous
+        // `read_to_string` could hang if the OS hadn't
+        // fully drained the pipe even after `try_wait()`
+        // reported exit.
+        let read_result = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            async {
+                let mut s = String::new();
+                let mut chunk = [0u8; 4096];
+                loop {
+                    match stderr.read(&mut chunk).await {
+                        Ok(0) => break, // EOF
+                        Ok(n) => {
+                            s.push_str(&String::from_utf8_lossy(&chunk[..n]));
+                        }
+                        Err(_) => break,
+                    }
+                }
+                s
+            },
+        )
+        .await;
+        if let Ok(s) = read_result {
+            buf = s;
+        }
     }
     let trimmed = buf.trim();
     if trimmed.is_empty() {
@@ -324,19 +373,46 @@ pub async fn pick_free_port(range: (u16, u16)) -> Option<u16> {
     None
 }
 
+/// v3.0.5: same as `pick_free_port` but skips one port
+/// (the listener's port) so the SSH tunnel gets a
+/// distinct loopback port. See `vnc::start` for the
+/// full rationale.
+pub async fn pick_free_port_excluding(range: (u16, u16), exclude: u16) -> Option<u16> {
+    for port in range.0..=range.1 {
+        if port == exclude {
+            continue;
+        }
+        let addr: SocketAddr = match format!("127.0.0.1:{port}").parse() {
+            Ok(a) => a,
+            Err(_) => continue,
+        };
+        match TcpListener::bind(addr).await {
+            Ok(l) => {
+                drop(l);
+                return Some(port);
+            }
+            Err(_) => continue,
+        }
+    }
+    None
+}
+
 /// Bridge one WebSocket connection to the VNC TCP stream
 /// on the loopback (the SSH tunnel listens on
-/// `127.0.0.1:<local_port>` and forwards to the server's
+/// `127.0.0.1:<tunnel_port>` and forwards to the server's
 /// `127.0.0.1:<vnc_port>`). When either side closes, the
 /// other side is shut down. Standard `select!`-based
 /// pump.
-async fn bridge_one(ws_tcp: TcpStream, local_port: u16) -> Result<(), VncError> {
-    // The WebSocket is over the listener's port; the
-    // VNC stream is on the same loopback port (the
-    // tunnel). Same port, two streams — we use the
-    // TcpStream from the listener for the WS side and
-    // open a fresh TcpStream for the VNC side.
-    let vnc = TcpStream::connect(("127.0.0.1", local_port))
+async fn bridge_one(ws_tcp: TcpStream, tunnel_port: u16) -> Result<(), VncError> {
+    // v3.0.5: connect to the SSH tunnel's port (NOT
+    // the listener's port). Earlier versions connected
+    // to the same port as the listener, which only
+    // worked when both processes could share the port
+    // (Linux with SO_REUSEPORT). On macOS, `ssh`
+    // doesn't set SO_REUSEPORT on local-forward
+    // sockets, so the tunnel and the listener must
+    // use distinct ports.
+    let vnc = TcpStream::connect(("127.0.0.1", tunnel_port))
         .await
         .map_err(|e| VncError::Io(format!("vnc connect: {e}")))?;
     let ws = tokio_tungstenite::accept_async(ws_tcp)
@@ -424,6 +500,7 @@ mod tests {
             tunnel: Arc::new(Mutex::new(None)),
             listener: None,
             local_addr: "127.0.0.1:5942".parse().unwrap(),
+            tunnel_port: 5943,
         };
         let url = proxy.console_url();
         assert!(url.starts_with("ws://localhost:"), "got {url}");

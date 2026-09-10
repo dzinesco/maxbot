@@ -41,6 +41,7 @@ use thiserror::Error;
 use super::keys;
 use super::libvirt::LibvirtClient;
 use super::ssh::{SshExecutor, SshPool};
+use super::wait_for_qga_ready;
 
 #[derive(Debug, Error)]
 pub enum ProvisionError {
@@ -216,6 +217,31 @@ pub async fn provision_vm(
     //    the domain is still being defined), retry a
     //    couple of times.
     let vnc_port = poll_for_vnc_port(libvirt, pool, &domain_name)
+        .await
+        .map_err(|e| ProvisionError::Libvirt(e.to_string()))?;
+
+    // 9. v3.0.5: wait for the QEMU guest agent to
+    //    become responsive. `provision-vm.sh` only
+    //    waits for the VM to be defined; cloud-init's
+    //    `packages:` block (xfce4, x11vnc,
+    //    qemu-guest-agent, openssh-server) + `runcmd:`
+    //    `systemctl enable --now qemu-guest-agent`
+    //    finish well after the DHCP lease poll above.
+    //    Without this wait, any QGA call made
+    //    immediately after provision (e.g. the v3.0.3
+    //    console auto-recover's
+    //    `install_default_key_via_qga`) hits
+    //    `Guest agent is not responding` from virsh.
+    //    The 5-attempt retry at the
+    //    `qemu_agent_command` layer covers the brief
+    //    socket-not-ready window after QGA is
+    //    "ready"; this covers the much longer
+    //    QGA-install window. On a warm cloud-image
+    //    cache the wait is typically 30-90s; on a
+    //    cold cache (first provision) it can be
+    //    several minutes. The helper times out at
+    //    5 minutes.
+    wait_for_qga_ready(pool, &domain_name)
         .await
         .map_err(|e| ProvisionError::Libvirt(e.to_string()))?;
 
