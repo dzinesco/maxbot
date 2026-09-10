@@ -270,73 +270,16 @@ pub async fn computer_input_close(
         .map_err(|e| e.to_string())
 }
 
-/// v3.7.2: open an `ssh -L` tunnel from a free local
-/// port in the configured VNC range to the VM's VNC
-/// port on the server, then open a VNC viewer against
-/// it. Returns the local port so the renderer's
-/// "Stop takeover" button can call `takeover_close`
-/// with it.
-///
-/// v3.7.5: launches TigerVNC Viewer instead of macOS
-/// Screen Sharing. macOS Screen Sharing prompts for a
-/// password even when the server offers VNC_AUTH_NONE
-/// only (verified end-to-end: server's RFB handshake
-/// returns `\x01\x01` = 1 security type = VNC_AUTH_NONE,
-/// but Screen Sharing still asks). TigerVNC handles
-/// VNC_AUTH_NONE cleanly and connects without prompting.
-/// If TigerVNC isn't installed, falls back to the
-/// default `vnc://` handler (Screen Sharing).
-///
-/// Idempotent: if a takeover is already open for this
-/// bot, returns the existing local port without
-/// starting a second tunnel. The local port is
-/// allocated from the `computer_vnc_local_port_range`
-/// setting (default `5900-5999`); two Bots never
-/// collide on `:5901`.
-#[tauri::command]
-pub async fn computer_takeover_open(
-    state: State<'_, AppState>,
-    bot_id: String,
-) -> Result<u16, String> {
-    let db = state.db.clone();
-    let mgr = state.computer.clone();
-    let local_port = mgr
-        .takeover_open(&db, &bot_id)
-        .await
-        .map_err(|e| e.to_string())?;
-    // Best-effort hand-off to TigerVNC. `open -a TigerVNC`
-    // forces the TigerVNC app to handle the URL even
-    // though macOS's default vnc:// handler is Screen
-    // Sharing. Falls back to Screen Sharing if TigerVNC
-    // isn't installed (e.g. user has the old build).
-    let url = format!("vnc://127.0.0.1:{local_port}");
-    let tiger_result = std::process::Command::new("open")
-        .arg("-a")
-        .arg("TigerVNC")
-        .arg(&url)
-        .spawn();
-    if tiger_result.is_err() {
-        // Fall back to default handler (Screen Sharing).
-        let _ = std::process::Command::new("open")
-            .arg(&url)
-            .spawn();
-    }
-    Ok(local_port)
-}
-
-/// v3.7.2: kill the SSH tunnel child and free the
-/// local port. Idempotent — returns `Ok(())` whether
-/// or not a tunnel was open.
-#[tauri::command]
-pub async fn computer_takeover_close(
-    state: State<'_, AppState>,
-    bot_id: String,
-) -> Result<(), String> {
-    let mgr = state.computer.clone();
-    mgr.takeover_close(&bot_id)
-        .await
-        .map_err(|e| e.to_string())
-}
+// `computer_takeover_open` and `computer_takeover_close`
+// were removed in v3.7.9. The v3.7.2/v3.7.5 takeover path
+// (an `ssh -L` tunnel to the VM's VNC port, then a
+// TigerVNC viewer on the local end) is replaced by the
+// in-panel click-through takeover: the user drives the
+// VM directly through the JPEG preview via the
+// `computer_input_*` commands above, no VNC viewer
+// involved. The renderer no longer references the
+// old commands — the corresponding entries in
+// `tauri::generate_handler!` were also removed.
 
 /// Smoke test the libvirt connection. Returns the
 /// number of domains currently defined on the server.

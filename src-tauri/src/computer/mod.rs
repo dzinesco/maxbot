@@ -60,7 +60,6 @@ use self::libvirt::LibvirtError;
 use self::provision::{ProvisionError, ProvisionOptions};
 use self::screenshot::ScreenshotError;
 use self::ssh::{SshError, SshExecutor, SshPool};
-use self::vnc::{TakeoverHandle, VncError};
 
 pub mod input;
 pub mod keys;
@@ -68,7 +67,6 @@ pub mod libvirt;
 pub mod provision;
 pub mod screenshot;
 pub mod ssh;
-pub mod vnc;
 
 #[derive(Debug, Error)]
 pub enum ComputerError {
@@ -80,8 +78,6 @@ pub enum ComputerError {
     Db(String),
     #[error("key: {0}")]
     Key(String),
-    #[error("vnc: {0}")]
-    Vnc(String),
     #[error("screenshot: {0}")]
     Screenshot(String),
     #[error("bot {0} not found")]
@@ -177,11 +173,6 @@ impl From<ProvisionError> for ComputerError {
         }
     }
 }
-impl From<VncError> for ComputerError {
-    fn from(e: VncError) -> Self {
-        Self::Vnc(e.to_string())
-    }
-}
 impl From<ScreenshotError> for ComputerError {
     fn from(e: ScreenshotError) -> Self {
         // v3.7.2 (amended): the `DomainNotFound` variant
@@ -248,22 +239,6 @@ impl ComputerState {
 pub struct ComputerManager {
     pool: Arc<SshPool>,
     libvirt: libvirt::LibvirtClient,
-    /// Live "Take over with Screen Sharing" SSH tunnels,
-    /// keyed by bot id. The renderer calls
-    /// `takeover_open(bot_id)` to start one and
-    /// `takeover_close(bot_id)` to kill it. Dropping the
-    /// manager drops all of them, which `start_kill`s the
-    /// SSH tunnel children and frees the local ports.
-    ///
-    /// v3.7.2: replaces the v3.0.x `proxies: HashMap<BotId, VncProxy>`
-    /// map. The VncProxy struct owned both the SSH tunnel
-    /// and a noVNC-bridging WebSocket listener; we deleted
-    /// the latter, so the only thing left is the tunnel
-    /// child + the local port.
-    takeover_tunnels: Mutex<HashMap<String, Arc<TakeoverHandle>>>,
-    /// Cached port range. Read from settings at startup;
-    /// updated on `set_port_range`.
-    port_range: Mutex<(u16, u16)>,
     /// v3.7.9: per-Bot driving flag. The renderer's
     /// ComputerPanel sets this to `true` when the user
     /// clicks "Drive" (which starts forwarding pointer +
@@ -283,12 +258,9 @@ impl ComputerManager {
     pub fn new(settings: &Settings) -> Self {
         let server = SshPool::server_config_from_settings(settings);
         let pool = Arc::new(SshPool::new(server));
-        let port_range = parse_port_range(&settings.computer_vnc_local_port_range);
         Self {
             pool,
             libvirt: libvirt::LibvirtClient::new(),
-            takeover_tunnels: Mutex::new(HashMap::new()),
-            port_range: Mutex::new(port_range),
             driving: Mutex::new(HashMap::new()),
         }
     }
@@ -302,13 +274,6 @@ impl ComputerManager {
     pub async fn set_passphrase(&self, passphrase: String) {
         self.pool.set_passphrase(passphrase).await;
         self.pool.clear_key_cache().await;
-    }
-
-    /// Update the VNC port range (called from the
-    /// Settings UI). Existing proxies keep their ports;
-    /// new ones allocate from the new range.
-    pub async fn set_port_range(&self, lo: u16, hi: u16) {
-        *self.port_range.lock().await = (lo, hi);
     }
 
     pub fn ssh_pool(&self) -> Arc<SshPool> {
@@ -532,9 +497,13 @@ impl ComputerManager {
                 }
             }
         }
-        // Drop any active takeover tunnel (kills the
-        // SSH child and frees the local port).
-        self.takeover_tunnels.lock().await.remove(bot_id);
+        // v3.7.9: the takeover tunnel map is gone
+        // (replaced by the in-panel click-through
+        // takeover), so there's nothing to drop here.
+        // The driving flag is also left alone — the
+        // destroyed Bot can't be driving anymore, and
+        // re-`input_open` on a fresh Bot of the same id
+        // would just re-set the flag.
         // Drop the SSH pool state.
         self.pool.forget_bot(bot_id).await;
         // Remove the DB rows.
@@ -614,95 +583,18 @@ impl ComputerManager {
         Ok((bytes, width, height))
     }
 
-    /// `computer_takeover_open(bot_id)` — open an
-    /// `ssh -L` tunnel from a local port in the
-    /// configured VNC range to the VM's VNC port. The
-    /// handle is stored in `self.takeover_tunnels` so a
-    /// later `takeover_close` (or ComputerManager
-    /// drop) can kill the SSH child.
-    ///
-    /// Returns the local loopback port — the renderer
-    /// hands this to `open vnc://127.0.0.1:<port>` to
-    /// launch macOS `Screen Sharing`.
-    ///
-    /// v3.7.2: replaces the v3.0.x `console_url`
-    /// path. The local port is allocated from the
-    /// same `computer_vnc_local_port_range` setting
-    /// the v3.0.x path used, so two Bots don't
-    /// collide on a hardcoded `:5901`.
-    pub async fn takeover_open(
-        &self,
-        db: &Database,
-        bot_id: &str,
-    ) -> Result<u16, ComputerError> {
-        let row = db
-            .get_computer(bot_id)?
-            .ok_or_else(|| ComputerError::NoComputer(bot_id.into()))?;
-        let vnc_port = row
-            .vnc_port
-            .ok_or_else(|| ComputerError::NoComputer(bot_id.into()))?;
-        // If a tunnel is already open for this bot,
-        // return its port (idempotent) rather than
-        // opening a second one. The renderer's
-        // `open vnc://` is also idempotent.
-        if let Some(existing) = self.takeover_tunnels.lock().await.get(bot_id) {
-            return Ok(existing.local_port);
-        }
-        let range = *self.port_range.lock().await;
-        let handle = match vnc::open_takeover(&*self.pool, vnc_port, range).await {
-            Ok(h) => h,
-            Err(VncError::TunnelAuthFailed(stderr)) => {
-                // Mirror the v3.0.3 silent auto-recover
-                // path. The user's default pubkey may
-                // not be in the VM's `authorized_keys`
-                // yet — install it via QGA and retry.
-                log::info!(
-                    "takeover tunnel auth failed, attempting default key install for {bot_id}: {stderr}"
-                );
-                if let Err(install_err) = self
-                    .install_default_key_via_qga(db, bot_id)
-                    .await
-                {
-                    return Err(ComputerError::Vnc(format!(
-                        "tunnel auth failed and default key install failed: {install_err} \
-                         — check that ~/.ssh/id_ed25519.pub (or id_rsa.pub / id_ecdsa.pub) exists"
-                    )));
-                }
-                match vnc::open_takeover(&*self.pool, vnc_port, range).await {
-                    Ok(h) => h,
-                    Err(VncError::TunnelAuthFailed(stderr2)) => {
-                        return Err(ComputerError::Vnc(format!(
-                            "tunnel auth failed even after default key install: {stderr2} \
-                             — verify the VM has accepted the new key (try 'ssh bot@<vm-ip>' from your shell)"
-                        )));
-                    }
-                    Err(other_vnc_err) => {
-                        return Err(ComputerError::Vnc(other_vnc_err.to_string()));
-                    }
-                }
-            }
-            Err(e) => return Err(ComputerError::from(e)),
-        };
-        let local_port = handle.local_port;
-        self.takeover_tunnels
-            .lock()
-            .await
-            .insert(bot_id.to_string(), Arc::new(handle));
-        Ok(local_port)
-    }
-
-    /// `computer_takeover_close(bot_id)` — kill the
-    /// SSH tunnel child and free the local port.
-    /// macOS `Screen Sharing` will lose its connection
-    /// the next time it polls. Idempotent: returns
-    /// `Ok(())` whether or not a tunnel was open.
-    pub async fn takeover_close(
-        &self,
-        bot_id: &str,
-    ) -> Result<(), ComputerError> {
-        self.takeover_tunnels.lock().await.remove(bot_id);
-        Ok(())
-    }
+    /// `computer_takeover_open(bot_id)` — v3.7.2/v3.7.5
+    /// SSH-tunnel-to-VNC take-over path. **Removed in
+    /// v3.7.9**: the in-panel click-through takeover
+    /// (`input_open` + `input_event` + `input_close`)
+    /// replaces this — the user now drives the VM
+    /// directly through the JPEG preview, no VNC
+    /// viewer. The v3.7.5 `takeover_open` /
+    /// `takeover_close` Tauri commands have been
+    /// removed from `commands::computer`; this method
+    /// was the last internal caller, so it is also
+    /// gone. See the v3.7.9 commit messages for the
+    /// full migration rationale.
 
     // ----- v3.7.9: in-panel click-through takeover -----
     //
@@ -1082,20 +974,6 @@ fn shell_quote(s: &str) -> String {
     format!("'{escaped}'")
 }
 
-// Helper: turn "5900-5999" into (5900, 5999). Bad
-// strings silently fall back to the default range.
-fn parse_port_range(s: &str) -> (u16, u16) {
-    let parts: Vec<&str> = s.split('-').collect();
-    if parts.len() == 2 {
-        if let (Ok(lo), Ok(hi)) = (parts[0].parse::<u16>(), parts[1].parse::<u16>()) {
-            if lo <= hi {
-                return (lo, hi);
-            }
-        }
-    }
-    (5900, 5999)
-}
-
 /// v2.3.5/v2.3.6: pick the passphrase used to encrypt
 /// the per-Bot SSH key during provisioning. Returns
 /// `None` when the user hasn't configured the per-Bot
@@ -1123,19 +1001,6 @@ fn resolve_provision_passphrase(s: &Settings) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn parse_port_range_default() {
-        assert_eq!(parse_port_range(""), (5900, 5999));
-        assert_eq!(parse_port_range("garbage"), (5900, 5999));
-        assert_eq!(parse_port_range("5999-5900"), (5900, 5999)); // out of order
-    }
-
-    #[test]
-    fn parse_port_range_explicit() {
-        assert_eq!(parse_port_range("5900-5999"), (5900, 5999));
-        assert_eq!(parse_port_range("7000-7099"), (7000, 7099));
-    }
 
     #[test]
     fn computer_state_serializes_to_snake_case() {
@@ -1396,223 +1261,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    // ----- v3.0.4: end-to-end Console smoke test against
-    // the real Linux server (Tyler's `crispy` at
-    // 192.168.0.49). This is the load-bearing CI gate that
-    // proves the v3.0.3 auto-recover fix works end-to-end —
-    // not just in unit-test isolation.
-    //
-    // This test:
-    //   1. Builds a fresh SQLite DB in a temp dir
-    //   2. Inserts a Bot row + Settings (server host, SSH user,
-    //      passphrase, default disk/RAM)
-    //   3. Constructs a ComputerManager pointed at the real server
-    //   4. Calls `provision(bot_id, opts)` and waits for the VM
-    //      to be `running` with an IP + VNC port
-    //   5. Calls `console_url(bot_id)` — exercises the
-    //      `TunnelAuthFailed` → `install_default_key_via_qga` →
-    //      retry-tunnel path that v3.0.3 added
-    //   6. Asserts the returned URL is a localhost WebSocket
-    //      (`ws://localhost:<port>/`) — never a remote host
-    //   7. TCP-probes the port to prove the WebSocket is
-    //      actually listening, not just a string the function
-    //      returned
-    //   8. Tears down the libvirt domain so the test can run
-    //      again without manual cleanup
-    //
-    // Marked `#[ignore]` so `cargo test` doesn't hit the real
-    // server in CI. Run with:
-    //
-    //   cargo test --lib takeover_e2e_against_crispy -- --ignored --nocapture
-    //
-    // Prereqs on the test machine:
-    //   - ssh-agent running with Tyler's `~/.ssh/id_ed25519`
-    //   - the key is authorized on `tyler@192.168.0.49`
-    //   - the server has libvirt + `/opt/maxbot/provision-vm.sh`
-    //   - passwordless sudo for tyler on the server
-    //   - the user's default pubkey (`~/.ssh/id_ed25519.pub` or
-    //     `id_rsa.pub` / `id_ecdsa.pub`) must NOT yet be in the
-    //     VM's authorized_keys — that's what triggers the
-    //     auto-recover path. Each fresh provision uses a
-    //     throwaway VM, so this is naturally the case.
-    #[tokio::test]
-    #[ignore]
-    async fn takeover_e2e_against_crispy() {
-        use super::libvirt::LibvirtClient;
-        use tokio::net::TcpStream;
-
-        let started = std::time::Instant::now();
-
-        // 1. Fresh DB
-        let dir = std::env::temp_dir().join(format!(
-            "maxbot-console-smoke-{}",
-            uuid::Uuid::new_v4()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("test.sqlite");
-        let db = crate::storage::db::Database::open(&path).expect("open test db");
-
-        // 2. Bot + settings. Same shape as
-        //    `provision_e2e_against_crispy`.
-        let bot_id = format!("console-smoke-{}", &uuid::Uuid::new_v4().to_string()[..8]);
-        let now = chrono::Utc::now();
-        let bot = crate::bots::Bot {
-            id: bot_id.clone(),
-            name: "console-smoke".to_string(),
-            description: "".to_string(),
-            system_prompt: "".to_string(),
-            default_model: "MiniMax-M3".to_string(),
-            allowed_tools: vec![],
-            icon: "".to_string(),
-            color: "".to_string(),
-            avatar_color: "".to_string(),
-            last_active_at: None,
-            state: crate::bots::BotState::Idle,
-            // v3.2.0 — `computer_use` defaults to "vm" for
-            // new Bots. Console smoke tests don't exercise
-            // the field.
-            connectors_enabled: String::new(),
-            computer_use: "vm".to_string(),
-            created_at: now,
-            updated_at: now,
-        };
-        db.upsert_bot(&bot).expect("upsert bot");
-
-        let mut s = crate::storage::db::Settings::default();
-        s.computer_server_host =
-            std::env::var("MAXBOT_TEST_SERVER_HOST")
-                .unwrap_or_else(|_| "192.168.0.49".to_string());
-        s.computer_server_ssh_user =
-            std::env::var("MAXBOT_TEST_SERVER_SSH_USER")
-                .unwrap_or_else(|_| "tyler".to_string());
-        s.computer_server_ssh_key_id = "".to_string(); // OS keychain
-        s.computer_vnc_local_port_range = "5900-5999".to_string();
-        s.computer_passphrase = std::env::var("MAXBOT_TEST_PASSPHRASE")
-            .unwrap_or_else(|_| "smoke-test-passphrase-2026".to_string());
-        s.computer_default_disk_gb = 5;
-        s.computer_default_ram_mb = 1024;
-        db.save_settings(&s).expect("save settings");
-
-        // 3. Manager
-        let mgr = ComputerManager::new(&s);
-
-        // 4. Provision (~1-2 min for cloud-init + xfce +
-        //    x11vnc + qemu-guest-agent, then IP/VNC poll).
-        //    Provision polls internally and returns once
-        //    state == "running" and the IP is leased.
-        eprintln!(
-            "[smoke] provisioning bot {bot_id} on {host} (this takes 1-2 min)...",
-            host = s.computer_server_host
-        );
-        let opts = ProvisionOptions {
-            disk_gb: 5,
-            ram_mb: 1024,
-        };
-        let result = mgr.provision(&db, &bot_id, opts).await;
-        if let Err(ref e) = result {
-            eprintln!("[smoke] provision failed: {e}");
-        }
-        assert!(
-            result.is_ok(),
-            "provision failed: {:?}",
-            result.err()
-        );
-
-        // 5. DB row should be `running` with IP + VNC.
-        let row = db.get_computer(&bot_id).unwrap().expect("row exists");
-        assert_eq!(row.state, "running");
-        assert!(row.vm_ip.is_some(), "vm_ip should be set");
-        assert!(row.vnc_port.is_some(), "vnc_port should be set");
-        let domain = row.vm_name.clone();
-        let vm_ip = row.vm_ip.clone().unwrap();
-        let vnc_port = row.vnc_port.unwrap();
-        eprintln!(
-            "[smoke] provisioned: domain={domain} vm_ip={vm_ip} vnc_port={vnc_port}"
-        );
-
-        // 6. Call takeover_open. The VM was just
-        //    provisioned and does NOT have the user's
-        //    default pubkey authorized yet, so the first
-        //    tunnel attempt will fail with
-        //    TunnelAuthFailed. v3.0.3's auto-recover path
-        //    installs the default key via QGA and retries.
-        //    The user-facing contract is that this
-        //    returns a working local port on success —
-        //    that's the v3.0.3 fix proven end-to-end on
-        //    the v3.7.2 takeover path.
-        eprintln!("[smoke] calling takeover_open (auto-recover expected)...");
-        let local_port = mgr
-            .takeover_open(&db, &bot_id)
-            .await
-            .expect("takeover_open should succeed via auto-recover");
-        eprintln!("[smoke] takeover_open returned local port: {local_port}");
-
-        // 7. Port is in the configured VNC range. The
-        //    brief's invariant is that the local port is
-        //    allocated from the same range two Bots
-        //    share, never hardcoded to :5901.
-        assert!(
-            (5900..=5999).contains(&local_port),
-            "local port {local_port} should be in the configured 5900-5999 range"
-        );
-
-        // 8. TCP-probe the port. The SSH tunnel forwards
-        //    127.0.0.1:<local> to 127.0.0.1:<vnc> on the
-        //    server. A raw TCP connect succeeds even
-        //    before any VNC handshake — we only need to
-        //    prove the tunnel is up.
-        let stream = TcpStream::connect(("127.0.0.1", local_port))
-            .await
-            .expect("takeover port should be accepting TCP");
-        let peer = stream
-            .peer_addr()
-            .ok()
-            .map(|a| a.to_string())
-            .unwrap_or_default();
-        drop(stream);
-        eprintln!("[smoke] TCP probe to 127.0.0.1:{local_port} succeeded (peer={peer})");
-
-        // 9. Close the takeover. The SSH child should
-        //    be killed and the local port should refuse
-        //    connections.
-        mgr.takeover_close(&bot_id)
-            .await
-            .expect("takeover_close should be idempotent");
-        // Give the kernel a moment to actually close
-        // the listen socket on the local side.
-        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-        let probe_after = TcpStream::connect(("127.0.0.1", local_port)).await;
-        assert!(
-            probe_after.is_err(),
-            "local port {local_port} should be freed after takeover_close"
-        );
-        eprintln!("[smoke] takeover_close freed local port: {local_port}");
-
-        let elapsed = started.elapsed();
-        eprintln!("[smoke] takeover_e2e_against_crispy passed in {elapsed:?}");
-
-        // 10. Tear down. Destroy the libvirt domain so
-        //     the test can run again without manual
-        //     cleanup. The ssh pool is wrapped in Arc;
-        //     we use a throwaway handle so we don't
-        //     disturb the manager's own pool.
-        let server = SshPool::server_config_from_settings(&s);
-        let cleanup_pool = std::sync::Arc::new(SshPool::new(server));
-        let libvirt = LibvirtClient::new();
-        let _ = libvirt
-            .destroy(&cleanup_pool, &domain)
-            .await
-            .map_err(|e| eprintln!("[smoke] destroy: {e}"));
-        let _ = libvirt
-            .undefine(&cleanup_pool, &domain)
-            .await
-            .map_err(|e| eprintln!("[smoke] undefine: {e}"));
-        eprintln!("[smoke] tore down {domain}");
-
-        drop(db);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
     // ----- v3.0.3: install_default_key refactor + console_url
     // auto-recover. The QGA success path is covered by
     // `provision_e2e_against_crispy` + the v3.0.4
@@ -1774,89 +1422,6 @@ mod tests {
             }
             other => panic!(
                 "expected NoComputer(\"no-such-bot\"), got: {other:?}"
-            ),
-        }
-    }
-
-    #[tokio::test]
-    async fn takeover_open_passes_through_non_auth_errors_without_recover() {
-        let _lock = HOME_LOCK.lock().expect("HOME_LOCK poisoned");
-        // v3.7.2: the auto-recover path in takeover_open
-        // is scoped to `TunnelAuthFailed` only (the
-        // inherit-and-rebuild from v3.0.3). For any
-        // other VncError (e.g. NoFreePort because the
-        // port range is exhausted), takeover_open must
-        // propagate the error directly — we don't burn
-        // a QGA install attempt on unrelated failures.
-        // We force NoFreePort by pre-binding the only
-        // port in a 1-port range.
-        use std::net::TcpListener as StdTcpListener;
-        use std::sync::Mutex as StdMutex;
-        // Pick a port the OS gives us, then hold the
-        // listener for the test duration so
-        // vnc::open_takeover can't bind it.
-        let probe = StdTcpListener::bind("127.0.0.1:0").expect("probe");
-        let port = probe.local_addr().expect("local_addr").port();
-        let held = StdMutex::new(Some(probe));
-        // Build a manager + DB with a running computer
-        // row. Need a HOME with a pubkey (so a stray
-        // QGA install attempt — if our recover logic
-        // were mis-scoped — wouldn't crash with
-        // ComputerError::Ssh, masking the actual
-        // NoFreePort signal).
-        let home = tempfile::TempDir::new().expect("tempdir");
-        let ssh_dir = home.path().join(".ssh");
-        std::fs::create_dir_all(&ssh_dir).expect("mkdir .ssh");
-        std::fs::write(
-            ssh_dir.join("id_ed25519.pub"),
-            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITESTKEY test@local\n",
-        )
-        .expect("write pub");
-        let _home = HomeGuard::set(home.path());
-        let db_dir = tempfile::TempDir::new().expect("tempdir");
-        let db_path = db_dir.path().join("test.sqlite");
-        let mgr = make_test_manager(&db_path);
-        let db = crate::storage::db::Database::open(&db_path).expect("db");
-        let bot_id = "takeover-test-bot";
-        insert_test_bot(&db, bot_id);
-        let now = chrono::Utc::now();
-        db.upsert_computer(&Computer {
-            bot_id: bot_id.into(),
-            vm_name: "test-vm".into(),
-            vm_ip: Some("192.168.122.10".into()),
-            vnc_port: Some(5900),
-            ssh_key_id: String::new(),
-            state: ComputerState::Running.as_str().into(),
-            last_seen_at: Some(now),
-            created_at: now,
-        })
-        .expect("upsert computer");
-        // Set the port range to the single port we
-        // pre-bound so vnc::open_takeover will fail
-        // with NoFreePort.
-        mgr.set_port_range(port, port).await;
-        let result = mgr.takeover_open(&db, bot_id).await;
-        // Release the held listener. The test still owns
-        // the HOME_LOCK so no other test will read HOME
-        // before our drop guard runs.
-        drop(held.lock().expect("held lock").take());
-        // vnc::open_takeover returns NoFreePort which
-        // takeover_open must surface as-is (it does NOT
-        // trigger the TunnelAuthFailed auto-recover
-        // path).
-        match result {
-            Err(ComputerError::Vnc(msg)) => {
-                assert!(
-                    msg.contains("port allocator exhausted")
-                        || msg.contains("no free ports"),
-                    "expected NoFreePort-style message, got: {msg}"
-                );
-            }
-            Err(other) => panic!(
-                "expected Vnc error from NoFreePort, got: {other:?}"
-            ),
-            Ok(local_port) => panic!(
-                "expected error from exhausted port range, got ok: {local_port}"
             ),
         }
     }

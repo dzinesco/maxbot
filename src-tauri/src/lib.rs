@@ -246,8 +246,6 @@ pub fn run() {
             commands::computer::computer_input_open,
             commands::computer::computer_input_event,
             commands::computer::computer_input_close,
-            commands::computer::computer_takeover_open,
-            commands::computer::computer_takeover_close,
             commands::computer::computer_test_connection,
             commands::computer::computer_file_list,
             commands::computer::computer_file_read,
