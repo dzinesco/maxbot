@@ -26,9 +26,9 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::bots::executor::run_bot_once;
-use crate::skills::executor::run_skill;
+use crate::skills::executor::{build_skill_run_trace, run_skill};
 use crate::skills::recorder::SharedRecorderState;
-use crate::skills::{Skill, SkillRun, SkillRunStatus};
+use crate::skills::{Skill, SkillRun, SkillRunStatus, SkillRunTrace};
 use crate::AppState;
 
 // ---- types that mirror the renderer side ----
@@ -99,6 +99,58 @@ pub async fn skill_delete(state: State<'_, AppState>, id: String) -> Result<(), 
     let db = state.db.clone();
     let id_clone = id.clone();
     tokio::task::spawn_blocking(move || db.delete_skill(&id_clone).map_err(|e| e.to_string()))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// v3.3.0 — Re-record: overwrite the editable fields of an
+/// existing Skill in place. The `id` from the path is
+/// authoritative — the renderer passes the skill's
+/// existing id, the new `name`/`description`/`inputs`/
+/// `steps`, and the DB preserves `id` and `created_at` (a
+/// bot_schedules.skill_id pointing at this row is
+/// untouched, since the schedule lives on the bot, not
+/// the skill). Returns the updated row, or an error if
+/// the id is not found. The UI's "Re-record" button on
+/// each skill row calls this with the skill's existing
+/// id and the user's edited JSON.
+#[tauri::command]
+pub async fn skill_update(
+    state: State<'_, AppState>,
+    id: String,
+    skill: Skill,
+) -> Result<Skill, String> {
+    let inputs_json =
+        serde_json::to_string(&skill.inputs).map_err(|e| e.to_string())?;
+    let steps_json =
+        serde_json::to_string(&skill.steps).map_err(|e| e.to_string())?;
+    let id_for_db = id.clone();
+    let name = skill.name.clone();
+    let description = skill.description.clone();
+    let db = state.db.clone();
+    let updated = tokio::task::spawn_blocking(move || {
+        db.update_skill_in_place(&id_for_db, &name, &description, &inputs_json, &steps_json)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    updated.ok_or_else(|| format!("no skill found with id {id}"))
+}
+
+/// v3.3.0 — Last run trace for a Skill. Returns the most
+/// recent row from `skill_run_traces` for the given skill
+/// id, or `None` if the skill has never been run. The
+/// Skills panel's "Last run" expandable view calls this
+/// on expand. The renderer caches the result while the
+/// user is on the panel so re-expanding doesn't re-fetch.
+#[tauri::command]
+pub async fn skill_run_last_trace(
+    state: State<'_, AppState>,
+    skill_id: String,
+) -> Result<Option<SkillRunTrace>, String> {
+    let db = state.db.clone();
+    let id_clone = skill_id.clone();
+    tokio::task::spawn_blocking(move || db.latest_skill_run_trace(&id_clone).map_err(|e| e.to_string()))
         .await
         .map_err(|e| e.to_string())?
 }
@@ -180,6 +232,12 @@ pub async fn skill_run(
         recorder: state.recorder.clone(),
     });
     let cancel = CancellationToken::new();
+    // Capture the user inputs as the trace's trigger
+    // input BEFORE we move `user_inputs` into `run_skill`.
+    // We don't want to log every user input (privacy +
+    // size), but the Last-run view needs at least a
+    // string preview of what started the run.
+    let trigger_input = user_inputs.to_string();
     let mut final_run = run_skill(
         app.clone(),
         state_arc.clone(),
@@ -203,6 +261,24 @@ pub async fn skill_run(
             .await
             .map_err(|e| e.to_string())?
             .map_err(|e| e.to_string())?;
+    }
+    // v3.3.0 — Per-step trace capture. The `trigger_input`
+    // is the user's `inputs` object, JSON-encoded so the
+    // Last-run view can show "what started this run".
+    // Best-effort: a trace-write failure is logged, not
+    // propagated.
+    {
+        let trace = build_skill_run_trace(&final_run, trigger_input);
+        let db = state.db.clone();
+        let to_insert = trace;
+        if let Err(e) = tokio::task::spawn_blocking(move || db.insert_skill_run_trace(&to_insert))
+            .await
+            .map_err(|e| e.to_string())?
+        {
+            log::warn!(
+                "skill_run: insert_skill_run_trace failed: {e}"
+            );
+        }
     }
     // Return a copy that still has `steps` (the in-memory
     // view) so the renderer can render progress / result.

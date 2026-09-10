@@ -29,7 +29,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::bots::Bot;
-use crate::skills::{RunStep, Skill, SkillRun, SkillRunStatus};
+use crate::skills::{RunStep, Skill, SkillRun, SkillRunStatus, SkillRunTrace, StepTrace};
 use crate::tools::registry::ToolRegistry;
 use crate::tools::tool::{ToolContext, ToolInvocation};
 use crate::AppState;
@@ -119,6 +119,22 @@ pub async fn fire_skill_due(
             finished.id
         );
     }
+    // v3.3.0 — Per-step trace capture. Scheduled runs
+    // don't have a user message; the trigger input is
+    // the schedule's bot id (the routine that fired it)
+    // so the Last-run view can distinguish "ran from
+    // cron" from "ran from chat". Best-effort: a
+    // trace-write failure is logged, not propagated.
+    let trace = build_skill_run_trace(
+        &finished,
+        format!("scheduled run (bot_id={})", bot.id),
+    );
+    if let Err(e) = state.db.insert_skill_run_trace(&trace) {
+        log::warn!(
+            "fire_skill_due: insert_skill_run_trace({}) failed: {e}",
+            trace.id
+        );
+    }
 
     // Bump the schedule's `last_run_at` so the next tick
     // doesn't immediately re-fire the same interval. We
@@ -169,6 +185,54 @@ pub async fn run_skill(
         ToolRegistry::default_with_extras(state.mcp.tool_adapters()),
     )
     .await
+}
+
+/// v3.3.0 — Build a per-step `SkillRunTrace` from a finished
+/// `SkillRun`. Pure function — no DB writes — so callers
+/// can decide what to do with the trace (persist it, log
+/// it, drop it on the floor). The trace holds the
+/// per-step tool calls, results, and substitution
+/// bindings as a JSON-encoded array. `trigger_input` is
+/// the user message or scheduled payload that started
+/// the run; pass an empty string for runs with no
+/// payload.
+pub fn build_skill_run_trace(
+    run: &SkillRun,
+    trigger_input: String,
+) -> SkillRunTrace {
+    let started_at = run.started_at;
+    let duration_ms = run
+        .finished_at
+        .map(|f| (f - started_at).num_milliseconds().max(0) as u64)
+        .unwrap_or(0);
+    let per_step: Vec<StepTrace> = run
+        .steps
+        .iter()
+        .map(|s| StepTrace {
+            role: if s.status == "failed" {
+                "error".to_string()
+            } else if s.status == "skipped" {
+                "skipped".to_string()
+            } else {
+                "tool".to_string()
+            },
+            content: s.output.clone().unwrap_or_default(),
+            tool_name: s.tool.clone(),
+            tool_args: s.args.clone(),
+            tool_result: s.output.clone().unwrap_or_default(),
+            ts: s.started_at,
+        })
+        .collect();
+    SkillRunTrace {
+        id: Uuid::new_v4().to_string(),
+        run_id: run.id.clone(),
+        skill_id: run.skill_id.clone(),
+        started_at,
+        duration_ms,
+        per_step,
+        success: matches!(run.status, SkillRunStatus::Succeeded),
+        trigger_input,
+    }
 }
 
 /// Inner Skill runner. The `app` is `Option<AppHandle>` —
@@ -425,5 +489,89 @@ mod tests {
         let args = json!({ "n": 42, "b": true, "x": null });
         let out = substitute_args(&args, &bindings).expect("substitute");
         assert_eq!(out, args);
+    }
+
+    // v3.3.0 — `build_skill_run_trace` should faithfully
+    // translate a finished `SkillRun`'s `steps` vec into
+    // a `SkillRunTrace`'s `per_step` vec with the right
+    // `role` for each status. Successful tool calls
+    // become `"tool"`, failed ones `"error"`, and
+    // skipped ones `"skipped"`. The `duration_ms` is
+    // computed from `finished_at - started_at`, and
+    // `success` matches the run's terminal status.
+    #[test]
+    fn build_skill_run_trace_mirrors_run_step_statuses() {
+        let started = Utc::now();
+        let finished = started + chrono::Duration::milliseconds(2500);
+        let run = SkillRun {
+            id: "r1".to_string(),
+            skill_id: "s1".to_string(),
+            bot_id: "b1".to_string(),
+            inputs: serde_json::json!({}),
+            status: SkillRunStatus::Succeeded,
+            started_at: started,
+            finished_at: Some(finished),
+            result_summary: "ok".to_string(),
+            steps: vec![
+                RunStep {
+                    tool: "web_fetch".to_string(),
+                    args: json!({"url": "https://a"}),
+                    status: "succeeded".to_string(),
+                    output: Some("first result".to_string()),
+                    started_at: started,
+                    finished_at: Some(started + chrono::Duration::milliseconds(1000)),
+                    output_var: None,
+                },
+                RunStep {
+                    tool: "web_fetch".to_string(),
+                    args: json!({"url": "https://b"}),
+                    status: "failed".to_string(),
+                    output: Some("boom".to_string()),
+                    started_at: started,
+                    finished_at: Some(started + chrono::Duration::milliseconds(500)),
+                    output_var: None,
+                },
+            ],
+        };
+        let trace = build_skill_run_trace(&run, "my trigger".to_string());
+        assert_eq!(trace.skill_id, "s1");
+        assert_eq!(trace.run_id, "r1");
+        assert!(trace.success);
+        assert_eq!(trace.trigger_input, "my trigger");
+        // 2500ms = finished - started.
+        assert_eq!(trace.duration_ms, 2500);
+        // 2 per-step entries, roles mirror the run.
+        assert_eq!(trace.per_step.len(), 2);
+        assert_eq!(trace.per_step[0].role, "tool");
+        assert_eq!(trace.per_step[0].tool_name, "web_fetch");
+        assert_eq!(trace.per_step[0].tool_result, "first result");
+        assert_eq!(trace.per_step[1].role, "error");
+        assert_eq!(trace.per_step[1].tool_result, "boom");
+    }
+
+    // v3.3.0 — A never-finished run (no `finished_at`)
+    // has `duration_ms == 0`. The trace is still
+    // well-formed (it's only ever written for a
+    // finished run, but a run that crashed mid-flight
+    // before the executor could set `finished_at`
+    // should still produce a sane trace).
+    #[test]
+    fn build_skill_run_trace_handles_unfinished_run() {
+        let started = Utc::now();
+        let run = SkillRun {
+            id: "r2".to_string(),
+            skill_id: "s1".to_string(),
+            bot_id: "b1".to_string(),
+            inputs: serde_json::json!({}),
+            status: SkillRunStatus::Running,
+            started_at: started,
+            finished_at: None,
+            result_summary: String::new(),
+            steps: vec![],
+        };
+        let trace = build_skill_run_trace(&run, String::new());
+        assert_eq!(trace.duration_ms, 0);
+        assert!(!trace.success, "running != succeeded");
+        assert!(trace.per_step.is_empty());
     }
 }

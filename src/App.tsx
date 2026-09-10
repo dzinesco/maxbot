@@ -1704,6 +1704,19 @@ export default function App() {
               setMainView("chat");
               handleSelectBot(botId);
             }}
+            // v3.3.0 — Routines bound to a Skill gain a
+            // "View run" link. The link navigates the
+            // parent to the Skills panel; the Last-run
+            // expand is owned by SkillsPanel and is fetched
+            // on demand there. (The Skills panel does not
+            // yet auto-expand a target skill — the user
+            // clicks the per-row "Last run" toggle to see
+            // the trace. This is the minimum-viable
+            // navigation surface; auto-expand is a future
+            // enhancement.)
+            onViewSkillRun={() => {
+              setMainView("skills");
+            }}
           />
         ) : mainView === "memory" ? (
           // v2.5.0 — per-Bot persistent memory browser.

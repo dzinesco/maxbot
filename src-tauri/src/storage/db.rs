@@ -469,6 +469,29 @@ impl Database {
              );
              CREATE INDEX IF NOT EXISTS skill_runs_by_skill
                  ON skill_runs(skill_id, started_at DESC);
+             -- v3.3.0 — Skill run traces: per-step output capture
+             -- for the Last run view. The existing `skill_runs`
+             -- table stays the durable summary (status, started/finished,
+             -- result summary, inputs); this new table is the
+             -- per-step trace — the LLM's tool calls / results / next
+             -- prompt, one row per run, with the full per-step array
+             -- JSON-encoded into `per_step_output`. Best-effort
+             -- capture: a trace-write failure does NOT fail the run.
+             -- The `run_id` column is the linkage back to
+             -- `skill_runs.id` so a single run has both a summary
+             -- row and a trace row.
+             CREATE TABLE IF NOT EXISTS skill_run_traces (
+                id              TEXT PRIMARY KEY,
+                run_id          TEXT NOT NULL,
+                skill_id        TEXT NOT NULL REFERENCES skills(id) ON DELETE CASCADE,
+                started_at      TEXT NOT NULL,
+                duration_ms     INTEGER NOT NULL DEFAULT 0,
+                per_step_output TEXT NOT NULL DEFAULT '[]',
+                success         INTEGER NOT NULL DEFAULT 1,
+                trigger_input   TEXT NOT NULL DEFAULT ''
+             );
+             CREATE INDEX IF NOT EXISTS skill_run_traces_by_skill
+                 ON skill_run_traces(skill_id, started_at DESC);
              -- v2.4.0 — Multi-Bot groups: 2-6 Bots can
              -- collaborate in a single conversation. The
              -- `group_chats` row is the conversation; the
@@ -2314,6 +2337,70 @@ impl Database {
         Ok(())
     }
 
+    /// v3.3.0 — Re-record: overwrite the editable fields of an
+    /// existing Skill in place. Preserves `id` and `created_at`;
+    /// bumps `updated_at`. The `name`, `description`,
+    /// `inputs_json`, and `steps_json` columns are replaced with
+    /// the caller's new values. Any `bot_schedules.skill_id`
+    /// pointing at this row is untouched (the schedule lives
+    /// on the bot, not the skill). Returns the updated row, or
+    /// `None` if no Skill with that id exists. This is the
+    /// storage half of the `skill_update` Tauri command — the
+    /// UI's "Re-record" button calls into that command with
+    /// the skill's existing id and the user's edited JSON.
+    pub fn update_skill_in_place(
+        &self,
+        id: &str,
+        name: &str,
+        description: &str,
+        inputs_json: &str,
+        steps_json: &str,
+    ) -> rusqlite::Result<Option<crate::skills::Skill>> {
+        let conn = self.conn.lock().expect("db lock poisoned");
+        // Look up the existing row first so we can preserve
+        // `created_at` and return the merged shape. The
+        // upsert path is `ON CONFLICT(id) DO UPDATE`, which
+        // would clobber `created_at` if we passed the new
+        // shape's `created_at` here — so we read it instead
+        // and write it back.
+        let existing_created_at: Option<String> = conn
+            .query_row(
+                "SELECT created_at FROM skills WHERE id = ?",
+                params![id],
+                |row| row.get(0),
+            )
+            .ok();
+        let Some(created_at) = existing_created_at else {
+            return Ok(None);
+        };
+        let now = Utc::now();
+        let updated = conn.execute(
+            "UPDATE skills SET
+                name = ?,
+                description = ?,
+                inputs_json = ?,
+                steps_json = ?,
+                updated_at = ?
+             WHERE id = ?",
+            params![name, description, inputs_json, steps_json, now.to_rfc3339(), id],
+        )?;
+        if updated == 0 {
+            return Ok(None);
+        }
+        // Build the merged shape and return it so the
+        // renderer can refresh its row without a follow-up
+        // get_skill round-trip.
+        Ok(Some(crate::skills::Skill {
+            id: id.to_string(),
+            name: name.to_string(),
+            description: description.to_string(),
+            inputs: serde_json::from_str(inputs_json).unwrap_or_default(),
+            steps: serde_json::from_str(steps_json).unwrap_or_default(),
+            created_at: parse_dt(created_at),
+            updated_at: now,
+        }))
+    }
+
     /// Insert a fresh `skill_runs` row. The caller fills
     /// in id, status, started_at; finished_at and
     /// result_summary are blanked and updated later via
@@ -2433,6 +2520,57 @@ impl Database {
         };
         Ok(Some(parse_skill_run_row(&row)?))
     }
+
+    // ----- v3.3.0 — Skill run traces (per-step output) -----
+
+    /// Insert a per-step trace row for a run. Best-effort:
+    /// the executor's call site logs failures but does NOT
+    /// propagate them. The `per_step_output` is a JSON-encoded
+    /// array of `{role, content, tool_name, tool_args,
+    /// tool_result, ts}` — see `crate::skills::StepTrace` for
+    /// the shape. `trigger_input` is the user message or
+    /// scheduled payload that started the run; for empty /
+    /// scheduled runs the executor passes an empty string.
+    pub fn insert_skill_run_trace(&self, trace: &crate::skills::SkillRunTrace) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().expect("db lock poisoned");
+        conn.execute(
+            "INSERT INTO skill_run_traces
+                (id, run_id, skill_id, started_at, duration_ms, per_step_output, success, trigger_input)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            params![
+                trace.id,
+                trace.run_id,
+                trace.skill_id,
+                trace.started_at.to_rfc3339(),
+                trace.duration_ms as i64,
+                trace.per_step_output_json(),
+                if trace.success { 1 } else { 0 },
+                trace.trigger_input,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Most-recent trace row for a Skill. Powers the
+    /// Skills panel's "Last run" expandable view. Returns
+    /// `None` if the Skill has never been run.
+    pub fn latest_skill_run_trace(
+        &self,
+        skill_id: &str,
+    ) -> rusqlite::Result<Option<crate::skills::SkillRunTrace>> {
+        let conn = self.conn.lock().expect("db lock poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT id, run_id, skill_id, started_at, duration_ms, per_step_output, success, trigger_input
+             FROM skill_run_traces WHERE skill_id = ?
+             ORDER BY started_at DESC LIMIT 1",
+        )?;
+        let mut rows = stmt.query(params![skill_id])?;
+        let row = match rows.next()? {
+            Some(r) => r,
+            None => return Ok(None),
+        };
+        Ok(Some(parse_skill_run_trace_row(&row)?))
+    }
 }
 
 fn parse_skill_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<crate::skills::Skill> {
@@ -2486,6 +2624,25 @@ fn parse_skill_run_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<crate::skill
         // Per-step progress is in-memory only; the DB row
         // does not persist it.
         steps: Vec::new(),
+    })
+}
+
+fn parse_skill_run_trace_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<crate::skills::SkillRunTrace> {
+    let per_step_json: String = row.get(5)?;
+    let success_int: i64 = row.get(6)?;
+    let per_step: Vec<crate::skills::StepTrace> = serde_json::from_str(&per_step_json)
+        .unwrap_or_default();
+    Ok(crate::skills::SkillRunTrace {
+        id: row.get(0)?,
+        run_id: row.get(1)?,
+        skill_id: row.get(2)?,
+        started_at: parse_dt(row.get::<_, String>(3)?),
+        duration_ms: row.get::<_, i64>(4)? as u64,
+        per_step,
+        success: success_int != 0,
+        trigger_input: row.get(7)?,
     })
 }
 

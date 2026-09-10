@@ -4,6 +4,63 @@ All notable changes to MaxBot are documented in this file. The format
 follows [Keep a Changelog](https://keepachangelog.com/) and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## v3.3.0 — 2026-09-09
+
+### Added
+- **Re-record button on each skill row.** Opens
+  `RecordSkillDialog` preloaded with the skill's existing
+  JSON so the user can edit and re-save in place. The save
+  path uses the new `skill_update` Tauri command, which
+  preserves the skill's `id`, `created_at`, and any
+  `bot_schedules.skill_id` reference (the bot's schedule
+  continues to fire on the same skill — only the
+  replayed content changes).
+- **Last run expandable view per skill row.** Each skill
+  has a `▸ Last run` toggle. Expanding it calls the new
+  `skill_run_last_trace` Tauri command, which returns the
+  most recent row from the new `skill_run_traces` table.
+  The view shows: timestamp, duration in seconds,
+  success/failure status, the run's id, the trigger input
+  (the user message or scheduled payload that started
+  the run), and the per-step tool calls with their args
+  and result text.
+- **`skill_run_traces` table + `SkillRunTrace` / `StepTrace`
+  types.** New durable table — one row per run, with the
+  per-step output (tool name, args, result, timestamp,
+  role) as a JSON-encoded array. Captured best-effort by
+  the skill executor on every run (both manual and
+  scheduled); a trace-write failure does NOT fail the run.
+- **`skill_update` Tauri command.** `(id, skill: Skill) ->
+  Skill`. Looks up the existing row, preserves `id` and
+  `created_at`, overwrites `name` / `description` /
+  `inputs` / `steps`, and bumps `updated_at`. Used by the
+  Re-record flow.
+- **`skill_run_last_trace` Tauri command.** `(skill_id) ->
+  Option<SkillRunTrace>`. Returns the most recent trace
+  for a skill, or `None` if the skill has never been run.
+- **Seeded `maxbot-daily-checkin` demo skill.** A
+  single-step `web_fetch` placeholder that ships on
+  first launch so the new Re-record and Last-run
+  affordances have something to point at out of the
+  box. Idempotent: if any skill already exists, the
+  seed is skipped. Users can re-record it to make it
+  their own.
+- **"View run" link on Routines.** Routines bound to a
+  Skill (`schedule.skill_id != null`) gain a
+  `View run` button. The link navigates the parent to
+  the Skills panel; the Last-run expand lives there
+  and is fetched on demand. Read-only on the Routines
+  surface — no inline expand.
+
+### Docs
+- **"First morning you should see a run" section** in
+  `docs/user-guide.md`. Walks through: record a skill,
+  schedule for 8am, verify the run lands in Activity +
+  the Last run view the next morning. Includes the
+  Phase 8 follow-up note pointing at the
+  `axis-api` skill at `~/.minimax/skills/axis-api` as
+  the canary source for the real TOC skill.
+
 ## v3.2.0 — 2026-09-09
 
 ### Added

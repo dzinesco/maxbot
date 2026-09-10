@@ -83,6 +83,17 @@ pub fn run() {
             // keys: MINIMAX_API_KEY, SAND_MINIMAX_BASE_URL,
             // SAND_MINIMAX_MODEL.
             seed_settings_from_env(&db);
+            // v3.3.0 — Seed a placeholder "demo" Skill on
+            // first launch so the new "Re-record" button
+            // and "Last run" view have something to point
+            // at out of the box. Idempotent: if any Skill
+            // already exists we leave the install alone.
+            // The seeded skill is a no-op-friendly
+            // `web_fetch` step against a known small URL —
+            // it demonstrates the recording/playback loop
+            // without needing real network access to
+            // succeed in any meaningful way.
+            seed_demo_skill(&db);
             // Read Settings once before `db` is moved into
             // the Arc so we can pass them to the
             // ComputerManager constructor.
@@ -211,11 +222,13 @@ pub fn run() {
             commands::skills::skill_list,
             commands::skills::skill_get,
             commands::skills::skill_create,
+            commands::skills::skill_update,
             commands::skills::skill_delete,
             commands::skills::skill_run,
             commands::skills::skill_run_cancel,
             commands::skills::skill_run_status,
             commands::skills::skill_run_history,
+            commands::skills::skill_run_last_trace,
             commands::skills::skill_record_start,
             commands::skills::skill_record_stop,
             // v2.4.0 — Multi-Bot groups: list / get / create
@@ -336,4 +349,57 @@ fn seed_settings_from_env(db: &Database) {
             log::warn!("env_loader: could not save seeded settings: {e}");
         }
     }
+}
+
+/// v3.3.0 — Seed a placeholder "demo" Skill on first
+/// launch. Idempotent: if any Skill already exists we
+/// leave the install alone (we don't want to clobber a
+/// user's real Skills with a re-seed). The seeded Skill
+/// is a single-step `web_fetch` against
+/// `https://example.com` — it demonstrates the
+/// recording/playback loop and the new Re-record
+/// button. Users can re-record it (click Re-record,
+/// edit the JSON, Update) to make it their own; the
+/// seeded `name`/`description`/step are all editable
+/// in place.
+fn seed_demo_skill(db: &Database) {
+    // Cheap existence check: if any Skill row is in the
+    // table, the user has already used the Skills panel
+    // and we should not seed over their work. This is
+    // deliberately `count > 0`, not "id == demo-skill",
+    // so a user who deleted the demo skill and re-launched
+    // the app doesn't get a surprise re-seed.
+    let already_seeded = db
+        .list_skills()
+        .map(|v| !v.is_empty())
+        .unwrap_or(false);
+    if already_seeded {
+        return;
+    }
+    let now = chrono::Utc::now();
+    let demo = crate::skills::Skill {
+        id: "demo-maxbot-daily-checkin".to_string(),
+        name: "maxbot-daily-checkin".to_string(),
+        description:
+            "Demo Skill shipped with v3.3.0. Re-record it \
+             (click Re-record on the skill row) to make it \
+             your own. Edit the JSON to point at a URL you \
+             actually care about, then click Update."
+                .to_string(),
+        inputs: Vec::new(),
+        steps: vec![crate::skills::Step {
+            tool: "web_fetch".to_string(),
+            args: serde_json::json!({
+                "url": "https://example.com",
+            }),
+            output_var: None,
+        }],
+        created_at: now,
+        updated_at: now,
+    };
+    if let Err(e) = db.upsert_skill(&demo) {
+        log::warn!("seed_demo_skill: upsert_skill failed: {e}");
+        return;
+    }
+    log::info!("seed_demo_skill: seeded `maxbot-daily-checkin`");
 }

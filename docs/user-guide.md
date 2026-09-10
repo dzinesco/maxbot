@@ -199,6 +199,60 @@ The bot's <kbd>Inbox</kbd> action shows messages other bots (or
 you, via the composer's "send to bot" action) have sent. Unread
 messages surface as a count badge in the sidebar.
 
+### First morning you should see a run (v3.3.0)
+
+The Re-record + Last-run loop is the canary surface for the
+"do it once → correct it → save → schedule" workflow. To
+verify it end-to-end on a fresh install:
+
+1. **Open the Skills tab** in the side panel. You'll see a
+   single seeded skill called <code>maxbot-daily-checkin</code>
+   — a placeholder <code>web_fetch</code> step that ships
+   with the app so the new Re-record and Last-run
+   affordances have something to point at out of the box.
+2. **Click Run** on that row. A run row lands in
+   <kbd>skill_runs</kbd> (durable summary) and a trace row
+   in <kbd>skill_run_traces</kbd> (per-step output). The
+   Last-run expand on the skill row will show: timestamp,
+   duration in seconds, the per-step tool call, success
+   status, and the trigger input.
+3. **Click Re-record** to open the recorder preloaded with
+   the skill's existing JSON. Change the URL, the tool, or
+   the args — whatever makes the skill useful to you. Click
+   <kbd>Update</kbd> to save in place. The skill's id and
+   any bot schedule pointing at it are preserved.
+4. **Open the Routines tab** and add a routine bound to
+   that skill (e.g. cron <code>0 8 * * *</code>). The
+   routine row gets a <kbd>View run</kbd> link that
+   navigates back to the Skills panel.
+5. **Wait until 8am the next morning.** The schedule fires,
+   the run lands in <kbd>Activity</kbd> and
+   <kbd>skill_runs</kbd>, and the trace row in
+   <kbd>skill_run_traces</kbd> shows the bot's
+   tool-call history for that run.
+
+#### Real-world follow-up: a TOC canary skill (Phase 8)
+
+The seeded <code>maxbot-daily-checkin</code> skill is a
+placeholder — the real canary surface is a
+<code>check-active-roster-for-missing-schedule</code>
+skill that calls the AxisCare API to look for shifts
+without a Caregiver assigned. That skill needs the
+<code>axis-api</code> MCP server wired into MaxBot's MCP
+registry, which is Phase 8 (not Phase 4). When Phase 8
+ships, the existing Skills panel + Re-record + Last-run
+flow is the surface the new MCP-backed skill will plug
+into — no UI changes needed.
+
+Tyler's <code>axis-api</code> skill at
+<code>~/.minimax/skills/axis-api</code> is the canary
+source for the real skill's HTTP shape (the
+<code>/clients/:id/schedule</code> endpoint, the
+<code>Authorization: Bearer &lt;token&gt;</code> header,
+the JSON response shape). Phase 8 will read that skill's
+docs and translate them into MaxBot's
+<code>(tool, args)</code> step schema.
+
 ## Tools
 
 Tools are the agent's hands. The model calls them in the middle of

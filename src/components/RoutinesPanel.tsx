@@ -3,6 +3,15 @@
 // New / Edit / Delete affordances. The "New routine"
 // affordance first asks the user to pick a bot, then
 // opens the ScheduleEditorDialog for that bot.
+//
+// v3.3.0 — Routines that are bound to a Skill (i.e.,
+// `schedule.skill_id != null`) gain a "View run" link.
+// The link opens the Skills panel in the parent's main
+// view, scrolled to that Skill's Last-run expand. The
+// Routines panel itself stays read-only on this surface
+// — it doesn't render the trace inline. The link is
+// rendered only when the bound Skill exists in the
+// panel's `skillById` map.
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
@@ -22,6 +31,12 @@ interface RoutinesPanelProps {
    *  lets the parent App switch the main view to the
    *  chat panel. */
   onOpenBot?: (botId: string) => void;
+  /** v3.3.0 — Called when the user clicks a routine's
+   *  "View run" link. The parent (App.tsx) navigates to
+   *  the Skills panel and expands the bound skill's
+   *  Last-run view. Optional — if not provided, the
+   *  link is hidden. */
+  onViewSkillRun?: (skillId: string) => void;
 }
 
 function describeSchedule(s: BotSchedule): string {
@@ -43,7 +58,7 @@ function describeSchedule(s: BotSchedule): string {
 }
 
 export function RoutinesPanel(props: RoutinesPanelProps) {
-  const { activeBotId, onOpenBot } = props;
+  const { activeBotId, onOpenBot, onViewSkillRun } = props;
   const [schedules, setSchedules] = useState<BotSchedule[]>([]);
   const [bots, setBots] = useState<Bot[]>([]);
   const [skills, setSkills] = useState<Skill[]>([]);
@@ -222,6 +237,16 @@ export function RoutinesPanel(props: RoutinesPanelProps) {
                 </span>
               </div>
               <div className="routine-row__actions">
+                {skill && onViewSkillRun && (
+                  <button
+                    className="secondary-button routine-row__view-run"
+                    onClick={() => onViewSkillRun(skill.id)}
+                    title="Open the Last-run view for this skill"
+                    data-testid="routine-view-run"
+                  >
+                    View run
+                  </button>
+                )}
                 <button
                   className="secondary-button"
                   onClick={() =>

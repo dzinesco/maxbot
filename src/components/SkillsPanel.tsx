@@ -1,8 +1,21 @@
 // v2.2.0 — SkillsPanel.
 //
 // Renders the Skills tab in the side panel. Lists saved
-// Skills, exposes "Run" / "Record" / "Import" / "Delete"
-// buttons, and shows the run history under each Skill.
+// Skills, exposes "Run" / "Record" / "Re-record" / "Import"
+// / "Delete" buttons, and shows the run history under
+// each Skill.
+//
+// v3.3.0 additions:
+//   - "Re-record" button per Skill row: opens
+//     `RecordSkillDialog` in re-record mode (preloaded
+//     with the Skill's existing JSON). Save calls
+//     `skill_update`, preserving the Skill's id and any
+//     bot_schedule pointing at it.
+//   - "Last run" expandable section per Skill row:
+//     shows the most recent `SkillRunTrace` — timestamp,
+//     duration, per-step output (tool name, args,
+//     result), success/failure, and the trigger input
+//     (user message or scheduled payload).
 //
 // The "Run" button opens a small arg-form dialog built
 // from the Skill's `inputs` schema. The "Record" button
@@ -22,8 +35,16 @@ import {
   listSkills,
   runSkill,
   skillRunHistory,
+  skillRunLastTrace,
 } from "../lib/tauri";
-import type { Bot, Skill, SkillInput, SkillRun } from "../lib/api";
+import type {
+  Bot,
+  Skill,
+  SkillInput,
+  SkillRun,
+  SkillRunTrace,
+} from "../lib/api";
+import { RecordSkillDialog } from "./RecordSkillDialog";
 
 interface SkillsPanelProps {
   bots: Bot[];
@@ -39,6 +60,16 @@ export function SkillsPanel(props: SkillsPanelProps) {
   const [error, setError] = useState<string | null>(null);
   // Per-Skill run history. Keyed by skill id.
   const [history, setHistory] = useState<Record<string, SkillRun[]>>({});
+  // v3.3.0 — Per-Skill last-run trace. Keyed by skill id.
+  // Lazily fetched on first expand; cached while the panel
+  // is mounted.
+  const [lastTraces, setLastTraces] = useState<Record<string, SkillRunTrace | null>>({});
+  const [expandedTraces, setExpandedTraces] = useState<Record<string, boolean>>({});
+  const [traceLoading, setTraceLoading] = useState<Record<string, boolean>>({});
+  // v3.3.0 — Re-record dialog. Opens the RecordSkillDialog
+  // preloaded with the Skill's existing JSON. Distinct from
+  // the parent's "Record" dialog (which is a fresh record).
+  const [reRecording, setReRecording] = useState<Skill | null>(null);
   // "Run" dialog state — which Skill is being run, plus
   // the current arg values from the form.
   const [running, setRunning] = useState<{
@@ -123,6 +154,13 @@ export function SkillsPanel(props: SkillsPanelProps) {
       // the new run.
       const h = await skillRunHistory(running.skill.id, 5);
       setHistory((prev) => ({ ...prev, [running.skill.id]: h }));
+      // Invalidate the cached trace so the next expand
+      // fetches the new one.
+      setLastTraces((prev) => {
+        const next = { ...prev };
+        delete next[running.skill.id];
+        return next;
+      });
     } catch (e) {
       setRunning({
         ...running,
@@ -196,6 +234,52 @@ export function SkillsPanel(props: SkillsPanelProps) {
     [refresh],
   );
 
+  // v3.3.0 — Re-record handler. Opens the
+  // RecordSkillDialog preloaded with the skill's
+  // existing JSON. The save path inside that dialog
+  // calls `skill_update` (preserving id + bot_schedule).
+  const handleReRecordClick = useCallback((skill: Skill) => {
+    setReRecording(skill);
+  }, []);
+
+  const handleReRecordClose = useCallback(() => {
+    setReRecording(null);
+  }, []);
+
+  const handleReRecordSaved = useCallback(
+    async (_skill: Skill) => {
+      // Refresh the panel so the new content (name,
+      // description, step chips) shows up. The dialog
+      // is closed by the parent — we drop local state.
+      setReRecording(null);
+      await refresh();
+    },
+    [refresh],
+  );
+
+  // v3.3.0 — Toggle the Last-run expand. Lazily fetches
+  // the trace on first expand; cached so re-expanding
+  // doesn't re-fetch.
+  const handleToggleLastRun = useCallback(
+    async (skill: Skill) => {
+      const wasExpanded = expandedTraces[skill.id];
+      setExpandedTraces((prev) => ({ ...prev, [skill.id]: !wasExpanded }));
+      if (wasExpanded) return; // collapsing — no fetch
+      if (lastTraces[skill.id] !== undefined) return; // cached
+      setTraceLoading((prev) => ({ ...prev, [skill.id]: true }));
+      try {
+        const trace = await skillRunLastTrace(skill.id);
+        setLastTraces((prev) => ({ ...prev, [skill.id]: trace }));
+      } catch (e) {
+        console.warn("skill_run_last_trace failed for", skill.id, e);
+        setLastTraces((prev) => ({ ...prev, [skill.id]: null }));
+      } finally {
+        setTraceLoading((prev) => ({ ...prev, [skill.id]: false }));
+      }
+    },
+    [expandedTraces, lastTraces],
+  );
+
   return (
     <div className="skills-panel" data-setting-key="panel.skills">
       <div className="skills-panel__header">
@@ -248,60 +332,101 @@ export function SkillsPanel(props: SkillsPanelProps) {
       )}
 
       <ul className="skills-panel__list">
-        {skills.map((skill) => (
-          <li key={skill.id} className="skills-panel__item">
-            <div className="skills-panel__item-header">
-              <div className="skills-panel__item-title">
-                <span className="skills-panel__name">{skill.name || "(untitled)"}</span>
-                <span className="skills-panel__count">
-                  {skill.steps.length} step{skill.steps.length === 1 ? "" : "s"}
-                </span>
+        {skills.map((skill) => {
+          const isTraceExpanded = expandedTraces[skill.id] ?? false;
+          const traceCached = lastTraces[skill.id];
+          const isTraceLoading = traceLoading[skill.id] ?? false;
+          return (
+            <li key={skill.id} className="skills-panel__item">
+              <div className="skills-panel__item-header">
+                <div className="skills-panel__item-title">
+                  <span className="skills-panel__name">{skill.name || "(untitled)"}</span>
+                  <span className="skills-panel__count">
+                    {skill.steps.length} step{skill.steps.length === 1 ? "" : "s"}
+                  </span>
+                </div>
+                <div className="skills-panel__item-actions">
+                  <button
+                    className="primary"
+                    onClick={() => handleRunClick(skill)}
+                    disabled={bots.length === 0}
+                  >
+                    Run
+                  </button>
+                  <button
+                    className="ghost"
+                    onClick={() => handleReRecordClick(skill)}
+                    title="Open the recorder pre-loaded with this Skill's JSON — edit and save in place."
+                    data-testid="skill-rerecord"
+                  >
+                    Re-record
+                  </button>
+                  <button className="ghost" onClick={() => handleDelete(skill)}>
+                    Delete
+                  </button>
+                </div>
               </div>
-              <div className="skills-panel__item-actions">
-                <button
-                  className="primary"
-                  onClick={() => handleRunClick(skill)}
-                  disabled={bots.length === 0}
-                >
-                  Run
-                </button>
-                <button className="ghost" onClick={() => handleDelete(skill)}>
-                  Delete
-                </button>
-              </div>
-            </div>
-            {skill.description && (
-              <div className="skills-panel__description">{skill.description}</div>
-            )}
-            <div className="skills-panel__steps">
-              {skill.steps.slice(0, 4).map((s, i) => (
-                <span key={i} className="skills-panel__chip">
-                  {s.tool}
-                </span>
-              ))}
-              {skill.steps.length > 4 && (
-                <span className="skills-panel__chip skills-panel__chip--more">
-                  +{skill.steps.length - 4} more
-                </span>
+              {skill.description && (
+                <div className="skills-panel__description">{skill.description}</div>
               )}
-            </div>
-            {(history[skill.id] ?? []).length > 0 && (
-              <ul className="skills-panel__history">
-                {(history[skill.id] ?? []).map((r) => (
-                  <li key={r.id} className={`skills-panel__history-item skills-panel__history-item--${r.status}`}>
-                    <span className="skills-panel__history-status">{r.status}</span>
-                    <span className="skills-panel__history-time">
-                      {new Date(r.started_at).toLocaleString()}
-                    </span>
-                    {r.result_summary && (
-                      <span className="skills-panel__history-summary">{r.result_summary}</span>
-                    )}
-                  </li>
+              <div className="skills-panel__steps">
+                {skill.steps.slice(0, 4).map((s, i) => (
+                  <span key={i} className="skills-panel__chip">
+                    {s.tool}
+                  </span>
                 ))}
-              </ul>
-            )}
-          </li>
-        ))}
+                {skill.steps.length > 4 && (
+                  <span className="skills-panel__chip skills-panel__chip--more">
+                    +{skill.steps.length - 4} more
+                  </span>
+                )}
+              </div>
+              {(history[skill.id] ?? []).length > 0 && (
+                <ul className="skills-panel__history">
+                  {(history[skill.id] ?? []).map((r) => (
+                    <li key={r.id} className={`skills-panel__history-item skills-panel__history-item--${r.status}`}>
+                      <span className="skills-panel__history-status">{r.status}</span>
+                      <span className="skills-panel__history-time">
+                        {new Date(r.started_at).toLocaleString()}
+                      </span>
+                      {r.result_summary && (
+                        <span className="skills-panel__history-summary">{r.result_summary}</span>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+              )}
+              <button
+                className="ghost skills-panel__last-run-toggle"
+                onClick={() => handleToggleLastRun(skill)}
+                data-testid="skill-last-run-toggle"
+                aria-expanded={isTraceExpanded}
+              >
+                {isTraceExpanded ? "▾" : "▸"} Last run
+              </button>
+              {isTraceExpanded && (
+                <div
+                  className="skills-panel__last-run"
+                  data-testid="skill-last-run-view"
+                >
+                  {isTraceLoading && (
+                    <div className="skills-panel__last-run-loading">
+                      Loading last run…
+                    </div>
+                  )}
+                  {!isTraceLoading && traceCached === null && (
+                    <div className="skills-panel__last-run-empty">
+                      This Skill hasn't been run yet. Click <b>Run</b> above.
+                    </div>
+                  )}
+                  {!isTraceLoading && traceCached && (
+                    <LastRunView trace={traceCached} />
+                  )}
+                </div>
+              )}
+            </li>
+          );
+        })}
       </ul>
 
       {running && (
@@ -322,6 +447,107 @@ export function SkillsPanel(props: SkillsPanelProps) {
           onSubmit={handleRunSubmit}
         />
       )}
+
+      {reRecording && (
+        <RecordSkillDialog
+          bots={bots}
+          defaultBotId={defaultBotId}
+          existingSkill={reRecording}
+          onClose={handleReRecordClose}
+          onSaved={handleReRecordSaved}
+        />
+      )}
+    </div>
+  );
+}
+
+// v3.3.0 — LastRunView: the body of the expanded
+// "Last run" section. Renders the trace: timestamp,
+// duration, success/failure, trigger input, and the
+// per-step tool calls (tool name, args, result).
+function LastRunView(props: { trace: SkillRunTrace }) {
+  const { trace } = props;
+  const startedAt = new Date(trace.started_at);
+  const durationSec = (trace.duration_ms / 1000).toFixed(2);
+  return (
+    <div className="skills-panel__last-run-detail">
+      <div className="skills-panel__last-run-meta">
+        <div>
+          <b>Started:</b> {startedAt.toLocaleString()}
+        </div>
+        <div>
+          <b>Duration:</b> {durationSec}s
+        </div>
+        <div>
+          <b>Status:</b>{" "}
+          <span
+            className={
+              "skills-panel__last-run-status skills-panel__last-run-status--" +
+              (trace.success ? "ok" : "fail")
+            }
+          >
+            {trace.success ? "succeeded" : "failed"}
+          </span>
+        </div>
+        <div>
+          <b>Run id:</b> <code>{trace.run_id}</code>
+        </div>
+        {trace.trigger_input && (
+          <div>
+            <b>Trigger:</b> <code>{trace.trigger_input}</code>
+          </div>
+        )}
+      </div>
+      <div className="skills-panel__last-run-steps">
+        <div className="skills-panel__last-run-steps-header">Steps</div>
+        {trace.per_step.length === 0 ? (
+          <div className="skills-panel__last-run-empty">
+            (no per-step output captured)
+          </div>
+        ) : (
+          <ol className="skills-panel__last-run-step-list">
+            {trace.per_step.map((s, i) => (
+              <li
+                key={i}
+                className={
+                  "skills-panel__last-run-step skills-panel__last-run-step--" +
+                  s.role
+                }
+                data-testid="skill-last-run-step"
+              >
+                <div className="skills-panel__last-run-step-head">
+                  <span className="skills-panel__last-run-step-num">#{i + 1}</span>
+                  <span className="skills-panel__last-run-step-role">{s.role}</span>
+                  {s.tool_name && (
+                    <code className="skills-panel__last-run-step-tool">{s.tool_name}</code>
+                  )}
+                  <span className="skills-panel__last-run-step-ts">
+                    {new Date(s.ts).toLocaleTimeString()}
+                  </span>
+                </div>
+                {s.tool_args &&
+                  Object.keys(s.tool_args).length > 0 && (
+                    <pre className="skills-panel__last-run-step-args">
+                      {JSON.stringify(s.tool_args, null, 2)}
+                    </pre>
+                  )}
+                {s.tool_result && (
+                  <pre className="skills-panel__last-run-step-result">
+                    {s.tool_result.slice(0, 2000)}
+                    {s.tool_result.length > 2000 ? "…" : ""}
+                  </pre>
+                )}
+                {!s.tool_result && s.content && (
+                  <pre className="skills-panel__last-run-step-result">
+                    {s.content.slice(0, 2000)}
+                    {s.content.length > 2000 ? "…" : ""}
+                  </pre>
+                )}
+              </li>
+            ))}
+          </ol>
+        )}
+      </div>
     </div>
   );
 }

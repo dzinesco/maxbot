@@ -1,22 +1,31 @@
 // v2.2.0 — RecordSkillDialog.
 //
-// Two-step flow:
-//   1. The user picks a Bot and types a kickoff prompt
-//      ("What do you want it to do?").
-//   2. We call `skill_record_start(bot_id)` which spawns
-//      a Bot run in the background. The dialog shows
-//      "Recording…" and a Stop button. The user can
-//      also watch the Bot's response stream in the chat
-//      panel; this dialog just tracks the recording
-//      session.
-//   3. On Stop, we call `skill_record_stop(recording_id)`
-//      to drain the captured tool calls into a candidate
-//      Skill. The dialog shows the candidate's name /
-//      description / steps in editable fields; Save
-//      calls `skill_create`.
+// Three flows:
+//
+// 1. **Record** (original flow): pick a Bot, run it, capture
+//    the tool calls, save as a new Skill.
+// 2. **Re-record** (v3.3.0): preload the dialog with an
+//    existing Skill's JSON so the user can edit and re-save
+//    in place. The save path calls `skill_update` (not
+//    `skill_create`) so the Skill's id and the bot_schedule
+//    pointing at it are preserved. The dialog title flips
+//    to "Re-record: <name>" and the "Save" button reads
+//    "Update".
+// 3. **Import-style edit** (v3.3.0): preload a Skill from
+//    a parent component via the `existingSkill` prop. Same
+//    save path as Re-record.
+//
+// The phases are shared: `configure` (recording-only) →
+// `editing` (save-or-update). The re-record path skips
+// `configure` and lands directly in `editing`.
 
 import { useCallback, useEffect, useState } from "react";
-import { createSkill, skillRecordStart, skillRecordStop } from "../lib/tauri";
+import {
+  createSkill,
+  skillRecordStart,
+  skillRecordStop,
+  updateSkill,
+} from "../lib/tauri";
 import type { Bot, Skill, SkillStep } from "../lib/api";
 
 interface RecordSkillDialogProps {
@@ -24,28 +33,48 @@ interface RecordSkillDialogProps {
   defaultBotId: string | null;
   onClose: () => void;
   onSaved: (skill: Skill) => void;
+  /** v3.3.0 — when set, opens the dialog in
+   *  "re-record" mode: the skill's existing JSON is
+   *  pre-filled in the editor and the save path calls
+   *  `skill_update` (preserves id + bot_schedule
+   *  binding). The dialog title becomes "Re-record:
+   *  <name>". */
+  existingSkill?: Skill | null;
 }
 
 type Phase =
   | { kind: "configure" }
   | { kind: "recording"; recordingId: string; botId: string }
-  | { kind: "editing"; recordingId: string; candidate: Skill };
+  | { kind: "editing"; recordingId: string | null; candidate: Skill };
 
 export function RecordSkillDialog(props: RecordSkillDialogProps) {
-  const { bots, defaultBotId, onClose, onSaved } = props;
-  const [phase, setPhase] = useState<Phase>({ kind: "configure" });
+  const { bots, defaultBotId, onClose, onSaved, existingSkill } = props;
+  const isReRecord = Boolean(existingSkill);
+  // In re-record mode, jump straight to `editing` with
+  // the existing skill as the candidate. In record mode,
+  // start at `configure`.
+  const [phase, setPhase] = useState<Phase>(
+    existingSkill
+      ? {
+          kind: "editing",
+          recordingId: null,
+          candidate: existingSkill,
+        }
+      : { kind: "configure" },
+  );
   const [botId, setBotId] = useState(
     defaultBotId ?? (bots[0] ? bots[0].id : ""),
   );
-  const [name, setName] = useState("");
-  const [description, setDescription] = useState("");
-  const [stepsJson, setStepsJson] = useState<string>(
-    JSON.stringify(
-      [{ tool: "example_tool", args: {} }],
-      null,
-      2,
-    ),
+  const [name, setName] = useState(
+    existingSkill?.name ?? "",
   );
+  const [description, setDescription] = useState(
+    existingSkill?.description ?? "",
+  );
+  const initialStepsJson = existingSkill
+    ? JSON.stringify(existingSkill.steps, null, 2)
+    : JSON.stringify([{ tool: "example_tool", args: {} }], null, 2);
+  const [stepsJson, setStepsJson] = useState<string>(initialStepsJson);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
@@ -125,6 +154,22 @@ export function RecordSkillDialog(props: RecordSkillDialogProps) {
           throw new Error(`step ${s.tool} needs an args object`);
         }
       }
+      if (isReRecord) {
+        // Re-record path: preserve id + created_at, overwrite
+        // the editable fields. The DB layer's `update_skill_in_place`
+        // bumps `updated_at` for us.
+        const to_update: Skill = {
+          ...phase.candidate,
+          name: name.trim() || phase.candidate.name || "Recorded Skill",
+          description: description.trim(),
+          steps,
+        };
+        const updated = await updateSkill(to_update.id, to_update);
+        onSaved(updated);
+        return;
+      }
+      // Original record path: fresh Skill, id is generated
+      // by the Rust side.
       const to_save: Skill = {
         ...phase.candidate,
         name: name.trim() || "Recorded Skill",
@@ -138,20 +183,30 @@ export function RecordSkillDialog(props: RecordSkillDialogProps) {
     } finally {
       setSaving(false);
     }
-  }, [phase, stepsJson, name, description, onSaved]);
+  }, [phase, stepsJson, name, description, onSaved, isReRecord]);
+
+  // The dialog title flips between "Record a Skill",
+  // "Recording…", "Save Skill", and (v3.3.0) "Re-record: <name>".
+  const dialogTitle = (() => {
+    if (phase.kind === "configure") return "Record a Skill";
+    if (phase.kind === "recording") return "Recording…";
+    if (isReRecord) {
+      const display = name || phase.candidate.name || "(untitled)";
+      return `Re-record: ${display}`;
+    }
+    return "Save Skill";
+  })();
 
   return (
     <div className="modal-overlay" onClick={onClose}>
       <div
         className="modal-stacked skills-dialog"
         onClick={(e) => e.stopPropagation()}
+        data-testid="record-skill-dialog"
+        data-mode={isReRecord ? "re-record" : "record"}
       >
         <div className="modal-stacked-header">
-          <h2>
-            {phase.kind === "configure" && "Record a Skill"}
-            {phase.kind === "recording" && "Recording…"}
-            {phase.kind === "editing" && "Save Skill"}
-          </h2>
+          <h2>{dialogTitle}</h2>
         </div>
         <div className="modal-stacked-body">
           {phase.kind === "configure" && (
@@ -213,6 +268,15 @@ export function RecordSkillDialog(props: RecordSkillDialogProps) {
 
           {phase.kind === "editing" && (
             <>
+              {isReRecord && (
+                <p className="skills-dialog__hint">
+                  v3.3.0 — Re-record: the steps below are this
+                  Skill's current JSON. Edit and click
+                  <b> Update</b> to save in place (the Skill's
+                  id, name, and any bot schedule binding are
+                  preserved).
+                </p>
+              )}
               <label className="field-group">
                 <span>Name</span>
                 <input
@@ -237,6 +301,7 @@ export function RecordSkillDialog(props: RecordSkillDialogProps) {
                   onChange={(e) => setStepsJson(e.target.value)}
                   spellCheck={false}
                   rows={14}
+                  data-testid="skills-dialog-steps"
                 />
               </label>
             </>
@@ -286,8 +351,9 @@ export function RecordSkillDialog(props: RecordSkillDialogProps) {
                 className="primary"
                 onClick={handleSave}
                 disabled={saving}
+                data-testid="skills-dialog-save"
               >
-                {saving ? "Saving…" : "Save"}
+                {saving ? "Saving…" : isReRecord ? "Update" : "Save"}
               </button>
             </>
           )}

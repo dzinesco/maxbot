@@ -724,6 +724,35 @@ export interface SkillRun {
   steps: SkillRunStep[];
 }
 
+/** v3.3.0 — Per-step entry inside a `SkillRunTrace`.
+ *  Mirrors the Rust `StepTrace` shape. `role` is one of
+ *  `"tool"`, `"substitute"`, `"error"`, `"skipped"`. */
+export interface SkillStepTrace {
+  role: string;
+  content: string;
+  tool_name: string;
+  tool_args: Record<string, unknown>;
+  tool_result: string;
+  ts: string;
+}
+
+/** v3.3.0 — Per-row trace of a Skill run. One row per run,
+ *  with the per-step output as an array. The Skills
+ *  panel's "Last run" expandable view calls
+ *  `skillRunLastTrace` to populate this. */
+export interface SkillRunTrace {
+  id: string;
+  run_id: string;
+  skill_id: string;
+  started_at: string;
+  duration_ms: number;
+  per_step: SkillStepTrace[];
+  success: boolean;
+  /** The user message or scheduled payload that started
+   *  the run. Empty string for runs with no payload. */
+  trigger_input: string;
+}
+
 /** Returned by `skill_record_start`. */
 export interface SkillRecordStart {
   recording_id: string;

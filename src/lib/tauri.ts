@@ -34,6 +34,7 @@ import type {
   SkillRecordStart,
   SkillRecordStop,
   SkillRun,
+  SkillRunTrace,
   TccProbeResult,
   ToolSummary,
   TtsSpeakResponse,
@@ -530,6 +531,17 @@ export async function createSkill(skill: Skill): Promise<Skill> {
   return invoke<Skill>("skill_create", { skill });
 }
 
+/** v3.3.0 — Re-record: overwrite the editable fields of an
+ *  existing Skill in place. The `id` from the path is
+ *  authoritative — the DB preserves it (and `created_at`)
+ *  while `name`, `description`, `inputs`, and `steps` are
+ *  replaced with the new values from the Skill object.
+ *  Returns the updated row, or throws if no Skill with
+ *  that id exists. */
+export async function updateSkill(id: string, skill: Skill): Promise<Skill> {
+  return invoke<Skill>("skill_update", { id, skill });
+}
+
 /** Delete a Skill by id. CASCADE removes its `skill_runs`. */
 export async function deleteSkill(id: string): Promise<void> {
   await invoke("skill_delete", { id });
@@ -553,6 +565,16 @@ export async function skillRunHistory(
   limit?: number,
 ): Promise<SkillRun[]> {
   return invoke<SkillRun[]>("skill_run_history", { skillId, limit });
+}
+
+/** v3.3.0 — Most-recent per-step trace for a Skill.
+ *  Returns the latest `SkillRunTrace` row, or null if the
+ *  Skill has never been run. The Skills panel's
+ *  expandable "Last run" view calls this on expand. */
+export async function skillRunLastTrace(
+  skillId: string,
+): Promise<SkillRunTrace | null> {
+  return invoke<SkillRunTrace | null>("skill_run_last_trace", { skillId });
 }
 
 /** Get the current durable status of a run. v2.2 doesn't

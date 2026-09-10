@@ -207,3 +207,85 @@ pub struct RecordedStep {
     pub output: String,
     pub is_error: bool,
 }
+
+/// v3.3.0 — Per-step trace entry inside a `SkillRunTrace`.
+///
+/// One row per "thing that happened" during a Skill run: a
+/// tool dispatch, the LLM-side preparation, an error, or a
+/// substitution that bound an `output_var`. The renderer
+/// renders these as the Last-run timeline. The shape is
+/// intentionally lossy: not every field is meaningful for
+/// every kind of entry. For a `web_fetch` call we'd see:
+/// `{role: "tool", tool_name: "web_fetch", tool_args:
+/// {"url": "..."}, tool_result: "..."}`. For a
+/// substitution we'd see `{role: "substitute", content:
+/// "bound var1"}`. Keep the JSON friendly to the
+/// renderer's `stringify-and-display` path.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StepTrace {
+    /// One of `"tool"`, `"substitute"`, `"error"`. Free-form
+    /// for forward-compat: the renderer falls back to a
+    /// generic display for unknown roles.
+    #[serde(default = "default_step_role")]
+    pub role: String,
+    /// Free-form text. For `role = "tool"`, the tool's
+    /// output. For `role = "error"`, the error message.
+    /// Empty for `role = "substitute"` (the relevant data
+    /// is in `tool_name`).
+    #[serde(default)]
+    pub content: String,
+    /// Tool name for `role = "tool"`. Variable name for
+    /// `role = "substitute"`. Empty for `role = "error"`.
+    #[serde(default)]
+    pub tool_name: String,
+    /// Tool args for `role = "tool"`. Empty otherwise.
+    #[serde(default)]
+    pub tool_args: Value,
+    /// Tool result for `role = "tool"`. Empty otherwise.
+    #[serde(default)]
+    pub tool_result: String,
+    /// When this step fired, as an RFC3339 string. The
+    /// renderer's timeline view sorts by this.
+    pub ts: DateTime<Utc>,
+}
+
+fn default_step_role() -> String {
+    "tool".to_string()
+}
+
+/// v3.3.0 — Per-row Skill run trace. One row per run, with
+/// the per-step output as a JSON-encoded array. The
+/// `skill_run_traces` table is the durable side of the
+/// Last-run view; the in-memory `RunStep` array on
+/// `SkillRun` is the live progress mirror. They share
+/// their `run_id` so a single run has both a summary
+/// row in `skill_runs` and a trace row here.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillRunTrace {
+    pub id: String,
+    /// Linkage back to `skill_runs.id`. The renderer uses
+    /// this for cross-referencing in the timeline view
+    /// ("this trace corresponds to the run that finished
+    /// at HH:MM:SS").
+    pub run_id: String,
+    pub skill_id: String,
+    pub started_at: DateTime<Utc>,
+    pub duration_ms: u64,
+    pub per_step: Vec<StepTrace>,
+    pub success: bool,
+    /// The user message or scheduled payload that started
+    /// the run. For empty / scheduled runs the executor
+    /// passes an empty string.
+    pub trigger_input: String,
+}
+
+impl SkillRunTrace {
+    /// Serialize the `per_step` field to a JSON string for
+    /// the `per_step_output` TEXT column. Returns `"[]"`
+    /// on serialization failure (which shouldn't happen for
+    /// a Vec of `Serialize` values) so the trace row still
+    /// gets written.
+    pub fn per_step_output_json(&self) -> String {
+        serde_json::to_string(&self.per_step).unwrap_or_else(|_| "[]".to_string())
+    }
+}

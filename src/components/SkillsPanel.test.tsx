@@ -166,4 +166,175 @@ describe("SkillsPanel", () => {
       expect(passedArgs.inputs?.city).toBe("Oakland");
     });
   });
+
+  // v3.3.0 — Re-record: clicking the per-row Re-record
+  // button opens the RecordSkillDialog preloaded with
+  // the skill's existing JSON. The dialog title flips
+  // to "Re-record: <name>" and the Save button reads
+  // "Update". Save calls `skill_update` (NOT
+  // `skill_create`) so the skill's id is preserved.
+  it("opens a preloaded Re-record dialog when the per-row Re-record button is clicked", async () => {
+    const user = userEvent.setup();
+    render(
+      <SkillsPanel bots={[baseBot]} defaultBotId="bot-1" onOpenRecord={() => {}} />,
+    );
+    await waitFor(() => {
+      expect(screen.getByText("fetch-sf-weather")).toBeInTheDocument();
+    });
+    await user.click(screen.getByTestId("skill-rerecord"));
+
+    // Dialog opens in re-record mode, preloaded with
+    // the existing skill's JSON. Title shows "Re-record: <name>".
+    await waitFor(() => {
+      expect(screen.getByTestId("record-skill-dialog")).toBeInTheDocument();
+    });
+    expect(screen.getByTestId("record-skill-dialog").getAttribute("data-mode")).toBe("re-record");
+    expect(screen.getByText(/Re-record: fetch-sf-weather/i)).toBeInTheDocument();
+
+    // The Save button reads "Update" (re-record path).
+    expect(screen.getByTestId("skills-dialog-save").textContent).toBe("Update");
+
+    // The steps textarea is preloaded with the
+    // existing steps. Existing skill has 1 web_fetch
+    // step.
+    const textarea = screen.getByTestId("skills-dialog-steps") as HTMLTextAreaElement;
+    expect(textarea.value).toContain("web_fetch");
+    expect(textarea.value).toContain("https://wttr.in");
+  });
+
+  it("calls skill_update (not skill_create) on Re-record Save, preserving the id", async () => {
+    const user = userEvent.setup();
+    const updateRef: { current: { id: string; skill: unknown } | null } = { current: null };
+    invokeMock.mockImplementation(async (cmd: string, args?: { id?: string; skill?: unknown }) => {
+      if (cmd === "skill_list") return [sampleSkill];
+      if (cmd === "skill_run_history") return [];
+      if (cmd === "skill_update") {
+        updateRef.current = { id: args?.id ?? "", skill: args?.skill };
+        return { id: args?.id, ...((args?.skill as Record<string, unknown>) ?? {}) };
+      }
+      return null;
+    });
+    render(
+      <SkillsPanel bots={[baseBot]} defaultBotId="bot-1" onOpenRecord={() => {}} />,
+    );
+    await waitFor(() => {
+      expect(screen.getByText("fetch-sf-weather")).toBeInTheDocument();
+    });
+    await user.click(screen.getByTestId("skill-rerecord"));
+    await waitFor(() => {
+      expect(screen.getByTestId("record-skill-dialog")).toBeInTheDocument();
+    });
+    // The preloaded name field is "fetch-sf-weather".
+    // Edit it to confirm the save path uses the new
+    // value, then click Update.
+    const inputs = screen.getAllByRole("textbox");
+    // inputs[0] = name (single-line)
+    await user.clear(inputs[0]);
+    await user.type(inputs[0], "fetch-sf-weather-v2");
+    await user.click(screen.getByTestId("skills-dialog-save"));
+
+    await waitFor(() => {
+      expect(updateRef.current).not.toBeNull();
+    });
+    expect(updateRef.current?.id).toBe("skill-1");
+    // skill_create was NOT called.
+    const allCalls = invokeMock.mock.calls.map((c) => c[0]);
+    expect(allCalls).not.toContain("skill_create");
+  });
+
+  // v3.3.0 — Last run view: clicking the per-row
+  // "Last run" toggle calls `skill_run_last_trace` and
+  // renders the trace. The view is collapsed by
+  // default; expanding it twice collapses it back
+  // (toggle behavior, no re-fetch on the second
+  // expand).
+  it("expands the Last run view and renders the per-step trace", async () => {
+    const user = userEvent.setup();
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "skill_list") return [sampleSkill];
+      if (cmd === "skill_run_history") return [];
+      if (cmd === "skill_run_last_trace") {
+        return {
+          id: "trace-1",
+          run_id: "run-99",
+          skill_id: "skill-1",
+          started_at: "2026-09-09T08:00:00Z",
+          duration_ms: 1234,
+          success: true,
+          trigger_input: "morning check",
+          per_step: [
+            {
+              role: "tool",
+              content: "first result",
+              tool_name: "web_fetch",
+              tool_args: { url: "https://a.example" },
+              tool_result: "first result",
+              ts: "2026-09-09T08:00:00.500Z",
+            },
+            {
+              role: "tool",
+              content: "second result",
+              tool_name: "web_fetch",
+              tool_args: { url: "https://b.example" },
+              tool_result: "second result",
+              ts: "2026-09-09T08:00:01.000Z",
+            },
+          ],
+        };
+      }
+      return null;
+    });
+    render(
+      <SkillsPanel bots={[baseBot]} defaultBotId="bot-1" onOpenRecord={() => {}} />,
+    );
+    await waitFor(() => {
+      expect(screen.getByText("fetch-sf-weather")).toBeInTheDocument();
+    });
+
+    // The Last-run toggle is rendered and the view is
+    // collapsed by default.
+    const toggle = screen.getByTestId("skill-last-run-toggle");
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    expect(screen.queryByTestId("skill-last-run-view")).not.toBeInTheDocument();
+
+    // Expand.
+    await user.click(toggle);
+    await waitFor(() => {
+      expect(screen.getByTestId("skill-last-run-view")).toBeInTheDocument();
+    });
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+
+    // The trace rendered: 2 steps.
+    const steps = screen.getAllByTestId("skill-last-run-step");
+    expect(steps.length).toBe(2);
+    // Trigger input rendered.
+    expect(screen.getByText(/morning check/i)).toBeInTheDocument();
+
+    // Collapse.
+    await user.click(toggle);
+    await waitFor(() => {
+      expect(screen.queryByTestId("skill-last-run-view")).not.toBeInTheDocument();
+    });
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+  });
+
+  it("renders an empty-state message when a skill has never been run", async () => {
+    const user = userEvent.setup();
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "skill_list") return [sampleSkill];
+      if (cmd === "skill_run_history") return [];
+      if (cmd === "skill_run_last_trace") return null;
+      return null;
+    });
+    render(
+      <SkillsPanel bots={[baseBot]} defaultBotId="bot-1" onOpenRecord={() => {}} />,
+    );
+    await waitFor(() => {
+      expect(screen.getByText("fetch-sf-weather")).toBeInTheDocument();
+    });
+    await user.click(screen.getByTestId("skill-last-run-toggle"));
+    await waitFor(() => {
+      expect(screen.getByText(/hasn't been run yet/i)).toBeInTheDocument();
+    });
+  });
 });
