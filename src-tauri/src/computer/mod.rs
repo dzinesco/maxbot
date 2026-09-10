@@ -43,6 +43,7 @@
 //!   the server; returns the count of domains.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use chrono::Utc;
@@ -53,6 +54,7 @@ use tokio::sync::Mutex;
 use super::storage::db::Database;
 use crate::storage::Settings;
 
+use self::input::{render_xdotool_script, InputEvent};
 use self::keys::KeyError;
 use self::libvirt::LibvirtError;
 use self::provision::{ProvisionError, ProvisionOptions};
@@ -117,6 +119,27 @@ pub enum ComputerError {
     /// stay as `Ssh` / `Libvirt`).
     #[error("computer: domain '{vm_name}' not found on host")]
     DomainNotFound { vm_name: String },
+    /// v3.7.9: `computer_input_event` was called for a
+    /// bot that doesn't have an active driving flag.
+    /// The renderer fires this command after the user
+    /// clicks "Drive" (which sets the flag via
+    /// `input_open`). If the user clicks "Hand back" the
+    /// flag clears, and a stale pointermove from a
+    /// partially-flushed event queue will hit this. The
+    /// error is non-fatal — the renderer can swallow it
+    /// silently because the user has already handed back.
+    #[error("not driving bot '{0}' (computer_input_event called without input_open)")]
+    NotDriving(String),
+    /// v3.7.9: the rendered xdotool command exited
+    /// non-zero. The renderer should surface the stderr
+    /// to the user; the common cause is x11vnc not being
+    /// up yet (cloud-init hasn't finished) or a malformed
+    /// xdotool key name.
+    #[error("xdotool exited {exit_code:?}: {stderr}")]
+    XdoTool {
+        exit_code: Option<i32>,
+        stderr: String,
+    },
 }
 
 impl From<SshError> for ComputerError {
@@ -241,6 +264,19 @@ pub struct ComputerManager {
     /// Cached port range. Read from settings at startup;
     /// updated on `set_port_range`.
     port_range: Mutex<(u16, u16)>,
+    /// v3.7.9: per-Bot driving flag. The renderer's
+    /// ComputerPanel sets this to `true` when the user
+    /// clicks "Drive" (which starts forwarding pointer +
+    /// keyboard events to xdotool) and clears it on
+    /// "Hand back". `is_driving` is consulted by the
+    /// `vm_computer_use` tool — when a Bot's flag is on,
+    /// the tool refuses to run xdotool/scrot itself so
+    /// the user's events and the agent's events don't
+    /// fight for the same X11 session. The map is
+    /// `BotId → Arc<AtomicBool>` so the AtomicBool can
+    /// be shared cheaply with the read-only `is_driving`
+    /// checks under a short lock.
+    driving: Mutex<HashMap<String, Arc<AtomicBool>>>,
 }
 
 impl ComputerManager {
@@ -253,6 +289,7 @@ impl ComputerManager {
             libvirt: libvirt::LibvirtClient::new(),
             takeover_tunnels: Mutex::new(HashMap::new()),
             port_range: Mutex::new(port_range),
+            driving: Mutex::new(HashMap::new()),
         }
     }
 
@@ -638,6 +675,92 @@ impl ComputerManager {
         bot_id: &str,
     ) -> Result<(), ComputerError> {
         self.takeover_tunnels.lock().await.remove(bot_id);
+        Ok(())
+    }
+
+    // ----- v3.7.9: in-panel click-through takeover -----
+    //
+    // The driving flag gates both directions of the
+    // user-vs-agent race for the same X11 session:
+    //   * `input_open` (renderer) sets it to true.
+    //   * `vm_computer_use` (tool) refuses while it's true.
+    //   * `input_close` (renderer) clears it on Hand back.
+    //
+    // The map is `BotId → Arc<AtomicBool>`. The
+    // `AtomicBool` is shared by `is_driving` (read-only)
+    // and `input_event` (which sets nothing but reads
+    // before dispatching). We hold the outer map mutex
+    // briefly to look up or insert the entry, then drop
+    // it before doing the actual SSH work — so a slow
+    // SSH round-trip doesn't block other bots'
+    // `is_driving` checks.
+
+    /// `computer_input_open(bot_id)` — set the per-Bot
+    /// driving flag. The bot's `vm_computer_use` tool
+    /// consults this and refuses while it's true. Called
+    /// by the renderer when the user clicks "Drive" on
+    /// the ComputerPanel.
+    pub async fn input_open(&self, bot_id: &str) -> Result<(), ComputerError> {
+        let mut map = self.driving.lock().await;
+        map.entry(bot_id.to_string())
+            .or_insert_with(|| Arc::new(AtomicBool::new(false)))
+            .store(true, Ordering::SeqCst);
+        Ok(())
+    }
+
+    /// `computer_input_close(bot_id)` — clear the per-Bot
+    /// driving flag. Idempotent: safe to call even if
+    /// `input_open` was never called (the no-op case is
+    /// the renderer's `Hand back` after a misclick). The
+    /// entry stays in the map (cheap; one Arc) so the next
+    /// `input_open` reuses the same `AtomicBool` instead
+    /// of allocating a new one.
+    pub async fn input_close(&self, bot_id: &str) -> Result<(), ComputerError> {
+        let map = self.driving.lock().await;
+        if let Some(flag) = map.get(bot_id) {
+            flag.store(false, Ordering::SeqCst);
+        }
+        Ok(())
+    }
+
+    /// `is_driving(bot_id)` — non-mutating check used by
+    /// `vm_computer_use::execute`. Returns false for an
+    /// unknown bot — the conservative default, since a
+    /// bot with no flag was never opted into driving.
+    pub async fn is_driving(&self, bot_id: &str) -> bool {
+        let map = self.driving.lock().await;
+        map.get(bot_id)
+            .map(|f| f.load(Ordering::SeqCst))
+            .unwrap_or(false)
+    }
+
+    /// `computer_input_event(bot_id, event)` — render the
+    /// event to an xdotool command and run it on the VM.
+    /// Refuses if the driving flag is off (guards against
+    /// a stale renderer that sends events after Hand back).
+    /// On SSH error, surfaces `ComputerError::Ssh`; on
+    /// non-zero xdotool exit, surfaces `XdoTool` with the
+    /// captured stderr.
+    pub async fn input_event(
+        &self,
+        bot_id: &str,
+        event: &InputEvent,
+    ) -> Result<(), ComputerError> {
+        if !self.is_driving(bot_id).await {
+            return Err(ComputerError::NotDriving(bot_id.to_string()));
+        }
+        let script = render_xdotool_script(event);
+        let pool = self.ssh_pool();
+        let out = pool
+            .vm_exec(bot_id, &script)
+            .await
+            .map_err(|e| ComputerError::Ssh(e.to_string()))?;
+        if !out.success {
+            return Err(ComputerError::XdoTool {
+                exit_code: out.exit_code,
+                stderr: out.stderr,
+            });
+        }
         Ok(())
     }
 
@@ -1709,6 +1832,129 @@ mod tests {
             Ok(local_port) => panic!(
                 "expected error from exhausted port range, got ok: {local_port}"
             ),
+        }
+    }
+
+    // ----- v3.7.9: per-Bot driving flag for the
+    // in-panel click-through takeover. The flag gates
+    // both `input_event` (renderer-driven xdotool) and
+    // `vm_computer_use` (agent-driven xdotool). The
+    // tests below pin the lifecycle: unknown bot is
+    // not driving; `input_open` flips it on;
+    // `input_close` flips it off; `input_close` is
+    // idempotent; and `input_event` refuses when the
+    // flag is off (so a stale renderer can't sneak
+    // events through after Hand back).
+
+    /// Fresh manager: every bot is "not driving". The
+    /// conservative default — an unknown bot never
+    /// opts in.
+    #[tokio::test]
+    async fn driving_flag_defaults_to_false_for_unknown_bot() {
+        let db_dir = tempfile::TempDir::new().expect("tempdir");
+        let db_path = db_dir.path().join("test.sqlite");
+        let mgr = make_test_manager(&db_path);
+        assert!(!mgr.is_driving("never-opened").await);
+        assert!(!mgr.is_driving("bot-1").await);
+    }
+
+    /// `input_open` flips the flag on. Reading
+    /// `is_driving` after `input_open` must return true.
+    #[tokio::test]
+    async fn driving_flag_input_open_flips_to_true() {
+        let db_dir = tempfile::TempDir::new().expect("tempdir");
+        let db_path = db_dir.path().join("test.sqlite");
+        let mgr = make_test_manager(&db_path);
+        mgr.input_open("bot-1").await.expect("input_open");
+        assert!(mgr.is_driving("bot-1").await);
+    }
+
+    /// `input_close` after `input_open` flips the flag
+    /// back to false. The map entry stays around (we
+    /// don't remove on close — see the doc comment on
+    /// `input_close`) so the next `input_open` reuses
+    /// the same `AtomicBool`.
+    #[tokio::test]
+    async fn driving_flag_input_close_flips_to_false() {
+        let db_dir = tempfile::TempDir::new().expect("tempdir");
+        let db_path = db_dir.path().join("test.sqlite");
+        let mgr = make_test_manager(&db_path);
+        mgr.input_open("bot-1").await.expect("input_open");
+        assert!(mgr.is_driving("bot-1").await);
+        mgr.input_close("bot-1").await.expect("input_close");
+        assert!(!mgr.is_driving("bot-1").await);
+    }
+
+    /// `input_close` is idempotent. The renderer's
+    /// "Hand back" button might be clicked twice (or
+    /// clicked before "Drive" was ever clicked) and
+    /// the second call must not error or panic.
+    #[tokio::test]
+    async fn driving_flag_input_close_is_idempotent() {
+        let db_dir = tempfile::TempDir::new().expect("tempdir");
+        let db_path = db_dir.path().join("test.sqlite");
+        let mgr = make_test_manager(&db_path);
+        // Never called input_open — close on a fresh
+        // bot must still succeed.
+        mgr.input_close("never-opened").await.expect("close on never-opened");
+        // After open + close, another close must
+        // succeed (no error, no panic).
+        mgr.input_open("bot-1").await.expect("input_open");
+        mgr.input_close("bot-1").await.expect("first close");
+        mgr.input_close("bot-1").await.expect("second close");
+        assert!(!mgr.is_driving("bot-1").await);
+    }
+
+    /// `input_event` returns `NotDriving` when the
+    /// flag is off. We don't need a real VM endpoint
+    /// to test this — the gate fires before the SSH
+    /// call. The test pins the error variant and the
+    /// bot id in the error so the renderer's error
+    /// handling can rely on the shape.
+    #[tokio::test]
+    async fn input_event_refuses_when_flag_is_off() {
+        let db_dir = tempfile::TempDir::new().expect("tempdir");
+        let db_path = db_dir.path().join("test.sqlite");
+        let mgr = make_test_manager(&db_path);
+        // No input_open — flag is off.
+        let event = InputEvent::PointerMove { x: 10, y: 20 };
+        let result = mgr.input_event("bot-1", &event).await;
+        match result {
+            Err(ComputerError::NotDriving(bot)) => {
+                assert_eq!(bot, "bot-1");
+            }
+            Err(other) => panic!("expected NotDriving, got: {other:?}"),
+            Ok(()) => panic!("expected NotDriving, got Ok"),
+        }
+    }
+
+    /// `input_event` does NOT check the flag only on
+    /// `PointerMove` — every variant should be refused
+    /// when the flag is off. The test covers Type, Key,
+    /// Wheel, PointerDown, PointerUp in addition to
+    /// PointerMove so a future refactor that adds a
+    /// "harmless" precheck for some variants doesn't
+    /// slip through.
+    #[tokio::test]
+    async fn input_event_refuses_every_variant_when_flag_is_off() {
+        let db_dir = tempfile::TempDir::new().expect("tempdir");
+        let db_path = db_dir.path().join("test.sqlite");
+        let mgr = make_test_manager(&db_path);
+        let events: Vec<InputEvent> = vec![
+            InputEvent::PointerMove { x: 0, y: 0 },
+            InputEvent::PointerDown { x: 0, y: 0, button: 1 },
+            InputEvent::PointerUp { x: 0, y: 0, button: 1 },
+            InputEvent::Wheel { x: 0, y: 0, delta_y: 1 },
+            InputEvent::KeyDown { name: "Return".into() },
+            InputEvent::KeyUp { name: "Return".into() },
+            InputEvent::Type { text: "x".into() },
+        ];
+        for ev in &events {
+            let result = mgr.input_event("bot-1", ev).await;
+            assert!(
+                matches!(result, Err(ComputerError::NotDriving(_))),
+                "variant {ev:?} should be refused with NotDriving, got: {result:?}"
+            );
         }
     }
 }
