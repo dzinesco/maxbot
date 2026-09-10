@@ -11,10 +11,14 @@
 //!    `provision-vm.sh` does the genisoimage + virt-install).
 //! 4. SSH to the server and run
 //!    `sudo -n /opt/maxbot/provision-vm.sh <name> <disk_gb>
-//!    <ram_mb> <ssh_pubkey> <vnc_password>`. The script
-//!    handles the qcow2 overlay, ISO generation, and
-//!    `virt-install --import`. It returns the libvirt domain
-//!    name on stdout.
+//!    <ram_mb> <ssh_pubkey>`. The script handles the
+//!    qcow2 overlay, ISO generation, and `virt-install --import`.
+//!    It returns the libvirt domain name on stdout.
+//!    (v3.7.5: the 5th positional arg `<vnc_password>` is gone.
+//!    The QEMU VNC server now runs with `auth=none` — the
+//!    SSH-tunnel + loopback-bind is the only gate, same as
+//!    before, but the macOS Screen Sharing takeover no longer
+//!    prompts for a password the user has to hunt down.)
 //! 5. Poll `virsh net-dhcp-leases default` every 2s up to
 //!    90s for the VM's IP. dnsmasq returns the lease as
 //!    soon as the VM's NIC comes up — much faster than
@@ -34,7 +38,6 @@
 
 use std::time::Duration;
 
-use rand::Rng;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -103,22 +106,7 @@ pub async fn provision_vm(
     let (pkcs8, public_key) =
         keys::generate_keypair().map_err(|e| ProvisionError::Ssh(e.to_string()))?;
 
-    // 2. VNC password: 12 random base64url chars. This
-    //    isn't the long-term secret (the per-Bot SSH
-    //    keypair is), but it stops casual network
-    //    snooping. Picked to fit in 8 chars (x11vnc's
-    //    max) with a 4-char buffer.
-    let vnc_password: String = {
-        use rand::rngs::OsRng;
-        let mut bytes = [0u8; 9];
-        OsRng.fill(&mut bytes);
-        // base64url then trim to 8 chars.
-        use base64::Engine as _;
-        let s = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
-        s.chars().take(8).collect()
-    };
-
-    // 3. The libvirt domain name. Includes the bot_id
+    // 2. The libvirt domain name. Includes the bot_id
     //    so it's recognizable in `virsh list`. Bot_ids
     //    are uuid4, so the prefix is safe.
     let vm_name = format!("maxbot-bot-{}", sanitize_for_libvirt(bot_id));
@@ -135,33 +123,28 @@ pub async fn provision_vm(
     // though the VM was up and reachable.
     let hostname = format!("maxbot-bot-{}", sanitize_for_hostname(bot_id));
 
-    // 4. Build the cloud-init payload — but defer
+    // 3. Build the cloud-init payload — but defer
     //    genisoimage to the server-side script. We
-    //    need to pass the SSH pubkey and VNC password
-    //    to the script. The script writes its own
-    //    user-data based on these inputs.
+    //    pass the SSH pubkey to the script. The script
+    //    writes its own user-data based on this input.
     //
     //    The script's user-data template is in
     //    `provision-vm.sh`; it embeds the same fields
     //    our `build_user_data` produces, with the
-    //    pubkey + vnc_password substituted. Keeping
-    //    the template server-side avoids us having
-    //    to upload a 1KB blob over SSH.
+    //    pubkey substituted. Keeping the template
+    //    server-side avoids us having to upload a 1KB
+    //    blob over SSH.
 
-    // 5. SSH to the server and run provision-vm.sh.
-    //    We pass the pubkey + password as command-line
-    //    args; they're not secrets-after-creation
-    //    (the password is in the cloud-init ISO
-    //    anyway), and the pubkey is the public half
-    //    of a keypair. The ssh connection to the
-    //    server uses the OS keychain.
+    // 4. SSH to the server and run provision-vm.sh.
+    //    The pubkey is the public half of a keypair.
+    //    The ssh connection to the server uses the OS
+    //    keychain.
     let cmd = format!(
-        "sudo -n /opt/maxbot/provision-vm.sh {} {} {} '{}' '{}'",
+        "sudo -n /opt/maxbot/provision-vm.sh {} {} {} '{}'",
         shell_quote(&vm_name),
         opts.disk_gb,
         opts.ram_mb,
         shell_quote(&public_key),
-        shell_quote(&vnc_password),
     );
     let out = pool
         .server_exec(&cmd)
@@ -197,7 +180,7 @@ pub async fn provision_vm(
         return Err(ProvisionError::NoDomainName);
     }
 
-    // 6. Cache the freshly-generated private key in
+    // 5. Cache the freshly-generated private key in
     //    the pool so the orchestrator's subsequent
     //    `vm_exec` calls work without re-decrypting
     //    (the encrypted blob hasn't been written to
@@ -206,13 +189,13 @@ pub async fn provision_vm(
     pool.cache_key_blob(bot_id, std::sync::Arc::new(pkcs8.clone()))
         .await;
 
-    // 7. Poll for the IP. dnsmasq returns the lease
+    // 6. Poll for the IP. dnsmasq returns the lease
     //    within ~30s of NIC-up; we wait up to 90s.
     let ip = poll_for_ip(libvirt, pool, &hostname, Duration::from_secs(90))
         .await
         .map_err(|e| ProvisionError::Ssh(e.to_string()))?;
 
-    // 8. VNC port. `virsh vncdisplay` is a single
+    // 7. VNC port. `virsh vncdisplay` is a single
     //    round-trip; if it fails (rare — would mean
     //    the domain is still being defined), retry a
     //    couple of times.
@@ -220,7 +203,7 @@ pub async fn provision_vm(
         .await
         .map_err(|e| ProvisionError::Libvirt(e.to_string()))?;
 
-    // 9. v3.0.5: wait for the QEMU guest agent to
+    // 8. v3.0.5: wait for the QEMU guest agent to
     //    become responsive. `provision-vm.sh` only
     //    waits for the VM to be defined; cloud-init's
     //    `packages:` block (xfce4, x11vnc,

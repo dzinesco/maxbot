@@ -4,6 +4,71 @@ All notable changes to MaxBot are documented in this file. The format
 follows [Keep a Changelog](https://keepachangelog.com/) and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## v3.7.5 — 2026-09-10
+
+### Changed — QEMU VNC `auth=none`; macOS Screen Sharing no longer prompts for a password (Hardening item #1)
+
+The v3.7.2 takeover flow opens macOS Screen Sharing to the
+Bot's VNC display over the existing `ssh -L` tunnel. The
+script-side VNC password was already removed in v2.0.3 (the
+Rust side still generated one, sent it to the script, and
+the script discarded it — see the v2.0.3 header comment in
+`provision-vm.sh`). QEMU 9.x on Ubuntu 25.10 still prompted
+macOS for a password, though — `--graphics vnc,listen=...`
+without an explicit auth let QEMU default to VNC's DES
+challenge, and Screen Sharing dutifully asked for it. Tyler
+had to hunt the password down to use Takeover, which broke
+the "Take over for 2FA" path the v3.7.5 2FA walkthrough
+relies on.
+
+- **`src-tauri/scripts/provision-vm.sh`** — after
+  `virt-install` defines the domain, a `virsh dumpxml
+  | python3 | virsh define /dev/stdin` step injects
+  a `<qemu:commandline>` block with
+  `-vnc 127.0.0.1:0,password=off,to=5999`. The first
+  attempt was to set `auth='none'` on the `<graphics>`
+  element; rejected by libvirt 11.6.0 ("Unknown
+  --graphics options: ['auth']"). The second attempt
+  was to pass `auth=none` to QEMU's `-vnc` via
+  `<qemu:commandline>`; rejected by QEMU 9.x on
+  Ubuntu 25.10 ("Invalid parameter 'auth'"). The
+  third attempt — `password=off` via
+  `<qemu:commandline>` — was accepted and verified
+  end-to-end: standalone QEMU bound to 127.0.0.1:0
+  and the RFB handshake advertises VNC_AUTH_NONE
+  only (security type 1, server returns 4 zero bytes
+  after the client selects type 1). `to=5999` lets
+  QEMU pick any free port in 5900-5999; the running
+  test VM ended up on display 50 (port 5950) because
+  5900-5908 were already in use. The patch uses
+  Python (multi-line regex, can't be done with a
+  single sed) to inject the qemu:commandline and
+  add the `xmlns:qemu` namespace declaration. Header
+  comment gains a v3.7.5 block explaining the three
+  failed attempts and the working path. The 5th
+  positional arg (`<vnc_password>`) is preserved-
+  and-ignored for API compatibility; the v2.0.3
+  comment is unchanged.
+- **`src-tauri/src/computer/provision.rs`** — the per-Bot
+  VNC password generation (8 base64url chars via
+  `OsRng.fill`) and the corresponding command-line arg are
+  gone. The 5-arg invocation becomes 4-arg. The `rand::Rng`
+  import goes with it (no other use in this file). Doc
+  comment at the top of the file explains the v3.7.5
+  drop. The comment numbering inside `provision_vm` is
+  renumbered 1-8 (was 1-9).
+- **Trust model unchanged.** SSH-gated tunnel + libvirt
+  loopback bind is still the only gate. macOS Screen
+  Sharing now connects without prompting. Existing VMs
+  (e.g. `maxbot-bot-ba979435-8…`) keep their old domain
+  XML; Destroy + re-provision picks up the new `auth=none`.
+  The v3.7.5 2FA walkthrough's first step is no longer
+  "find a password."
+
+(More v3.7.5 work — the 2FA walkthrough, `docs/2fa-walkthrough.md`,
+and "Stop now" cancel-verification — lands in subsequent commits
+on the v3.7.5 branch before the v3.7.5 tag.)
+
 ## v3.7.4 — 2026-09-10
 
 ### Changed — noVNC / x11vnc / tigervnc references swept (Hardening items #2 + #5)

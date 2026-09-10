@@ -23,6 +23,27 @@
 # is unchanged. The 5th positional argument is preserved (and
 # ignored) for API compatibility with the Rust side.
 #
+# v3.7.5: patch the libvirt domain XML post-create to inject
+# `<qemu:commandline>` with `-vnc 127.0.0.1:0,password=off,to=5999`.
+# macOS Screen Sharing prompts for a VNC password on Takeover because
+# QEMU 9.x defaults to VNC's DES challenge even with no password set.
+# The v2.0.3 fix relied on QEMU's default (no password → no auth), but
+# the default changed in QEMU 9.x / Ubuntu 25.10. We tried:
+#   (a) `auth=none` via virt-install's `--graphics` — rejected by
+#       libvirt 11.6.0 ("Unknown --graphics options: ['auth']").
+#   (b) `auth=none` via qemu:commandline — rejected by QEMU 9.x
+#       ("Invalid parameter 'auth'").
+#   (c) `password=off` via qemu:commandline — accepted by QEMU;
+#       RFB handshake advertises VNC_AUTH_NONE only (verified
+#       end-to-end on maxbot-bot-8eb75d73 on 2026-09-10).
+# The qemu:commandline is appended after virt-install, via
+# `virsh dumpxml | python3 | virsh define /dev/stdin`. Trust model
+# unchanged: SSH-gated tunnel, libvirt loopback bind, only the
+# MaxBot process ever has SSH access. Removes the password prompt
+# so the 2FA walkthrough (the rest of v3.7.5) doesn't have a
+# "hunt the password" step before it can start. Existing VMs need
+# Destroy + re-provision to pick up the new auth.
+#
 # v2.1: ensure sshd is up + the bot user is authorized BEFORE
 # the long packages: install runs. Without this, the cold-cache
 # smoke test (provision_e2e_against_crispy) saw port 22 refuse
@@ -213,6 +234,30 @@ genisoimage -output "$VM_DIR/seed.iso" -volid cidata -joliet -rock "$USER_DATA" 
 # 4. Define the libvirt domain.
 #    VNC is bound to 127.0.0.1 — the Mac tunnels it via `ssh -L` in
 #    the Tauri VNC proxy (see src-tauri/src/computer/vnc.rs).
+#
+#    v3.7.5: the libvirt domain XML gets a `<qemu:commandline>` block
+#    that adds `-vnc 127.0.0.1:0,password=off,to=5999` to the QEMU
+#    command line. This disables VNC password auth so macOS Screen
+#    Sharing connects without prompting for a password.
+#
+#    Why `password=off` via qemu:commandline instead of
+#    `--graphics vnc,auth=none`:
+#      - libvirt 11.6.0 doesn't accept `auth` as a `<graphics>`
+#        attribute (only `vnc` and `sasl` are valid).
+#      - QEMU 9.x on Ubuntu 25.10 rejects `auth=none` as an
+#        "Invalid parameter" on the `-vnc` option.
+#      - QEMU 9.x accepts `password=off` (verified: standalone
+#        QEMU binds to 127.0.0.1:0 and RFB handshake advertises
+#        VNC_AUTH_NONE only — no password needed).
+#      - The `to=5999` lets QEMU pick any free port in 5900-5999.
+#    Trust model unchanged: SSH-gated tunnel + libvirt loopback
+#    bind is the only real gate. macOS Screen Sharing no longer
+#    prompts. Verified end-to-end against the test VM
+#    (maxbot-bot-8eb75d73) on 2026-09-10.
+#
+#    Existing VMs need Destroy + re-provision (or `virsh shutdown`
+#    + start) to pick up the new auth — see the v3.7.5 entry in
+#    CHANGELOG.md.
 virt-install \
   --name "$VM_NAME" \
   --memory "$RAM_MB" \
@@ -224,6 +269,34 @@ virt-install \
   --network bridge=virbr0,model=virtio \
   --graphics vnc,listen=127.0.0.1,port=-1 \
   --noautoconsole
+
+# 4a. Patch the domain XML to inject `<qemu:commandline>` with
+#     `-vnc 127.0.0.1:0,password=off,to=5999`. Uses Python (always
+#     present on Ubuntu) for the multi-line regex; the previous
+#     sed-only approach didn't handle the namespace declaration
+#     cleanly. The new XML is fed to `virsh define /dev/stdin` so
+#     the persistent config carries the new auth.
+virsh dumpxml "$VM_NAME" | python3 -c "
+import re, sys
+x = sys.stdin.read()
+x = re.sub(r'<qemu:commandline>.*?</qemu:commandline>', '', x, flags=re.DOTALL)
+x = re.sub(r\"\"\"\\sxmlns:qemu=['\\\"][^'\\\"]+['\\\"]\"\"\", '', x)
+if 'xmlns:qemu' not in x:
+    x = x.replace(
+        '<domain type=',
+        \"<domain xmlns:qemu='http://libvirt.org/schemas/domain/qemu/1.0' type=\",
+        1,
+    )
+qemu_block = (
+    '<qemu:commandline>'
+    \"<qemu:arg value='-vnc'/>\"
+    \"<qemu:arg value='127.0.0.1:0,password=off,to=5999'/>\"
+    '</qemu:commandline>'
+    '</domain>'
+)
+x = x.replace('</domain>', qemu_block, 1)
+sys.stdout.write(x)
+" | virsh define /dev/stdin
 
 # 5. Return the libvirt domain name
 echo "$VM_NAME"
