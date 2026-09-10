@@ -21,6 +21,7 @@ const POLL_INTERVAL_MS = 10_000;
 type FetchState =
   | { kind: "loading" }
   | { kind: "ready"; data: ActivityFeedData }
+  | { kind: "stale"; data: ActivityFeedData; message: string }
   | { kind: "error"; message: string };
 
 function statusLabel(status: string): string {
@@ -93,7 +94,18 @@ export function ActivityFeed() {
       const data = await listRecentActivity();
       setState({ kind: "ready", data });
     } catch (e) {
-      setState({ kind: "error", message: String(e) });
+      // v3.0.0 polish: keep showing the last good data when
+      // a poll fails, and surface the error as a small inline
+      // "couldn't refresh" pill instead of replacing the
+      // whole feed with an error message. The data was
+      // already read on the first successful poll, so the
+      // user can keep reading while we try again in 10s.
+      setState((prev) => {
+        if (prev.kind === "ready") {
+          return { kind: "stale", data: prev.data, message: String(e) };
+        }
+        return { kind: "error", message: String(e) };
+      });
     }
   };
 
@@ -112,6 +124,7 @@ export function ActivityFeed() {
           className="activity-feed-refresh"
           onClick={refresh}
           aria-label="Refresh activity"
+          title="Refresh now"
         >
           ↻
         </button>
@@ -135,61 +148,73 @@ export function ActivityFeed() {
         </div>
       )}
 
-      {state.kind === "ready" && !isEmpty(state.data) && (
-        <>
-          {state.data.bot_runs.length > 0 && (
-            <div className="activity-section" data-testid="activity-bots">
-              <h4>Bots</h4>
-              <ul>
-                {state.data.bot_runs.map((r) => (
-                  <Row
-                    key={r.id}
-                    id={r.id}
-                    primary={`#${shortId(r.id)}`}
-                    secondary={r.bot_id}
-                    status={r.status}
-                    when={relativeTime(r.started_at)}
-                  />
-                ))}
-              </ul>
-            </div>
-          )}
-          {state.data.skill_runs.length > 0 && (
-            <div className="activity-section" data-testid="activity-skills">
-              <h4>Skills</h4>
-              <ul>
-                {state.data.skill_runs.map((r) => (
-                  <Row
-                    key={r.id}
-                    id={r.id}
-                    primary={`#${shortId(r.id)}`}
-                    secondary={r.skill_id}
-                    status={r.status}
-                    when={relativeTime(r.started_at)}
-                  />
-                ))}
-              </ul>
-            </div>
-          )}
-          {state.data.approvals.length > 0 && (
-            <div className="activity-section" data-testid="activity-approvals">
-              <h4>Approvals</h4>
-              <ul>
-                {state.data.approvals.map((a) => (
-                  <Row
-                    key={a.id}
-                    id={a.id}
-                    primary={a.tool_name}
-                    secondary={a.bot_id}
-                    status={a.status}
-                    when={relativeTime(a.created_at)}
-                  />
-                ))}
-              </ul>
-            </div>
-          )}
-        </>
+      {state.kind === "stale" && (
+        <div
+          className="activity-feed-stale"
+          data-testid="activity-stale"
+          role="status"
+        >
+          <span className="activity-feed-stale-dot" aria-hidden="true" />
+          <span>couldn't refresh — showing last good data</span>
+        </div>
       )}
+
+      {(state.kind === "ready" || state.kind === "stale") &&
+        !isEmpty(state.data) && (
+          <>
+            {state.data.bot_runs.length > 0 && (
+              <div className="activity-section" data-testid="activity-bots">
+                <h4>Bots</h4>
+                <ul>
+                  {state.data.bot_runs.map((r) => (
+                    <Row
+                      key={r.id}
+                      id={r.id}
+                      primary={`#${shortId(r.id)}`}
+                      secondary={r.bot_id}
+                      status={r.status}
+                      when={relativeTime(r.started_at)}
+                    />
+                  ))}
+                </ul>
+              </div>
+            )}
+            {state.data.skill_runs.length > 0 && (
+              <div className="activity-section" data-testid="activity-skills">
+                <h4>Skills</h4>
+                <ul>
+                  {state.data.skill_runs.map((r) => (
+                    <Row
+                      key={r.id}
+                      id={r.id}
+                      primary={`#${shortId(r.id)}`}
+                      secondary={r.skill_id}
+                      status={r.status}
+                      when={relativeTime(r.started_at)}
+                    />
+                  ))}
+                </ul>
+              </div>
+            )}
+            {state.data.approvals.length > 0 && (
+              <div className="activity-section" data-testid="activity-approvals">
+                <h4>Approvals</h4>
+                <ul>
+                  {state.data.approvals.map((a) => (
+                    <Row
+                      key={a.id}
+                      id={a.id}
+                      primary={a.tool_name}
+                      secondary={a.bot_id}
+                      status={a.status}
+                      when={relativeTime(a.created_at)}
+                    />
+                  ))}
+                </ul>
+              </div>
+            )}
+          </>
+        )}
     </section>
   );
 }

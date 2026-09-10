@@ -1,6 +1,8 @@
 /* MaxBot UI styles. Hand-rolled, no framework. The look-and-feel is the
  * "dark, dense, focused" chat client — same family as Cursor's own UI, with
- * a violet/blue accent that matches the dock icon. */
+ * an Electric Blue accent that reads as "trust" and pairs with both light
+ * and dark UI. v3.0.0 polish: moved off the violet/lila palette and off
+ * Inter to a more characterful system sans. */
 
 :root {
   --bg-0: #0e0e10;
@@ -13,9 +15,14 @@
   --text-1: #d4d4d8;
   --text-2: #a1a1aa;
   --text-3: #71717a;
-  --accent: #7c3aed;
-  --accent-hover: #8b5cf6;
-  --accent-soft: rgba(124, 58, 237, 0.18);
+  /* Electric Blue — single accent, saturation <80%. v3.0.0
+   * moved off the violet/lila "every SaaS dashboard" palette
+   * (Section 3 Rule 2: THE LILA BAN). The hover is a touch
+   * lighter; the soft is the 18% alpha version used for
+   * focus rings, selected rows, and bot chips. */
+  --accent: #2563eb;
+  --accent-hover: #1d4ed8;
+  --accent-soft: rgba(37, 99, 235, 0.18);
   --danger: #ef4444;
   --success: #22c55e;
   /* Tool category palette — used by the tool-call card's
@@ -37,8 +44,15 @@
    * network fetch — falls back to system-ui elsewhere. */
   --font-display: "Avenir Next", "Avenir Next Condensed Demi Bold",
     "Avenir", system-ui, sans-serif;
-  --font-sans: -apple-system, BlinkMacSystemFont, "Inter", "SF Pro Text",
-    "Segoe UI", system-ui, sans-serif;
+  /* Body sans. v3.0.0 dropped Inter (Skill Section 7: "NO
+   * Inter Font") in favor of a more characterful system
+   * sans that ships on macOS / iOS by default. The fallback
+   * chain tries a few humanist / geometric faces before
+   * landing on the system stack — no webfont dep, no
+   * network fetch. */
+  --font-sans: "Public Sans", "Outfit", "SF Pro Text",
+    -apple-system, BlinkMacSystemFont, "Segoe UI",
+    system-ui, sans-serif;
   --font-mono: "JetBrains Mono", "SF Mono", "Menlo", "Consolas", monospace;
 }
 
@@ -73,7 +87,18 @@ button {
   border-radius: var(--radius-sm);
   padding: 6px 10px;
   cursor: pointer;
-  transition: background 80ms ease, border-color 80ms ease;
+  /* `:where()` keeps specificity at 0 so any local transform
+   * (a hover lift on a card, an existing `:active` scale)
+   * still wins. The 80ms transition is the tactile-feedback
+   * "settle" timing — fast enough to feel like a press, slow
+   * enough to not snap. v3.0.0 polish: Skill Section 3
+   * Rule 5 — every button gets a 1px press-down on :active. */
+  transition: background 80ms ease, border-color 80ms ease,
+    transform 80ms ease-out;
+}
+
+:where(button):active:not(:disabled) {
+  transform: translateY(1px);
 }
 
 button:hover:not(:disabled) {
@@ -125,7 +150,7 @@ textarea:focus {
 .app {
   display: grid;
   grid-template-columns: 260px 1fr;
-  height: 100vh;
+  height: 100dvh;
   background: var(--bg-0);
 }
 
@@ -213,7 +238,7 @@ textarea:focus {
   width: 22px;
   height: 22px;
   border-radius: 6px;
-  background: linear-gradient(135deg, #8b5cf6 0%, #7c3aed 50%, #4c1d95 100%);
+  background: linear-gradient(135deg, #2563eb 0%, #1d4ed8 50%, #1e3a8a 100%);
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -538,7 +563,7 @@ textarea:focus {
   width: 52px;
   height: 52px;
   border-radius: 14px;
-  background: linear-gradient(135deg, #8b5cf6 0%, #7c3aed 50%, #4c1d95 100%);
+  background: linear-gradient(135deg, #2563eb 0%, #1d4ed8 50%, #1e3a8a 100%);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -549,7 +574,7 @@ textarea:focus {
   color: #fff;
   margin-bottom: 6px;
   box-shadow:
-    0 10px 28px rgba(124, 58, 237, 0.32),
+    0 10px 28px rgba(37, 99, 235, 0.32),
     inset 0 1px 0 rgba(255, 255, 255, 0.18);
   position: relative;
   overflow: hidden;
@@ -675,17 +700,19 @@ textarea:focus {
   }
 }
 
-/* The assistant message body gets a faint violet wash so it
+/* The assistant message body gets a faint blue wash so it
  * reads as "the agent's response" without being a heavy card.
  * The user message stays borderless — user content is the
- * primary signal, assistant content is the secondary layer. */
+ * primary signal, assistant content is the secondary layer.
+ * v3.0.0: moved off the violet/lila wash onto the same
+ * Electric Blue as the brand mark. */
 .message.assistant .body {
   background: linear-gradient(
     180deg,
-    rgba(124, 58, 237, 0.04) 0%,
-    rgba(124, 58, 237, 0.02) 100%
+    rgba(37, 99, 235, 0.04) 0%,
+    rgba(37, 99, 235, 0.02) 100%
   );
-  border: 1px solid rgba(124, 58, 237, 0.10);
+  border: 1px solid rgba(37, 99, 235, 0.10);
   border-radius: var(--radius-md);
   padding: 8px 12px 10px;
 }
@@ -715,11 +742,11 @@ textarea:focus {
  * the same gradient as the empty-state mark and the sidebar
  * wordmark, tying the whole product together. */
 .message.assistant .avatar {
-  background: linear-gradient(135deg, #8b5cf6 0%, #7c3aed 50%, #4c1d95 100%);
+  background: linear-gradient(135deg, #2563eb 0%, #1d4ed8 50%, #1e3a8a 100%);
   color: #fff;
   font-size: 14px;
   font-weight: 800;
-  box-shadow: 0 2px 8px rgba(124, 58, 237, 0.24);
+  box-shadow: 0 2px 8px rgba(37, 99, 235, 0.24);
 }
 
 .message .body {
@@ -2387,7 +2414,7 @@ button.link:hover {
  * reserved. */
 .app-boot {
   background: var(--bg-0);
-  min-height: 100vh;
+  min-height: 100dvh;
 }
 
 /* The welcome surface itself. Mirrors the .main-empty spacing
@@ -2405,7 +2432,7 @@ button.link:hover {
   color: var(--text-2);
   padding: 60px 24px;
   animation: empty-fade 320ms ease-out;
-  min-height: 100vh;
+  min-height: 100dvh;
 }
 
 /* Scaled-up monogram. Same gradient and signature dot as the
@@ -2415,7 +2442,7 @@ button.link:hover {
   width: 78px;
   height: 78px;
   border-radius: 20px;
-  background: linear-gradient(135deg, #8b5cf6 0%, #7c3aed 50%, #4c1d95 100%);
+  background: linear-gradient(135deg, #2563eb 0%, #1d4ed8 50%, #1e3a8a 100%);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -2426,7 +2453,7 @@ button.link:hover {
   color: #fff;
   margin-bottom: 6px;
   box-shadow:
-    0 14px 36px rgba(124, 58, 237, 0.32),
+    0 14px 36px rgba(37, 99, 235, 0.32),
     inset 0 1px 0 rgba(255, 255, 255, 0.18);
   position: relative;
   overflow: hidden;
@@ -4868,8 +4895,340 @@ button.link:hover {
   font-size: 12px;
   color: var(--text-2, #888);
   padding: 8px 10px;
-  background: var(--bg-2, #1c1c1e);
+  background: var(--bg-2, #1c1c1c);
   border-radius: 6px;
   font-family: var(--mono, ui-monospace, monospace);
+}
+
+/* ---------- v3.0.0 polish ----------
+ *
+ * v3.0.0 is the integration release. The visual changes
+ * are concentrated here so a future maintainer can diff
+ * the v2.8.0 → v3.0.0 CSS without scrolling through
+ * 4800 lines. Categories:
+ *   - Skeletal loaders (shimmer keyframes + .skeleton line
+ *     classes for 1/2/3-line placeholders).
+ *   - Bot-avatar hover tooltip (styled label on top of the
+ *     browser's default `title=`).
+ *   - ActivityFeed (was unstyled in v2.8.0; now a compact
+ *     Cockpit-mode surface with sectioned lists + a
+ *     non-blocking "couldn't refresh" pill on poll error).
+ *   - Empty-state composition baseline (icon + headline +
+ *     body + optional CTA, shared by every __empty class).
+ *   - Tactile feedback (already added to the global
+ *     `button` rule at the top of the file — referenced
+ *     here so a maintainer can find it via this comment).
+ */
+
+/* --- Skeletal loaders (Skill Section 3 Rule 5:
+ * "Loading: Skeletal loaders matching layout sizes"). ---
+ * A 1-line, 2-line, 3-line placeholder for "loading chat
+ * history", "loading bots", "loading skills" etc. Uses
+ * a single shimmer keyframe so the placeholders don't
+ * desync when several appear on the same screen. The
+ * width is 100% by default; the optional inline `style`
+ * can override to match the natural width of the row
+ * it's standing in for. */
+.skeleton {
+  display: block;
+  height: 12px;
+  border-radius: 4px;
+  background: linear-gradient(
+    90deg,
+    var(--bg-2) 0%,
+    var(--bg-3) 50%,
+    var(--bg-2) 100%
+  );
+  background-size: 200% 100%;
+  animation: skeleton-shimmer 1.4s ease-in-out infinite;
+}
+
+.skeleton--2 {
+  height: 10px;
+  margin-top: 6px;
+  width: 70%;
+}
+
+.skeleton--3 {
+  height: 10px;
+  margin-top: 6px;
+  width: 45%;
+}
+
+.skeleton-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 12px;
+}
+
+@keyframes skeleton-shimmer {
+  0% {
+    background-position: 200% 0;
+  }
+  100% {
+    background-position: -200% 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .skeleton {
+    animation: none;
+  }
+}
+
+/* --- Bot-avatar hover tooltip (v3.0.0 polish). ---
+ * The browser's default `title=` attribute is still set
+ * (a11y, keyboard fallback, screen readers). The styled
+ * `::after` tooltip is for sighted users hovering with
+ * a mouse — the visual is the state name in a small
+ * pill, fading in below the avatar. */
+.bot-avatar {
+  /* The avatar becomes the positioning context for the
+   * hover pill. The pill is rendered via `data-bot-state`
+   * so we don't have to thread a new prop through the
+   * component. */
+  position: relative;
+}
+
+.bot-avatar[data-bot-state]::after {
+  content: attr(data-bot-state);
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 50%;
+  transform: translateX(-50%) translateY(-2px);
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: var(--bg-3);
+  color: var(--text-0);
+  border: 1px solid var(--border-strong);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 120ms ease, transform 120ms ease;
+  z-index: 50;
+  /* The pill sits above the avatar's own z-index stack
+   * (badges are 2, hover labels are 50) so it isn't
+   * covered by the state chip in the bottom-right
+   * corner. */
+}
+
+.bot-avatar:hover[data-bot-state]::after,
+.bot-avatar:focus-visible[data-bot-state]::after {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
+}
+
+/* State-specific tinting on the hover pill so the user
+ * gets a glance-readable signal: green for done, red for
+ * blocked, blue for working, etc. The base pill stays
+ * neutral. */
+.bot-avatar[data-bot-state="done"]::after {
+  background: rgba(34, 197, 94, 0.18);
+  border-color: rgba(34, 197, 94, 0.5);
+  color: rgb(134, 239, 172);
+}
+
+.bot-avatar[data-bot-state="blocked"]::after {
+  background: rgba(239, 68, 68, 0.18);
+  border-color: rgba(239, 68, 68, 0.5);
+  color: rgb(252, 165, 165);
+}
+
+.bot-avatar[data-bot-state="working"]::after,
+.bot-avatar[data-bot-state="thinking"]::after {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--text-0);
+}
+
+/* --- ActivityFeed (v2.8.0 → v3.0.0 unstyled → styled).
+ * Cockpit-mode surface: high density, hairline section
+ * dividers, monospaced timestamps. The whole feed uses
+ * divide-y semantics (no card chrome) to match the
+ * BotRoster row style — a list of events, not a list
+ * of cards. */
+.activity-feed {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 8px 10px 10px;
+  border-top: 1px solid var(--border);
+}
+
+.activity-feed-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 0 2px;
+}
+
+.activity-feed-header h3 {
+  margin: 0;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-2, #888);
+}
+
+.activity-feed-refresh {
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--text-3, #71717a);
+  font-size: 12px;
+  padding: 0 4px;
+  height: 18px;
+  line-height: 1;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: color 80ms ease, background 80ms ease;
+}
+
+.activity-feed-refresh:hover {
+  color: var(--text-0, #fafafa);
+  background: var(--bg-2, #1f1f23);
+}
+
+.activity-feed-empty {
+  padding: 10px 8px;
+  color: var(--text-3, #71717a);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+/* Non-blocking error pill: when a poll fails AFTER we
+ * already have data, we render the data plus this small
+ * pill at the top of the feed so the user knows the
+ * list is stale but isn't blocked from reading. */
+.activity-feed-stale {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  background: rgba(239, 68, 68, 0.12);
+  border: 1px solid rgba(239, 68, 68, 0.4);
+  border-radius: 999px;
+  color: rgb(252, 165, 165);
+  font-size: 11px;
+  align-self: flex-start;
+}
+
+.activity-feed-stale-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--danger);
+}
+
+.activity-section {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.activity-section h4 {
+  margin: 0;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-3, #71717a);
+  padding: 0 2px;
+}
+
+.activity-section ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  /* The hairline between rows instead of card chrome —
+   * Skill Section 3 Rule 4: DASHBOARD HARDENING. */
+  border-top: 1px solid var(--border);
+}
+
+.activity-row {
+  display: grid;
+  grid-template-columns: 16px 1fr auto;
+  align-items: baseline;
+  gap: 8px;
+  padding: 5px 2px;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+  color: var(--text-1, #d4d4d8);
+}
+
+.activity-row-status {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  text-align: center;
+  color: var(--text-3, #71717a);
+}
+
+.activity-row-primary {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-1, #d4d4d8);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.activity-row-secondary {
+  display: none; /* Tight sidebar — secondary is cut. */
+}
+
+.activity-row-when {
+  font-size: 10px;
+  color: var(--text-3, #71717a);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.activity-row-status.status-succeeded,
+.activity-row-status.status-approved {
+  color: rgb(134, 239, 172);
+}
+
+.activity-row-status.status-failed,
+.activity-row-status.status-rejected {
+  color: rgb(252, 165, 165);
+}
+
+.activity-row-status.status-running,
+.activity-row-status.status-pending {
+  color: var(--accent);
+}
+
+/* --- Empty-state composition baseline.
+ * Every panel's __empty class follows the same pattern
+ * (icon + headline + body + optional CTA) so the user
+ * can read them as one family. Where the existing markup
+ * already provides all four (BotRoster, Welcome), no
+ * markup change is needed — just the consistent styling. */
+.skills-panel__empty {
+  /* Already has icon-less 1-line text. Upgrade to the
+   * composed pattern with a 14px body and a faint
+   * dashed border so it reads as a "this is a state,
+   * not a broken page" affordance. */
+  padding: 24px 16px;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-md);
+  color: var(--text-2, #888);
+  font-size: 13px;
+  line-height: 1.5;
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
 }
 

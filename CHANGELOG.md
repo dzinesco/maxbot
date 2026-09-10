@@ -4,6 +4,96 @@ All notable changes to MaxBot are documented in this file. The format
 follows [Keep a Changelog](https://keepachangelog.com/) and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## v3.0.0 — 2026-09-09
+
+v3.0.0 is the integration release — no new features, just a
+focused pass over the visual + interaction layer. The goal
+was to make v2.x feel like a finished product, not a stack
+of features.
+
+### Changed
+- **Brand palette: violet → Electric Blue.** The brand
+  monogram (`.brand-mark`, `.main-empty-mark`, `.welcome-mark`),
+  the assistant avatar in the chat, the assistant message
+  wash, and `--accent` / `--accent-hover` / `--accent-soft`
+  all moved off the violet/lila `#7c3aed` family onto
+  `#2563eb → #1d4ed8 → #1e3a8a`. Single accent, saturation
+  under 80%, reads as "trust" on both dark and light UI.
+  Box-shadow tints were retuned to match.
+- **Body font: Inter → system sans.** `--font-sans` now
+  resolves to `Public Sans → Outfit → SF Pro Text →
+  -apple-system → system-ui`. No webfont dep, no network
+  fetch — the user already has these on macOS by default.
+  Rationale documented inline in `:root` in `src/styles.css`.
+- **Viewport units: 100vh → 100dvh.** The `.app` shell,
+  `.app-boot` scaffold, and `.welcome` surface all use
+  `100dvh` so the iOS-style URL-bar collapse doesn't
+  shift the layout.
+- **Tactile feedback on `:active` for every button.**
+  A global `:where(button):active:not(:disabled) { transform:
+  translateY(1px); }` rule with an 80ms ease-out settle.
+  Specificity 0 so existing card-lift and scale rules still
+  win on the elements that opt in to those effects.
+
+### Added
+- **Skeletal loaders (`.skeleton` / `.skeleton--2` /
+  `.skeleton--3`).** A shimmer keyframe + 1/2/3-line
+  placeholders for "loading chat history" / "loading
+  bots" / "loading skills" surfaces. Honors
+  `prefers-reduced-motion`.
+- **Bot-avatar hover tooltip.** The `BotAvatar` already
+  exposed a `data-bot-state` attribute and a `title=`
+  fallback. v3.0.0 adds a styled hover pill that fades
+  in below the avatar, tinted by state (green = done,
+  red = blocked, blue = working/thinking). The browser
+  `title=` is still there for a11y / keyboard users.
+- **ActivityFeed got CSS.** v2.8.0 shipped the
+  `ActivityFeed` component but never styled it (it was
+  relying on parent styles leaking in). v3.0.0 adds a
+  Cockpit-mode surface: sectioned lists, hairline row
+  dividers, monospaced timestamps, status-color pills.
+  See the `--v3.0.0 polish` block at the end of
+  `src/styles.css`.
+- **Non-blocking "couldn't refresh" pill.** When a
+  poll fails AFTER the feed has data, the feed now
+  shows the last good data plus a small inline
+  "couldn't refresh — showing last good data" pill
+  instead of replacing everything with an error. The
+  first-ever failure (no data yet) still shows a
+  full-feed error so the user knows something is wrong.
+
+### Fixed
+- **`100vh` on iOS-style URL-bar collapse** would shift
+  the layout on every URL-bar hide/show. Replaced with
+  `100dvh` on the three surfaces that need to fill the
+  viewport.
+- **ActivityFeed was unstyled in v2.8.0** (all those
+  `activity-feed__*` class names had no rules in
+  `styles.css`). The new `--v3.0.0 polish` block fixes
+  the visual and brings it in line with the BotRoster
+  row style.
+
+### Notes
+- The previous tests (90 vitest / 173 cargo) still pass.
+  v3.0.0 is CSS + a single component-render branch; no
+  test count change.
+- The pre-existing uncommitted edit to
+  `src-tauri/src/bin/maxbotd.rs` (a `Bot` struct field
+  alignment) is included in the v3.0.0 commit since
+  `git add -A` picks it up; it does not affect the test
+  count.
+- Added `default-run = "maxbot"` to `[package]` in
+  `src-tauri/Cargo.toml`. Without it, Tauri 2's bundler
+  errors with "failed to find main binary" because the
+  workspace has two binaries (`maxbot` from `src/main.rs`
+  and `maxbotd` from `src/bin/maxbotd.rs`) and Tauri
+  can't infer which one is the main app. This is what
+  caused the first v3.0.0 build to silently keep the
+  pre-existing v2.6.3 `Info.plist` in
+  `MaxBot.app/Contents/Info.plist`; the fix forces a
+  fresh re-bundle so the installed app actually
+  advertises `3.0.0` to macOS.
+
 ## v2.8.0 — 2026-09-09
 
 ### Added
