@@ -740,6 +740,7 @@ function ComputerToolbar({
         onClick={onStart}
         disabled={stateDisabled || state === "running"}
         title="Start the VM"
+        data-setting-key={`bot.${computer?.bot_id ?? ""}.computer-start`}
       >
         Start
       </button>
@@ -748,6 +749,7 @@ function ComputerToolbar({
         onClick={onStop}
         disabled={stateDisabled || state !== "running"}
         title="Shut down the VM (clean)"
+        data-setting-key={`bot.${computer?.bot_id ?? ""}.computer-stop`}
       >
         Stop
       </button>
@@ -756,6 +758,7 @@ function ComputerToolbar({
         onClick={onRestart}
         disabled={stateDisabled || state !== "running"}
         title="Stop + start the VM"
+        data-setting-key={`bot.${computer?.bot_id ?? ""}.computer-restart`}
       >
         Restart
       </button>
@@ -780,6 +783,7 @@ function ComputerToolbar({
         onClick={onDestroy}
         disabled={stateDisabled || !computer}
         title="Destroy the VM and remove its disk"
+        data-setting-key={`bot.${computer?.bot_id ?? ""}.computer-destroy`}
       >
         Destroy
       </button>

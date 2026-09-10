@@ -5369,3 +5369,130 @@ button.link:hover {
   min-width: 96px;
 }
 
+/* ---------- Settings palette (v3.0.2) ----------
+ *
+ * Command-palette modal opened by Cmd+K / Ctrl+K. Same
+ * visual vocabulary as the other modals: Electric Blue
+ * accent, the same border / radius / surface tokens,
+ * 100dvh-safe layout. The palette itself is centered
+ * near the top of the viewport (a "menu" feel rather
+ * than a "dialog" feel) and capped at ~480px tall so
+ * long result lists scroll inside, not outside. */
+.settings-palette__backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  z-index: 1000;
+  padding-top: 14vh;
+}
+
+.settings-palette {
+  width: 560px;
+  max-width: 92vw;
+  max-height: 70vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-1, #18181b);
+  border: 1px solid var(--border);
+  border-radius: var(--radius, 10px);
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.55);
+  overflow: hidden;
+}
+
+.settings-palette__search-row {
+  display: flex;
+  align-items: center;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-0, #0c0c0e);
+}
+
+.settings-palette__input {
+  flex: 1;
+  background: transparent;
+  border: none;
+  outline: none;
+  color: var(--text-0, #fafafa);
+  font-size: 15px;
+  font-family: var(--font-sans, system-ui, -apple-system, "Helvetica Neue", sans-serif);
+  letter-spacing: -0.005em;
+}
+
+.settings-palette__input::placeholder {
+  color: var(--text-3, #71717a);
+}
+
+.settings-palette__list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 4px 0;
+}
+
+.settings-palette__row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  text-align: left;
+  padding: 8px 14px;
+  color: var(--text-1, #e4e4e7);
+  font-size: 13px;
+  font-family: var(--font-sans, system-ui, -apple-system, "Helvetica Neue", sans-serif);
+  cursor: pointer;
+}
+
+.settings-palette__row:hover {
+  background: var(--bg-2, rgba(255, 255, 255, 0.04));
+}
+
+.settings-palette__row--active {
+  background: var(--accent-soft);
+  color: var(--text-0, #fafafa);
+}
+
+.settings-palette__row-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-palette__row-context {
+  color: var(--text-3, #71717a);
+  font-size: 11px;
+  letter-spacing: 0.01em;
+  text-transform: uppercase;
+  flex-shrink: 0;
+}
+
+.settings-palette__row--active .settings-palette__row-context {
+  color: var(--accent);
+  opacity: 0.85;
+}
+
+.settings-palette__empty {
+  padding: 28px 14px;
+  text-align: center;
+  color: var(--text-3, #71717a);
+  font-size: 13px;
+}
+
+.settings-palette__hint {
+  display: flex;
+  gap: 14px;
+  justify-content: flex-end;
+  padding: 6px 12px 8px;
+  border-top: 1px solid var(--border);
+  color: var(--text-3, #71717a);
+  font-size: 11px;
+  letter-spacing: 0.01em;
+}
+

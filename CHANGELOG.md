@@ -4,6 +4,50 @@ All notable changes to MaxBot are documented in this file. The format
 follows [Keep a Changelog](https://keepachangelog.com/) and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## v3.0.2 — 2026-09-09
+
+### Added
+- **Global settings command palette (`Cmd+K` / `Ctrl+K`).** A
+  keyboard-first way to find any setting without clicking
+  through tabs. Press `Cmd+K` (mac) or `Ctrl+K` (other) to
+  open; type to filter; `↑` / `↓` to navigate; `Enter` to
+  select; `Esc` to close. Selecting a result opens the
+  relevant panel (Settings, Bot editor, Computer, Skills,
+  Memory, Routines) and focuses the field. The palette
+  does not appear in the home / welcome view (per the
+  brief's "only show results for the current context"
+  rule) and shows only App-level rows when no Bot is
+  selected.
+- **`SettingsPalette` component + test.** A presentational
+  modal in `src/components/SettingsPalette.tsx` that
+  builds its index dynamically from the `bots` prop. The
+  search is case-insensitive substring over the entry's
+  `label`, `context` (Bot name or "App"), and the
+  `data-setting-key` value. The vitest suite covers
+  open-via-render, filter-as-you-type, Enter-select,
+  ArrowDown-navigation, Esc-close, backdrop-click-close,
+  palette-body-does-NOT-close, home-view-gates-Bot-rows,
+  and click-to-select.
+- **`data-setting-key` annotations.** Every Bot-level
+  setting (Identity, Brain, Workspace, Computer, Capabilities,
+  Rules, Schedule, Daemon, Skills, Memory, Routines) and
+  every App-level setting (General, Providers, TTS, Browser,
+  Computer, Grok tabs) now carries a `data-setting-key`
+  attribute. The attribute is the bridge between the
+  palette's `entry.key` and the DOM element to focus.
+  No existing field behavior, label, or value was
+  changed — the attribute is purely additive.
+- **`Settings.initialTab` prop + `key`-driven remount.** The
+  Settings modal accepts an `initialTab` so the palette
+  can jump straight to the TTS / Browser / Computer / Grok
+  tab. The App bumps the modal's `key` to remount it on
+  tab change, so the new tab is honored without leaking
+  state between visits.
+
+### Changed
+- **Bumped to 3.0.2** in `package.json`,
+  `src-tauri/Cargo.toml`, and `src-tauri/tauri.conf.json`.
+
 ## v3.0.1 — 2026-09-09
 
 ### Added

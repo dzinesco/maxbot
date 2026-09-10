@@ -27,6 +27,15 @@ import { Welcome } from "./components/Welcome";
 // + gating logic lives in App.tsx (the bootstrap fetches the
 // flag, the dismiss handler writes it back).
 import { WhatsNewOverlay } from "./components/WhatsNewOverlay";
+// v3.0.2 — global settings command palette. The
+// component itself is presentational (a modal with a
+// search input + result list); the routing is done
+// here in App.tsx via the `onSelect` callback. The
+// data-setting-key attribute on each form field is
+// the bridge between the palette's `entry.key` and
+// the DOM element to focus.
+import { SettingsPalette } from "./components/SettingsPalette";
+import type { SettingEntry } from "./components/SettingsPalette";
 import {
   createConversation,
   deleteBot,
@@ -110,6 +119,16 @@ export default function App() {
   const [searchResults, setSearchResults] = useState<Message[]>([]);
   const [settings, setSettings] = useState<SettingsT>(DEFAULT_SETTINGS);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  // v3.0.2 — the global settings command palette. The
+  // keyboard listener below toggles this on Cmd+K
+  // (mac) / Ctrl+K (other); the routing in
+  // `handlePaletteSelect` decides which panel to open
+  // and which DOM field to focus. The `settingsTab`
+  // knob lets the palette jump straight to the TTS /
+  // Browser / Computer / Grok tab of the Settings
+  // modal.
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const [settingsTab, setSettingsTab] = useState<string>("general");
   /**
    * First-run gate. Read from the `meta` table on bootstrap. `null`
    * means the bootstrap hasn't finished yet (we're still in the
@@ -1049,6 +1068,148 @@ export default function App() {
     return () => document.removeEventListener("keydown", handler);
   }, [handleNewBotConversation, handleNewConversation, selectedBotId]);
 
+  // v3.0.2 — ⌘K / Ctrl+K → toggle the settings palette.
+  // Bound at the document level so it works from any
+  // surface. We let the input own the keystroke when the
+  // user is typing into a text field; the palette's own
+  // Esc handler covers the close path. The check on
+  // `isContentEditable` keeps the shortcut from
+  // hijacking the chat composer's contenteditable.
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (
+        (e.metaKey || e.ctrlKey) &&
+        !e.shiftKey &&
+        !e.altKey &&
+        (e.key === "K" || e.key === "k")
+      ) {
+        const target = e.target as HTMLElement | null;
+        if (
+          target &&
+          (target.tagName === "INPUT" || target.tagName === "TEXTAREA")
+        ) {
+          // Still allow it — the palette's input takes over
+          // the field after mount, and the user explicitly
+          // hit the shortcut. Don't `preventDefault` so the
+          // browser's own ⌘K behavior (URL bar in some
+          // webviews) doesn't get in the way either.
+        }
+        e.preventDefault();
+        setPaletteOpen((v) => !v);
+      }
+    };
+    document.addEventListener("keydown", handler);
+    return () => document.removeEventListener("keydown", handler);
+  }, []);
+
+  // v3.0.2 — settings-palette routing. The palette
+  // hands us a `SettingEntry` with a `target`. We open
+  // the right panel and (after the panel mounts) query
+  // the DOM for the matching `data-setting-key` to
+  // focus + scroll into view. The focus call is
+  // wrapped in a `requestAnimationFrame` because the
+  // panel's mount happens on the next render — the
+  // browser hasn't laid it out yet at the moment we
+  // call this.
+  const handlePaletteSelect = useCallback(
+    (entry: SettingEntry) => {
+      const focusByKey = (key: string, fallback?: string) => {
+        // Defer to the next frame so the panel has a
+        // chance to mount. Two frames in the worst
+        // case (BotEditor is async on first open
+        // because it loads the computer state).
+        const tryFocus = (attempt: number) => {
+          const sel = `[data-setting-key="${CSS.escape(key)}"]`;
+          let el = document.querySelector<HTMLElement>(sel);
+          if (!el && fallback) {
+            el = document.querySelector<HTMLElement>(
+              `[data-setting-key="${CSS.escape(fallback)}"]`,
+            );
+          }
+          if (el) {
+            el.scrollIntoView({ block: "center", behavior: "smooth" });
+            // For inputs/textareas, also focus. For
+            // sections / buttons, just scroll (don't
+            // steal focus from the chat composer).
+            const tag = el.tagName;
+            if (
+              tag === "INPUT" ||
+              tag === "TEXTAREA" ||
+              tag === "SELECT" ||
+              el.getAttribute("role") === "button"
+            ) {
+              try {
+                el.focus({ preventScroll: true });
+              } catch {
+                /* focus can throw on hidden elements */
+              }
+            }
+            return;
+          }
+          if (attempt < 5) {
+            requestAnimationFrame(() => tryFocus(attempt + 1));
+          }
+        };
+        requestAnimationFrame(() => tryFocus(0));
+      };
+
+      const t = entry.target;
+      // Close the palette first so the panel we open
+      // isn't covered by it.
+      setPaletteOpen(false);
+      if (t.kind === "app-settings") {
+        setSettingsTab(t.tab);
+        setSettingsOpen(true);
+        // Settings remounts via the `key` prop on the
+        // JSX below, so the new tab takes effect on
+        // the next render. Focus after mount.
+        const key = entry.key;
+        const fallback = `app.${t.tab === "general" ? "provider" : t.tab === "providers" ? "providers.openai" : t.tab === "tts" ? "tts-voice" : t.tab === "browser" ? "ego-browser-path" : t.tab === "computer" ? "computer-server-host" : "grok-binary"}`;
+        focusByKey(key, fallback);
+        return;
+      }
+      if (t.kind === "bot-editor") {
+        // Find the bot and prefill the editor draft.
+        const bot = bots.find((b) => b.id === t.botId);
+        if (!bot) return;
+        setEditorDraft({ bot, schedule: botSchedules[t.botId] ?? null });
+        setEditorAvailableTools(availableTools);
+        setEditorState({ mode: "edit", botId: t.botId });
+        focusByKey(entry.key);
+        return;
+      }
+      if (t.kind === "computer-panel") {
+        setComputerPanelBotId(t.botId);
+        focusByKey(entry.key);
+        return;
+      }
+      if (t.kind === "memory-panel") {
+        setSelectedBotId(t.botId);
+        setMainView("memory");
+        // Memory panel has a single root, so the
+        // data-setting-key lookup needs to fall back
+        // to `panel.memory`.
+        focusByKey(entry.key, "panel.memory");
+        return;
+      }
+      if (t.kind === "skills-panel") {
+        // The Skills panel is global (shows every Bot's
+        // skills) — we just switch the main view and
+        // let the panel's own data-setting-key resolve.
+        setMainView("skills");
+        focusByKey(entry.key, "panel.skills");
+        return;
+      }
+      if (t.kind === "routines-panel") {
+        setSelectedBotId(t.botId);
+        setMainView("routines");
+        focusByKey(entry.key, "panel.routines");
+        return;
+      }
+    },
+    [bots, botSchedules, availableTools],
+  );
+
   const handleRegenerate = useCallback(async () => {
     if (!activeId || streamingId) return;
     try {
@@ -1706,7 +1867,21 @@ export default function App() {
       </main>
       {settingsOpen && (
         <Settings
+          key={`settings-${settingsTab}`}
           initial={settings}
+          initialTab={
+            ["general", "providers", "tts", "browser", "computer", "grok"].includes(
+              settingsTab,
+            )
+              ? (settingsTab as
+                  | "general"
+                  | "providers"
+                  | "tts"
+                  | "browser"
+                  | "computer"
+                  | "grok")
+              : "general"
+          }
           onClose={() => setSettingsOpen(false)}
           onSave={handleSaveSettings}
         />
@@ -1763,6 +1938,24 @@ export default function App() {
           `handleDismissWhatsNew`. */}
       {showWhatsNewV3 && (
         <WhatsNewOverlay onDismiss={handleDismissWhatsNew} />
+      )}
+      {/* v3.0.2 — global settings command palette. Mounted
+          last so it sits on top of every other modal
+          (z-index 1000 in styles.css). The brief is
+          explicit (acceptance #9): the palette does NOT
+          appear in the home / welcome view. We pass
+          `isHomeView = true` when no Bot is selected so
+          the palette hides the (empty) Bot-level rows
+          and shows only the App-level settings. The
+          home/welcome gating is the `isOnboarded === true`
+          check below. */}
+      {paletteOpen && isOnboarded === true && (
+        <SettingsPalette
+          bots={bots}
+          isHomeView={!selectedBotId}
+          onClose={() => setPaletteOpen(false)}
+          onSelect={handlePaletteSelect}
+        />
       )}
     </div>
   );

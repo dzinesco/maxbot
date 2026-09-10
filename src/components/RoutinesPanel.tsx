@@ -117,7 +117,7 @@ export function RoutinesPanel(props: RoutinesPanelProps) {
 
   if (loading) {
     return (
-      <div className="routines-panel">
+      <div className="routines-panel" data-setting-key="panel.routines">
         <div className="routines-panel__loading">Loading routines…</div>
       </div>
     );
@@ -125,7 +125,7 @@ export function RoutinesPanel(props: RoutinesPanelProps) {
 
   if (error) {
     return (
-      <div className="routines-panel">
+      <div className="routines-panel" data-setting-key="panel.routines">
         <div className="routines-panel__error">{error}</div>
       </div>
     );
@@ -133,7 +133,7 @@ export function RoutinesPanel(props: RoutinesPanelProps) {
 
   if (schedules.length === 0) {
     return (
-      <div className="routines-panel">
+      <div className="routines-panel" data-setting-key="panel.routines">
         <div className="routines-panel__header">
           <h3>Routines</h3>
           <div className="routines-panel__actions">
@@ -176,7 +176,7 @@ export function RoutinesPanel(props: RoutinesPanelProps) {
   }
 
   return (
-    <div className="routines-panel">
+    <div className="routines-panel" data-setting-key="panel.routines">
       <div className="routines-panel__header">
         <h3>Routines</h3>
         <div className="routines-panel__actions">

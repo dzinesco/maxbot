@@ -78,7 +78,7 @@ export function ComputerUseSettings() {
   }
 
   return (
-    <div className="field">
+    <div className="field" data-setting-key="app.computer-use-apps">
       <label>Computer Use (AppleScript)</label>
       <div className="hint">
         MaxBot can drive macOS apps via AppleScript. macOS requires you

@@ -406,6 +406,7 @@ export function BotEditor({
                 value={bot.name}
                 onChange={(e) => setBot({ ...bot, name: e.target.value })}
                 placeholder="e.g. Figma Bro, Devbot, Spec"
+                data-setting-key={`bot.${bot.id || initial.id}.name`}
               />
             </div>
             <div className="form-row">
@@ -448,12 +449,13 @@ export function BotEditor({
                   setBot({ ...bot, description: e.target.value })
                 }
                 placeholder="One-line purpose"
+                data-setting-key={`bot.${bot.id || initial.id}.description`}
               />
             </div>
             <div className="form-row inline">
               <div>
                 <label>Icon</label>
-                <div className="preset-row">
+                <div className="preset-row" data-setting-key={`bot.${bot.id || initial.id}.icon`}>
                   {ICON_PRESETS.map((i) => (
                     <button
                       key={i}
@@ -475,7 +477,7 @@ export function BotEditor({
               </div>
               <div>
                 <label>Color</label>
-                <div className="preset-row">
+                <div className="preset-row" data-setting-key={`bot.${bot.id || initial.id}.color`}>
                   {COLOR_PRESETS.map((c) => (
                     <button
                       key={c || "default"}
@@ -502,6 +504,7 @@ export function BotEditor({
                   setBot({ ...bot, default_model: e.target.value })
                 }
                 placeholder="MiniMax-M3"
+                data-setting-key={`bot.${bot.id || initial.id}.default-model`}
               />
             </div>
             <div className="form-row">
@@ -518,6 +521,7 @@ export function BotEditor({
                 placeholder={
                   "You are a careful, concise analyst. When asked to act, summarize what you did and why. Use the available tools when they help."
                 }
+                data-setting-key={`bot.${bot.id || initial.id}.system-prompt`}
               />
             </div>
           </section>
@@ -577,6 +581,7 @@ export function BotEditor({
                   className="ghost small"
                   style={{ marginLeft: 8 }}
                   onClick={() => onViewComputer(bot.id || initial.id)}
+                  data-setting-key={`bot.${bot.id || initial.id}.view-computer`}
                 >
                   View computer
                 </button>
@@ -600,6 +605,7 @@ export function BotEditor({
                 checked={provisionComputer}
                 onChange={(e) => setProvisionComputer(e.target.checked)}
                 data-testid="provision-computer-checkbox"
+                data-setting-key={`bot.${bot.id || initial.id}.provision-computer`}
               />
               <span>
                 Provision a computer for this Bot
@@ -625,6 +631,7 @@ export function BotEditor({
                       )
                     }
                     data-testid="provision-disk-gb"
+                    data-setting-key={`bot.${bot.id || initial.id}.provision-disk-gb`}
                   />
                 </div>
                 <div>
@@ -640,6 +647,7 @@ export function BotEditor({
                       )
                     }
                     data-testid="provision-ram-mb"
+                    data-setting-key={`bot.${bot.id || initial.id}.provision-ram-mb`}
                   />
                 </div>
               </div>
@@ -664,6 +672,7 @@ export function BotEditor({
                 className="ghost small"
                 onClick={() => setShowTools((v) => !v)}
                 style={{ marginLeft: 8 }}
+                data-setting-key={`bot.${bot.id || initial.id}.allowed-tools`}
               >
                 {showTools ? "Hide" : `Edit (${bot.allowed_tools.length})`}
               </button>
@@ -723,13 +732,19 @@ export function BotEditor({
             existing Bot the map starts populated;
             for a new Bot every row is `auto` until
             the user picks something. */}
-          <section className="form-section">
+          <section className="form-section" data-setting-key={`bot.${bot.id || initial.id}.approval-rules`}>
             <h3>
               Rules
               <span className="hint">
                 {" "}— auto runs, ask queues, deny blocks
               </span>
             </h3>
+            {/* v3.0.2 — settings-palette bridge. The Rules
+              section is one logical "setting" — there's no
+              single field to focus, but the user expects
+              this label to be reachable. The
+              data-setting-key on the section lets the
+              palette scroll it into view. */}
             <ul className="rule-list">
               {availableTools.map((t) => {
                 const current = rules[t.name] ?? "auto";
@@ -811,6 +826,7 @@ export function BotEditor({
                   onChange={(e) => setCronExpression(e.target.value)}
                   placeholder="0 9 * * 1-5"
                   style={{ width: 140, marginLeft: 4, fontFamily: "var(--font-mono)" }}
+                  data-setting-key={`bot.${bot.id || initial.id}.schedule-cron`}
                 />
               </div>
               {cronExpression && (
@@ -845,6 +861,7 @@ export function BotEditor({
                     setIntervalSeconds(parseInt(e.target.value || "0", 10))
                   }
                   style={{ width: 80, marginLeft: 4 }}
+                  data-setting-key={`bot.${bot.id || initial.id}.schedule-interval`}
                 />
                 <span className="muted small">seconds</span>
               </div>
@@ -871,6 +888,7 @@ export function BotEditor({
                   type="text"
                   readOnly
                   data-testid="daemon-webhook-url"
+                  data-setting-key={`bot.${bot.id || initial.id}.daemon-webhook`}
                   value={
                     daemonServerHost
                       ? `https://${daemonServerHost}:8443/hooks/${bot.id}`
@@ -895,6 +913,7 @@ export function BotEditor({
                     type="text"
                     readOnly
                     data-testid="daemon-token-value"
+                    data-setting-key={`bot.${bot.id || initial.id}.daemon-token`}
                     value={daemonToken ?? "(not set)"}
                     style={{ fontFamily: "var(--font-mono)", flex: 1 }}
                     onFocus={(e) => e.currentTarget.select()}
@@ -902,6 +921,7 @@ export function BotEditor({
                   <button
                     type="button"
                     data-testid="daemon-token-rotate"
+                    data-setting-key={`bot.${bot.id || initial.id}.daemon-token-rotate`}
                     onClick={async () => {
                       const tok = await rotateDaemonToken(bot.id);
                       setDaemonToken(tok);
@@ -912,6 +932,7 @@ export function BotEditor({
                   <button
                     type="button"
                     data-testid="daemon-token-copy"
+                    data-setting-key={`bot.${bot.id || initial.id}.daemon-token-copy`}
                     disabled={!daemonToken}
                     onClick={() => {
                       if (daemonToken) {

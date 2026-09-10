@@ -15,6 +15,16 @@ interface SettingsProps {
   initial: SettingsT;
   onClose: () => void;
   onSave: (next: SettingsT) => Promise<void> | void;
+  /**
+   * v3.0.2 — initial tab to open. Defaults to
+   * `"general"` so the gear-icon path is unchanged. The
+   * settings palette uses this to jump straight to the
+   * TTS / Browser / Computer / Grok tab the user
+   * searched for. The key is read once on mount; a
+   * `key` bump on the parent's `<Settings>` element
+   * remounts the modal, which re-reads the prop.
+   */
+  initialTab?: TabId;
 }
 
 /** Tabs surfaced in the Settings modal, in render order. The order
@@ -57,14 +67,19 @@ const COMMON_VOICES = [
   "Mei-Jia",
 ];
 
-export function Settings({ initial, onClose, onSave }: SettingsProps) {
+export function Settings({ initial, onClose, onSave, initialTab }: SettingsProps) {
   // Merge with defaults so older settings blobs (pre-multi-provider,
   // pre-grok) render without "undefined" fields.
   const base: SettingsT = useMemo(
     () => ({ ...DEFAULT_SETTINGS, ...initial }),
     [initial],
   );
-  const [activeTab, setActiveTab] = useState<TabId>("general");
+  // v3.0.2 — palette-driven tab jumps. The parent
+  // remounts Settings (via React `key`) when it wants to
+  // switch tabs, so we read `initialTab` once and use it
+  // as the starting tab. Falling back to `"general"`
+  // keeps the gear-icon path unchanged.
+  const [activeTab, setActiveTab] = useState<TabId>(initialTab ?? "general");
 
   // ---- form state ----
   const [providerKind, setProviderKind] = useState<ProviderKind | string>(
@@ -456,6 +471,7 @@ export function Settings({ initial, onClose, onSave }: SettingsProps) {
                 <select
                   value={providerKind}
                   onChange={(e) => setProviderKind(e.target.value)}
+                  data-setting-key="app.provider"
                 >
                   {PROVIDER_PRESETS.map((p) => (
                     <option key={p.kind} value={p.kind}>
@@ -473,6 +489,7 @@ export function Settings({ initial, onClose, onSave }: SettingsProps) {
                   value={apiKey}
                   onChange={(e) => setApiKey(e.target.value)}
                   placeholder={preset.key_placeholder}
+                  data-setting-key="app.api-key"
                 />
                 <div className="hint">{preset.key_hint}</div>
               </div>
@@ -484,6 +501,7 @@ export function Settings({ initial, onClose, onSave }: SettingsProps) {
                   value={defaultModel}
                   onChange={(e) => setDefaultModel(e.target.value)}
                   placeholder={preset.default_model}
+                  data-setting-key="app.default-model"
                 />
                 <div className="hint">
                   Leave blank to use <code>{preset.default_model}</code>.
@@ -497,6 +515,7 @@ export function Settings({ initial, onClose, onSave }: SettingsProps) {
                   value={baseUrl}
                   onChange={(e) => setBaseUrl(e.target.value)}
                   placeholder={preset.default_base_url}
+                  data-setting-key="app.base-url"
                 />
                 <div className="hint">
                   Leave blank for the built-in default. Set to a self-hosted
@@ -534,6 +553,7 @@ export function Settings({ initial, onClose, onSave }: SettingsProps) {
                     checked={voiceModeEnabled}
                     onChange={(e) => setVoiceModeEnabled(e.target.checked)}
                     data-testid="settings-voice-mode-toggle"
+                    data-setting-key="app.voice-mode"
                   />{" "}
                   Voice mode — auto-play Bot replies and auto-record after
                 </label>
@@ -569,6 +589,7 @@ export function Settings({ initial, onClose, onSave }: SettingsProps) {
                       alert(`Failed to reset onboarding: ${e}`);
                     });
                   }}
+                  data-setting-key="app.reset-onboarding"
                 >
                   Reset onboarding
                 </button>
@@ -617,6 +638,7 @@ export function Settings({ initial, onClose, onSave }: SettingsProps) {
                           }
                         }}
                         placeholder={p.key_placeholder}
+                        data-setting-key={`app.providers.${p.kind}`}
                       />
                       <div className="hint">{p.key_hint}</div>
                     </div>
@@ -658,6 +680,7 @@ export function Settings({ initial, onClose, onSave }: SettingsProps) {
                   onChange={(e) => setTtsVoice(e.target.value)}
                   placeholder="Samantha"
                   list="maxbot-common-voices"
+                  data-setting-key="app.tts-voice"
                 />
                 <datalist id="maxbot-common-voices">
                   {COMMON_VOICES.map((v) => (
@@ -705,6 +728,7 @@ export function Settings({ initial, onClose, onSave }: SettingsProps) {
                   value={egoBrowserPath}
                   onChange={(e) => setEgoBrowserPath(e.target.value)}
                   placeholder="/Users/you/.local/bin/ego-browser"
+                  data-setting-key="app.ego-browser-path"
                 />
                 <div className="hint">
                   The <code>ego_browser</code> tool spawns{" "}
@@ -786,6 +810,7 @@ export function Settings({ initial, onClose, onSave }: SettingsProps) {
                       onChange={(e) => setComputerServerHost(e.target.value)}
                       placeholder="192.168.0.49"
                       data-testid="computer-server-host"
+                      data-setting-key="app.computer-server-host"
                     />
                     <div className="hint">
                       Hostname or IP of the Linux server that hosts
@@ -805,6 +830,7 @@ export function Settings({ initial, onClose, onSave }: SettingsProps) {
                         setComputerServerSshUser(e.target.value)
                       }
                       placeholder="tyler"
+                      data-setting-key="app.computer-ssh-user"
                     />
                     <div className="hint">
                       SSH user on the server. Defaults to{" "}
@@ -852,6 +878,7 @@ export function Settings({ initial, onClose, onSave }: SettingsProps) {
                           setComputerUseDefaultSshKey(e.target.checked)
                         }
                         data-testid="computer-use-default-ssh-key"
+                        data-setting-key="app.computer-default-ssh-key"
                       />{" "}
                       Use my default SSH key (<code>~/.ssh/id_*</code>)
                       instead of a per-Bot key — no passphrase needed
@@ -876,6 +903,7 @@ export function Settings({ initial, onClose, onSave }: SettingsProps) {
                         value={computerPassphrase}
                         onChange={(e) => setComputerPassphrase(e.target.value)}
                         placeholder="(set once; used to encrypt per-Bot SSH keys)"
+                        data-setting-key="app.computer-passphrase"
                       />
                       <div className="hint">
                         Used to derive an Argon2id key that encrypts
@@ -904,6 +932,7 @@ export function Settings({ initial, onClose, onSave }: SettingsProps) {
                         }
                         style={{ width: 100 }}
                         data-testid="computer-vnc-port-lo"
+                        data-setting-key="app.computer-vnc-port-lo"
                       />
                       <span className="muted small">to</span>
                       <input
@@ -921,6 +950,7 @@ export function Settings({ initial, onClose, onSave }: SettingsProps) {
                         }
                         style={{ width: 100 }}
                         data-testid="computer-vnc-port-hi"
+                        data-setting-key="app.computer-vnc-port-hi"
                       />
                     </div>
                     <div className="hint">
@@ -947,6 +977,7 @@ export function Settings({ initial, onClose, onSave }: SettingsProps) {
                         )
                       }
                       style={{ width: 100 }}
+                      data-setting-key="app.computer-default-disk"
                     />
                     <div className="hint">
                       Used when a Bot is created with "Provision a
@@ -973,6 +1004,7 @@ export function Settings({ initial, onClose, onSave }: SettingsProps) {
                         )
                       }
                       style={{ width: 100 }}
+                      data-setting-key="app.computer-default-ram"
                     />
                     <div className="hint">
                       Used when a Bot is created without an explicit
@@ -999,6 +1031,7 @@ export function Settings({ initial, onClose, onSave }: SettingsProps) {
                         onClick={runTestConnection}
                         disabled={testPending}
                         data-testid="computer-test-connection"
+                        data-setting-key="app.computer-test-connection"
                       >
                         {testPending ? "Testing…" : "Test connection"}
                       </button>
@@ -1065,6 +1098,7 @@ export function Settings({ initial, onClose, onSave }: SettingsProps) {
                   value={grokBinary}
                   onChange={(e) => setGrokBinary(e.target.value)}
                   placeholder="grok"
+                  data-setting-key="app.grok-binary"
                 />
                 <div className="hint">
                   The <code>grok</code> CLI binary the{" "}
@@ -1083,6 +1117,7 @@ export function Settings({ initial, onClose, onSave }: SettingsProps) {
                   value={grokModel}
                   onChange={(e) => setGrokModel(e.target.value)}
                   placeholder="minimax"
+                  data-setting-key="app.grok-model"
                 />
                 <div className="hint">
                   The alias passed to <code>grok --model &lt;alias&gt;</code>.
@@ -1100,6 +1135,7 @@ export function Settings({ initial, onClose, onSave }: SettingsProps) {
                   value={grokCwd}
                   onChange={(e) => setGrokCwd(e.target.value)}
                   placeholder="(default: app data dir / grok/)"
+                  data-setting-key="app.grok-cwd"
                 />
                 <div className="hint">
                   Working directory for the <code>grok agent stdio</code>{" "}

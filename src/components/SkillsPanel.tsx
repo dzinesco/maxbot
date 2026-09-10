@@ -197,7 +197,7 @@ export function SkillsPanel(props: SkillsPanelProps) {
   );
 
   return (
-    <div className="skills-panel">
+    <div className="skills-panel" data-setting-key="panel.skills">
       <div className="skills-panel__header">
         <h3>Skills</h3>
         <div className="skills-panel__actions">

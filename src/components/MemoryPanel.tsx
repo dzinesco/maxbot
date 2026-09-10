@@ -122,7 +122,7 @@ export function MemoryPanel({ botId }: MemoryPanelProps) {
   }
 
   return (
-    <div className="memory-panel" data-testid="memory-panel">
+    <div className="memory-panel" data-testid="memory-panel" data-setting-key="panel.memory">
       <header className="memory-panel-header">
         <h2>Memory</h2>
         <p className="memory-panel-sub">
