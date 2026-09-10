@@ -80,6 +80,26 @@ pub async fn memory_forget(
         .map_err(|e| e.to_string())
 }
 
+/// v3.6.0 (Phase 7) — Thin alias for `memory_forget`,
+/// exposed under the brief's literal name. The brief
+/// asked for a `delete_memory_entry(bot_id, kind,
+/// key)` Tauri command; the v2.5.0 surface already
+/// shipped `memory_forget` with the same signature.
+/// Rather than break the existing renderer, this
+/// entry point is registered alongside the v2.5.0 one
+/// — same SFTP path, same SFTP timeout, same return
+/// shape. A future caller that wants the v3.6.0
+/// spelling gets identical behavior.
+#[tauri::command]
+pub async fn delete_memory_entry(
+    state: State<'_, AppState>,
+    bot_id: String,
+    kind: KindArg,
+    key: String,
+) -> Result<bool, String> {
+    memory_forget(state, bot_id, kind, key).await
+}
+
 /// List all entries of one kind, oldest first. Used by the
 /// MemoryPanel's three-column read-only browser.
 #[tauri::command]

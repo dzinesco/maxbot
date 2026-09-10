@@ -103,6 +103,24 @@ export function MemoryPanel({ botId }: MemoryPanelProps) {
   const handleDelete = useCallback(
     async (kind: MemKind, key: string) => {
       if (!botId) return;
+      // v3.6.0 (Phase 7) — Confirm before delete.
+      // Per the brief, the per-row 🗑 button in the
+      // panel needs a confirmation prompt so a
+      // stray click can't lose a confirmed fact /
+      // preference. History rows are exempt — they
+      // have no delete button (the panel only
+      // renders one for fact / preference).
+      //
+      // We use `window.confirm` for symmetry with
+      // the rest of the renderer (no modal
+      // library is currently in use). The message
+      // is short and includes the entry's key so
+      // the user can verify what they're about to
+      // lose.
+      const ok = window.confirm(
+        `Delete ${kind} “${key}” from this Bot's memory? This cannot be undone.`,
+      );
+      if (!ok) return;
       try {
         await memoryForget(botId, kind, key);
         await refresh();

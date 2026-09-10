@@ -58,6 +58,24 @@ struct BotErrorEvent {
     message: String,
 }
 
+/// v3.6.0 (Phase 7) — Reflect-step event. The executor
+/// emits this on the Tauri bus every time the reflect
+/// step writes a new fact or preference to the Bot's
+/// memory file. The ActivityFeed listens for it and
+/// surfaces a small inline pill; the user can dismiss
+/// the pill, which calls `memory_forget` to roll back
+/// the write. `kind` is `"fact"` or `"preference"` —
+/// History is intentionally not auto-written, so it
+/// never appears here.
+#[derive(Serialize, Clone)]
+struct BotMemoryWriteEvent {
+    bot_id: String,
+    bot_run_id: String,
+    kind: String,
+    key: String,
+    content: String,
+}
+
 /// Result of a single bot run.
 #[derive(Debug, Clone, Serialize)]
 pub struct BotRunOutput {
@@ -833,6 +851,46 @@ pub async fn run_bot_once(
             &final_text,
         )
         .await;
+        // v3.6.0 (Phase 7) — Reflect step. After the
+        // LLM stream finishes, spawn a short background
+        // task that re-prompts the model with the same
+        // conversation and asks for 0–2 new facts or
+        // preferences. New entries are deduped by `key`
+        // against existing memory, then appended to the
+        // Bot's on-disk JSONL via the existing
+        // `memory::store::append` SFTP path (2-second
+        // per-call timeout). Each new entry also emits a
+        // `memory:written` Tauri event so the
+        // ActivityFeed can surface an inline pill.
+        //
+        // Best-effort: the task is spawned on the runtime
+        // and its result is dropped. If the LLM call
+        // fails, the response isn't parseable as JSON,
+        // the SFTP write times out, or the Bot has no
+        // VM, the run still completes — the reflect
+        // failure is logged at `warn` and otherwise
+        // invisible.
+        let reflect_pool = state.computer.ssh_pool();
+        let reflect_provider = provider.clone();
+        let reflect_model = model.clone();
+        let reflect_bot_id = bot.id.clone();
+        let reflect_run_id = run_id.clone();
+        let reflect_conv_id = conversation_id.clone();
+        let reflect_app = app.clone();
+        let reflect_state = state.clone();
+        tokio::spawn(async move {
+            reflect_and_write_memory(
+                reflect_app,
+                reflect_state,
+                reflect_provider,
+                reflect_model,
+                reflect_pool,
+                reflect_bot_id,
+                reflect_run_id,
+                reflect_conv_id,
+            )
+            .await;
+        });
         summary
     };
 
@@ -1117,6 +1175,441 @@ async fn auto_write_history(
     }
 }
 
+// ---- v3.6.0 (Phase 7) — Reflect step ----
+//
+// After a successful Bot run, the executor spawns a
+// short background task that re-prompts the same LLM
+// with the recent conversation and asks for 0–2 new
+// facts or preferences. New entries are deduped by
+// `key` against existing memory, then appended to the
+// on-disk JSONL via `memory::store::append` (2-second
+// per-call SFTP timeout, same as the v2.5.0 helpers).
+// Each new entry also emits a `memory:written` Tauri
+// event so the ActivityFeed can surface an inline
+// pill; the user can dismiss the pill, which calls
+// `memory_forget` to roll back the write.
+//
+// Best-effort: the entire path is wrapped in
+// `tokio::spawn` from the caller, and every failure
+// inside the helper is logged at `warn` and
+// otherwise invisible. The Bot's next run is
+// unchanged whether the reflect step succeeded,
+// partially succeeded (some entries deduped), or
+// failed entirely.
+
+/// One entry the reflect LLM can propose. `kind`
+/// is normalized to `"fact"` or `"preference"` (we
+/// silently drop a `history` proposal — the plan is
+/// explicit that History stays explicit). `key` is
+/// snake_case; we trim whitespace before dedupe.
+#[derive(Debug, Clone, serde::Deserialize)]
+struct ReflectProposal {
+    #[serde(default)]
+    kind: String,
+    #[serde(default)]
+    key: String,
+    #[serde(default)]
+    content: String,
+}
+
+/// Pull the JSON array out of the LLM's reflect
+/// response. The model is asked to return pure JSON
+/// but in practice wraps it in prose like
+/// `Here you go: [{...}]\nLet me know...`. We find
+/// the first `[` and the last balanced `]` and
+/// parse the slice. Returns an empty Vec on any
+/// failure — the reflect step is best-effort.
+fn parse_reflect_response(response: &str) -> Vec<ReflectProposal> {
+    let trimmed = response.trim();
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+    // Cheap bracket scan: find the first `[`, then
+    // track depth across the rest of the string so
+    // strings and escapes inside the JSON don't fool
+    // us. This is not a full JSON parser but it's
+    // enough to bracket-extract a top-level array.
+    let bytes = trimmed.as_bytes();
+    let mut start: Option<usize> = None;
+    for (i, b) in bytes.iter().enumerate() {
+        if *b == b'[' {
+            start = Some(i);
+            break;
+        }
+    }
+    let Some(start) = start else {
+        return Vec::new();
+    };
+    let mut depth: i32 = 0;
+    let mut in_string = false;
+    let mut escape = false;
+    let mut end: Option<usize> = None;
+    for (i, b) in bytes.iter().enumerate().skip(start) {
+        if escape {
+            escape = false;
+            continue;
+        }
+        if in_string {
+            match *b {
+                b'\\' => escape = true,
+                b'"' => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+        match *b {
+            b'"' => in_string = true,
+            b'[' => depth += 1,
+            b']' => {
+                depth -= 1;
+                if depth == 0 {
+                    end = Some(i);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let Some(end) = end else {
+        return Vec::new();
+    };
+    let slice = &trimmed[start..=end];
+    let parsed: Result<Vec<ReflectProposal>, _> = serde_json::from_str(slice);
+    parsed.unwrap_or_default()
+}
+
+/// Map the LLM's `kind` string to a `MemKind`.
+/// Returns `None` for anything other than `"fact"`
+/// or `"preference"` — History is intentionally not
+/// auto-written.
+fn reflect_kind_to_mem_kind(kind: &str) -> Option<crate::memory::MemKind> {
+    match kind.trim().to_lowercase().as_str() {
+        "fact" => Some(crate::memory::MemKind::Fact),
+        "preference" => Some(crate::memory::MemKind::Preference),
+        _ => None,
+    }
+}
+
+/// Build the reflect-step system prompt. Short and
+/// directive: ask for 0–2 facts or preferences in
+/// a specific JSON shape, and explain the rules
+/// (snake_case key, dedupe by key, no History).
+const REFLECT_SYSTEM_PROMPT: &str = r#"You are the memory-reflect step for an autonomous agent.
+
+Look at the recent conversation and decide if there are 0, 1, or 2 new facts or preferences worth remembering about the user.
+
+Rules:
+- "fact" = a stable thing about the user (name, location, role, project name, etc.).
+- "preference" = how the user wants things done (formatting, tone, defaults, "always X, never Y").
+- Skip if there's nothing new or the user only said ephemeral things ("thanks", "ok", "lol").
+- Skip if the conversation is a tool-running flow with no user-stated preferences.
+- key MUST be snake_case, ≤ 40 chars, stable across runs ("summary_format", "name", "primary_email").
+- content should be a single short sentence.
+- History entries are NOT auto-written. Never return kind "history".
+- If there are no new facts/preferences, return [].
+
+Respond with ONLY a JSON array. No prose, no code fences.
+
+Examples:
+[{"kind":"preference","key":"summary_format","content":"Tyler prefers bullet-point summaries, never paragraphs."}]
+[]
+"#;
+
+/// Build the reflect-step user message from the last
+/// ~6 user/assistant turns. We strip the system
+/// message and tool calls to keep the prompt tight —
+/// the LLM only needs the conversation's shape, not
+/// its full tool trace.
+fn build_reflect_user_message(messages: &[crate::llm::provider::ChatMessage]) -> String {
+    const MAX_TURNS: usize = 6;
+    let mut turns: Vec<(String, String)> = Vec::new();
+    for m in messages.iter().rev() {
+        match m {
+            crate::llm::provider::ChatMessage::User { content } => {
+                turns.push(("user".to_string(), truncate_chars(content, 600)));
+            }
+            crate::llm::provider::ChatMessage::Assistant { content, .. } => {
+                if !content.trim().is_empty() {
+                    turns.push(("assistant".to_string(), truncate_chars(content, 600)));
+                }
+            }
+            _ => {}
+        }
+        if turns.len() >= MAX_TURNS * 2 {
+            break;
+        }
+    }
+    turns.reverse();
+    let mut out = String::from("Recent conversation (most recent last):\n");
+    for (role, content) in &turns {
+        out.push_str(&format!("\n[{}] {}", role, content));
+    }
+    out
+}
+
+/// Run the reflect step: small LLM call, parse the
+/// response, dedupe, write new entries, emit
+/// `memory:written` events. Best-effort: every
+/// failure is logged and swallowed.
+#[allow(clippy::too_many_arguments)]
+async fn reflect_and_write_memory(
+    app: Option<AppHandle>,
+    state: Arc<AppState>,
+    provider: Arc<dyn crate::llm::provider::Provider>,
+    model: String,
+    pool: std::sync::Arc<crate::computer::ssh::SshPool>,
+    bot_id: String,
+    bot_run_id: String,
+    conversation_id: String,
+) {
+    // Re-load the conversation from the DB (the
+    // executor's local `messages` Vec was moved into
+    // the request; we need a fresh list here).
+    let history = match state.db.list_messages(&conversation_id) {
+        Ok(h) => h,
+        Err(e) => {
+            log::warn!(
+                "reflect: could not load history for bot {bot_id}: {e}"
+            );
+            return;
+        }
+    };
+    let reflect_messages: Vec<crate::llm::provider::ChatMessage> = history
+        .iter()
+        .map(|m| match m.role {
+            crate::storage::MessageRole::System => {
+                crate::llm::provider::ChatMessage::System {
+                    content: m.content.clone(),
+                }
+            }
+            crate::storage::MessageRole::User => {
+                crate::llm::provider::ChatMessage::User {
+                    content: m.content.clone(),
+                }
+            }
+            crate::storage::MessageRole::Assistant => {
+                crate::llm::provider::ChatMessage::Assistant {
+                    content: m.content.clone(),
+                    tool_calls: m
+                        .tool_calls
+                        .iter()
+                        .map(|tc| crate::llm::provider::ToolCall {
+                            id: tc.id.clone(),
+                            name: tc.name.clone(),
+                            arguments: tc.arguments.clone(),
+                        })
+                        .collect(),
+                }
+            }
+            crate::storage::MessageRole::Tool => {
+                crate::llm::provider::ChatMessage::Tool {
+                    tool_call_id: m
+                        .tool_calls
+                        .first()
+                        .map(|tc| tc.id.clone())
+                        .unwrap_or_default(),
+                    content: m.content.clone(),
+                }
+            }
+        })
+        .collect();
+
+    let user_message = build_reflect_user_message(&reflect_messages);
+    let request = crate::llm::provider::ChatRequest {
+        model,
+        messages: vec![
+            crate::llm::provider::ChatMessage::System {
+                content: REFLECT_SYSTEM_PROMPT.to_string(),
+            },
+            crate::llm::provider::ChatMessage::User {
+                content: user_message,
+            },
+        ],
+        tools: Vec::new(),
+        // Low temperature so the LLM returns the same
+        // JSON shape across runs; the reflect step is
+        // a deterministic extract, not a generation.
+        temperature: 0.0,
+    };
+
+    // Bound the reflect LLM call to 30s. The
+    // reflect prompt is small and most providers
+    // respond in < 5s; 30s is generous enough for a
+    // slow first-byte without letting a stuck call
+    // pin the spawned task forever.
+    let stream = match tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        provider.stream(request),
+    )
+    .await
+    {
+        Ok(Ok(s)) => s,
+        Ok(Err(e)) => {
+            log::warn!(
+                "reflect: LLM stream call failed for bot {bot_id}: {e}"
+            );
+            return;
+        }
+        Err(_) => {
+            log::warn!(
+                "reflect: LLM stream call timed out (30s) for bot {bot_id}"
+            );
+            return;
+        }
+    };
+
+    futures_util::pin_mut!(stream);
+    let mut text = String::new();
+    let mut stream_error: Option<crate::llm::stream::StreamError> = None;
+    while let Some(item) = stream.next().await {
+        match item {
+            Ok(crate::llm::stream::StreamChunk::Text { delta }) => {
+                text.push_str(&delta);
+            }
+            Ok(crate::llm::stream::StreamChunk::Done { .. }) => break,
+            Ok(crate::llm::stream::StreamChunk::ToolCallDelta { .. }) => {
+                // The reflect prompt asks for no tool
+                // calls; ignore any spurious delta.
+            }
+            Err(e) => {
+                stream_error = Some(e);
+                break;
+            }
+        }
+    }
+    if let Some(e) = stream_error {
+        log::warn!(
+            "reflect: LLM stream errored mid-flight for bot {bot_id}: {e}"
+        );
+        return;
+    }
+    if text.trim().is_empty() {
+        return;
+    }
+
+    // Parse the response. An empty list is a
+    // legitimate "I have nothing to write" answer
+    // and the helper returns cleanly.
+    let proposals = parse_reflect_response(&text);
+    if proposals.is_empty() {
+        return;
+    }
+
+    // Dedupe by key against existing memory. We
+    // re-read both kinds in parallel so a Bot with
+    // hundreds of entries doesn't pay a serial
+    // round-trip cost. The reads are SFTP — bounded
+    // by `SFTP_TIMEOUT` inside the store.
+    let pool_for_read = pool.clone();
+    let bot_id_for_read = bot_id.clone();
+    let existing = tokio::join!(
+        crate::memory::store::read_all(
+            &*pool_for_read,
+            &bot_id_for_read,
+            crate::memory::MemKind::Fact,
+        ),
+        crate::memory::store::read_all(
+            &*pool_for_read,
+            &bot_id_for_read,
+            crate::memory::MemKind::Preference,
+        ),
+    );
+    let mut existing_keys: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
+    for list in [existing.0, existing.1] {
+        for e in list {
+            if !e.key.is_empty() {
+                existing_keys.insert(e.key);
+            }
+        }
+    }
+
+    // Write each new entry. We do them serially so
+    // a single SFTP timeout doesn't race with
+    // itself on the same file. Each entry is a
+    // full-file rewrite inside `append`, so order
+    // matters (later writes see the previous
+    // entry's content).
+    let mut written: Vec<(crate::memory::MemKind, String, String)> = Vec::new();
+    for proposal in proposals {
+        // Normalize the kind. History is dropped
+        // silently — the plan is explicit that
+        // History stays explicit.
+        let Some(kind) = reflect_kind_to_mem_kind(&proposal.kind) else {
+            log::debug!(
+                "reflect: dropping proposal with kind `{}` (history not auto-written)",
+                proposal.kind
+            );
+            continue;
+        };
+        let key = proposal.key.trim().to_string();
+        let content = proposal.content.trim().to_string();
+        if key.is_empty() || content.is_empty() {
+            log::debug!(
+                "reflect: dropping proposal with empty key or content"
+            );
+            continue;
+        }
+        if key.len() > 64 {
+            log::debug!(
+                "reflect: dropping proposal with oversized key ({} chars)",
+                key.len()
+            );
+            continue;
+        }
+        if existing_keys.contains(&key) {
+            log::debug!(
+                "reflect: skipping duplicate key `{key}` for bot {bot_id}"
+            );
+            continue;
+        }
+        let entry = crate::memory::MemEntry {
+            kind,
+            key: key.clone(),
+            content: content.clone(),
+            created_at: Utc::now().to_rfc3339(),
+        };
+        match crate::memory::store::append(&*pool, &bot_id, kind, entry).await {
+            Ok(()) => {
+                log::info!(
+                    "reflect: wrote {} `{key}` for bot {bot_id}",
+                    kind.as_str()
+                );
+                existing_keys.insert(key.clone());
+                written.push((kind, key, content));
+            }
+            Err(e) => {
+                log::warn!(
+                    "reflect: write failed for {} `{key}` on bot {bot_id}: {e}",
+                    kind.as_str()
+                );
+            }
+        }
+    }
+
+    // Emit one `memory:written` event per new
+    // entry. The renderer listens for this and
+    // surfaces an inline pill; the dismiss button
+    // on the pill calls `memory_forget` to roll
+    // the write back. The event is best-effort —
+    // a UI that isn't listening just loses the
+    // pill, the on-disk write is still durable.
+    if let Some(a) = app.as_ref() {
+        for (kind, key, content) in written {
+            let _ = a.emit(
+                "memory:written",
+                BotMemoryWriteEvent {
+                    bot_id: bot_id.clone(),
+                    bot_run_id: bot_run_id.clone(),
+                    kind: kind.as_str().to_string(),
+                    key,
+                    content,
+                },
+            );
+        }
+    }
+}
+
 /// `timeout_secs` keeps the run from hanging forever on a misbehaving
 /// network call. The default 5 minutes is generous for a single
 /// iteration; increase for longer models or heavier tool use.
@@ -1367,5 +1860,147 @@ mod tests {
     fn extract_needs_human_ignores_non_string_value() {
         let content = r#"{"needs_human": 42}"#;
         assert!(extract_needs_human(content).is_none());
+    }
+
+    // ---- v3.6.0 (Phase 7) — Reflect-step helpers ----
+    //
+    // These tests cover the small, pure helpers that
+    // shape the reflect-step LLM response. The
+    // `reflect_and_write_memory` async path is
+    // exercised end-to-end by the executor's existing
+    // tests; the helpers below are the unit-testable
+    // surface that the LLM call hands off to.
+
+    #[test]
+    fn parse_reflect_response_accepts_pure_json_array() {
+        let resp = r#"[{"kind":"preference","key":"summary_format","content":"bullet points, never paragraphs"}]"#;
+        let v = parse_reflect_response(resp);
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].kind, "preference");
+        assert_eq!(v[0].key, "summary_format");
+        assert!(v[0].content.contains("bullet"));
+    }
+
+    #[test]
+    fn parse_reflect_response_strips_surrounding_prose() {
+        // The LLM is asked for JSON but in practice
+        // wraps it. Make sure the bracket-scan finds
+        // the array even when there's prose around it.
+        let resp = "Sure! Here you go:\n\n[{\"kind\":\"fact\",\"key\":\"name\",\"content\":\"Tyler\"}]\n\nLet me know.";
+        let v = parse_reflect_response(resp);
+        assert_eq!(v.len(), 1, "got: {v:?}");
+        assert_eq!(v[0].key, "name");
+    }
+
+    #[test]
+    fn parse_reflect_response_handles_multiple_entries() {
+        let resp = r#"[
+            {"kind":"fact","key":"name","content":"Tyler"},
+            {"kind":"preference","key":"tone","content":"friendly"}
+        ]"#;
+        let v = parse_reflect_response(resp);
+        assert_eq!(v.len(), 2);
+        assert_eq!(v[0].key, "name");
+        assert_eq!(v[1].key, "tone");
+    }
+
+    #[test]
+    fn parse_reflect_response_handles_escaped_quotes() {
+        // The bracket scan must not be fooled by a
+        // `"` inside a JSON string value.
+        let resp = r#"[{"kind":"fact","key":"name","content":"Tyler \"T\""}]"#;
+        let v = parse_reflect_response(resp);
+        assert_eq!(v.len(), 1);
+        assert!(v[0].content.contains("Tyler"));
+    }
+
+    #[test]
+    fn parse_reflect_response_returns_empty_on_garbage() {
+        assert!(parse_reflect_response("").is_empty());
+        assert!(parse_reflect_response("not json at all").is_empty());
+        assert!(parse_reflect_response("[]").is_empty());
+        // Unbalanced bracket — extract fails, the
+        // whole response is treated as a no-op.
+        assert!(parse_reflect_response("[{\"key\":\"a\"}").is_empty());
+    }
+
+    #[test]
+    fn reflect_kind_maps_known_strings() {
+        assert_eq!(
+            reflect_kind_to_mem_kind("fact"),
+            Some(crate::memory::MemKind::Fact)
+        );
+        assert_eq!(
+            reflect_kind_to_mem_kind("preference"),
+            Some(crate::memory::MemKind::Preference)
+        );
+        // Case-insensitive + tolerant of whitespace.
+        assert_eq!(
+            reflect_kind_to_mem_kind("  FACT  "),
+            Some(crate::memory::MemKind::Fact)
+        );
+    }
+
+    #[test]
+    fn reflect_kind_rejects_history_and_garbage() {
+        // History is intentionally not auto-written.
+        assert_eq!(reflect_kind_to_mem_kind("history"), None);
+        assert_eq!(reflect_kind_to_mem_kind("HISTORY"), None);
+        assert_eq!(reflect_kind_to_mem_kind(""), None);
+        assert_eq!(reflect_kind_to_mem_kind("note"), None);
+    }
+
+    #[test]
+    fn build_reflect_user_message_truncates_long_turns() {
+        use crate::llm::provider::ChatMessage;
+        let long_user = "a".repeat(2000);
+        let long_assistant = "b".repeat(2000);
+        let msgs = vec![
+            ChatMessage::System {
+                content: "system".into(),
+            },
+            ChatMessage::User {
+                content: long_user,
+            },
+            ChatMessage::Assistant {
+                content: long_assistant,
+                tool_calls: vec![],
+            },
+        ];
+        let out = build_reflect_user_message(&msgs);
+        // 600-char cap per turn + the role prefix
+        // means each turn body is well under 700 chars.
+        // We assert that the full 2000-char body did
+        // NOT make it through.
+        assert!(!out.contains(&"a".repeat(1500)));
+        assert!(!out.contains(&"b".repeat(1500)));
+        assert!(out.contains("[user]"));
+        assert!(out.contains("[assistant]"));
+    }
+
+    #[test]
+    fn build_reflect_user_message_caps_turns() {
+        use crate::llm::provider::ChatMessage;
+        // 8 user + 8 assistant turns → only the most
+        // recent 6 turns (12 messages) should appear.
+        let mut msgs = vec![ChatMessage::System {
+            content: "sys".into(),
+        }];
+        for i in 0..8 {
+            msgs.push(ChatMessage::User {
+                content: format!("u{i}"),
+            });
+            msgs.push(ChatMessage::Assistant {
+                content: format!("a{i}"),
+                tool_calls: vec![],
+            });
+        }
+        let out = build_reflect_user_message(&msgs);
+        // The earliest 2 user turns (u0, u1) should
+        // be truncated away.
+        assert!(!out.contains("[user] u0"));
+        assert!(!out.contains("[user] u1"));
+        assert!(out.contains("[user] u6"));
+        assert!(out.contains("[user] u7"));
     }
 }

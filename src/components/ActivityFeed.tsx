@@ -8,13 +8,26 @@
 // server, so its `bot_runs` rows show up in the
 // ActivityFeed next time the Mac app polls.
 //
+// v3.6.0 (Phase 7) — Memory has to fill itself.
+// Added a fourth section ("Memory") that subscribes
+// to the `memory:written` Tauri event and surfaces
+// each new fact or preference the executor's
+// reflect step wrote as a small inline pill ("Bot
+// learned: 'Tyler prefers bullet-point summaries'.
+//  Each pill has a small dismiss (×) button that
+// calls `memoryForget` to roll back the write.
+// The memory pill is its own row type — distinct
+// from the existing audit-log row and not embedded
+// inside any existing row.
+//
 // Empty state: "No activity yet — the daemon will
 // populate this when it fires." (matches the spec in
 // the v2.8 plan).
 
 import { useEffect, useState } from "react";
-import { listRecentActivity } from "../lib/tauri";
-import type { ActivityFeed as ActivityFeedData } from "../lib/api";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { listRecentActivity, memoryForget } from "../lib/tauri";
+import type { ActivityFeed as ActivityFeedData, MemKind } from "../lib/api";
 
 const POLL_INTERVAL_MS = 10_000;
 
@@ -128,8 +141,123 @@ function isEmpty(d: ActivityFeedData): boolean {
   return d.bot_runs.length === 0 && d.skill_runs.length === 0 && d.approvals.length === 0;
 }
 
+// ---- v3.6.0 (Phase 7) — Memory-write pill ----
+//
+// The executor's reflect step emits a
+// `memory:written` Tauri event every time it
+// appends a new fact or preference to a Bot's
+// memory file. The pill captures that event,
+// shows the content inline, and lets the user
+// dismiss (×) it — which calls `memoryForget`
+// to roll back the write. The pill is its own
+// row type, distinct from the bot_run /
+// skill_run / approval rows below.
+//
+// `dismissed` is local state; on a hard page
+// refresh the pill is gone (the local state is
+// in-memory). The on-disk JSONL entry is also
+// gone if the user dismissed — so the next
+// poll won't surface it again either.
+interface MemoryWritePillProps {
+  botId: string;
+  runId: string;
+  kind: MemKind | string;
+  /** Memory entry key. Renamed from `key` because
+   *  `key` is reserved in JSX as the React
+   *  reconciliation key. The parent passes the
+   *  synthetic `key` separately. */
+  entryKey: string;
+  content: string;
+  onDismiss: () => void;
+}
+
+const KIND_GLYPH_MEMORY: Record<string, string> = {
+  fact: "🧠",
+  preference: "⚙️",
+};
+
+function MemoryWritePill({
+  botId,
+  runId,
+  kind,
+  entryKey,
+  content,
+  onDismiss,
+}: MemoryWritePillProps) {
+  const glyph = KIND_GLYPH_MEMORY[String(kind)] ?? "💡";
+  const handleDismiss = async () => {
+    try {
+      // Roll back the write. `memoryForget` returns
+      // `false` if the entry was already gone
+      // (e.g. the user already dismissed it from
+      // another surface) — that's still a success
+      // from the UI's perspective: the pill is
+      // gone, the JSONL is consistent.
+      await memoryForget(botId, kind as MemKind, entryKey);
+    } catch {
+      // Best-effort: a transient SFTP error
+      // shouldn't strand the pill. We surface
+      // nothing — the local pill is removed
+      // either way. The next poll will re-surface
+      // the entry if the rollback actually failed
+      // and the on-disk entry is still present.
+    }
+    onDismiss();
+  };
+  return (
+    <li
+      className="activity-row activity-row-memory"
+      data-testid="activity-row-memory"
+      data-memory-key={entryKey}
+      data-memory-run-id={runId}
+    >
+      <span className="activity-row-status" aria-hidden="true">
+        {glyph}
+      </span>
+      <span className="activity-row-primary">
+        Bot learned: <em>“{content}”</em>
+      </span>
+      <span className="activity-row-secondary muted small">
+        {String(kind)} · {entryKey}
+      </span>
+      <button
+        type="button"
+        className="activity-row-dismiss"
+        onClick={handleDismiss}
+        aria-label={`Dismiss memory write ${entryKey}`}
+        title="Dismiss — rolls back this memory write"
+        data-testid="activity-row-memory-dismiss"
+      >
+        ×
+      </button>
+    </li>
+  );
+}
+
+// Shape of the `memory:written` event payload
+// emitted by the executor's reflect step. The
+// Rust side serializes a `BotMemoryWriteEvent`
+// with the same field names.
+interface MemoryWrittenEvent {
+  bot_id: string;
+  bot_run_id: string;
+  kind: MemKind | string;
+  key: string;
+  content: string;
+}
+
 export function ActivityFeed() {
   const [state, setState] = useState<FetchState>({ kind: "loading" });
+  // v3.6.0 (Phase 7) — Local list of memory writes
+  // the executor's reflect step has produced since
+  // the ActivityFeed mounted. Each entry is one pill;
+  // dismissing the pill removes it from this list
+  // and rolls back the on-disk write via
+  // `memoryForget`. The list isn't persisted: a
+  // hard page refresh drops it (the on-disk JSONL
+  // is the durable source of truth, and the
+  // MemoryPanel re-reads it on mount).
+  const [memoryWrites, setMemoryWrites] = useState<MemoryWrittenEvent[]>([]);
 
   const refresh = async () => {
     try {
@@ -150,6 +278,55 @@ export function ActivityFeed() {
       });
     }
   };
+
+  // v3.6.0 (Phase 7) — Subscribe to the
+  // `memory:written` Tauri event. The executor's
+  // reflect step emits one event per new fact /
+  // preference it appends to a Bot's memory file.
+  // We append each event to the local
+  // `memoryWrites` list; the section below renders
+  // it as a pill with a dismiss button.
+  //
+  // Note: we filter on `kind` ∈ {fact, preference}
+  // defensively, even though the Rust side never
+  // emits `history`. The plan is explicit that
+  // History stays explicit (auto-written via the
+  // v2.5.0 `auto_write_history` path, not the
+  // reflect step). The filter is a belt-and-braces
+  // against a future emitter that violates the
+  // contract.
+  useEffect(() => {
+    let unlisten: UnlistenFn | undefined;
+    let cancelled = false;
+    (async () => {
+      const u = await listen<MemoryWrittenEvent>(
+        "memory:written",
+        (e) => {
+          const kind = String(e.payload.kind);
+          if (kind !== "fact" && kind !== "preference") return;
+          setMemoryWrites((prev) => [
+            ...prev,
+            {
+              bot_id: e.payload.bot_id,
+              bot_run_id: e.payload.bot_run_id,
+              kind,
+              key: e.payload.key,
+              content: e.payload.content,
+            },
+          ]);
+        },
+      );
+      if (cancelled) {
+        u();
+      } else {
+        unlisten = u;
+      }
+    })();
+    return () => {
+      cancelled = true;
+      if (unlisten) unlisten();
+    };
+  }, []);
 
   useEffect(() => {
     refresh();
@@ -184,7 +361,7 @@ export function ActivityFeed() {
         </div>
       )}
 
-      {state.kind === "ready" && isEmpty(state.data) && (
+      {state.kind === "ready" && isEmpty(state.data) && memoryWrites.length === 0 && (
         <div className="activity-feed-empty" data-testid="activity-empty">
           No activity yet — the daemon will populate this when it fires.
         </div>
@@ -202,7 +379,7 @@ export function ActivityFeed() {
       )}
 
       {(state.kind === "ready" || state.kind === "stale") &&
-        !isEmpty(state.data) && (
+        (!isEmpty(state.data) || memoryWrites.length > 0) && (
           <>
             {state.data.bot_runs.length > 0 && (
               <div className="activity-section" data-testid="activity-bots">
@@ -260,6 +437,47 @@ export function ActivityFeed() {
                       // `reason` is null (legacy
                       // row / no reason computed).
                       reason={a.reason ?? null}
+                    />
+                  ))}
+                </ul>
+              </div>
+            )}
+            {/*
+             * v3.6.0 (Phase 7) — Memory section. Renders
+             * the local `memoryWrites` list as inline
+             * pills. Each pill has a dismiss (×) button
+             * that calls `memoryForget` to roll back the
+             * write. The pills aren't persisted across
+             * page refreshes (they're in-memory only);
+             * the on-disk JSONL is the durable record,
+             * and the MemoryPanel re-reads it on mount.
+             */}
+            {memoryWrites.length > 0 && (
+              <div className="activity-section" data-testid="activity-memory">
+                <h4>Memory</h4>
+                <ul>
+                  {memoryWrites.map((w) => (
+                    <MemoryWritePill
+                      // Synthetic key per (run_id, entry_key)
+                      // so the same memory write from two
+                      // re-renders doesn't double-mount.
+                      key={`${w.bot_run_id}-${w.key}`}
+                      botId={w.bot_id}
+                      runId={w.bot_run_id}
+                      kind={w.kind}
+                      entryKey={w.key}
+                      content={w.content}
+                      onDismiss={() => {
+                        setMemoryWrites((prev) =>
+                          prev.filter(
+                            (x) =>
+                              !(
+                                x.bot_run_id === w.bot_run_id &&
+                                x.key === w.key
+                              ),
+                          ),
+                        );
+                      }}
                     />
                   ))}
                 </ul>

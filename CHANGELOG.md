@@ -4,6 +4,76 @@ All notable changes to MaxBot are documented in this file. The format
 follows [Keep a Changelog](https://keepachangelog.com/) and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## v3.6.0 — 2026-09-10
+
+### Added — Phase 7 (Memory has to fill itself)
+
+Per-Bot JSONL memory (Facts / Preferences / History) has been
+readable and writable since v2.5.0, but the only writer was
+the user. v3.6.0 closes the loop: after every successful
+Bot run, the executor calls a small LLM "reflect" step that
+extracts 0–2 facts or preferences from the conversation and
+writes them to the Bot's memory file. The next run reads
+those entries from the system prompt and uses them. Auto-
+write is for Facts and Preferences only — History stays
+explicit (per the v3.6.0 plan's "Don't" list).
+
+- **Reflect step at the end of every Bot run.** After the
+  LLM stream finishes and the run is being marked Succeeded,
+  the executor spawns a background `tokio::spawn` task that
+  builds a short reflect prompt (the last few user/assistant
+  turns + a system prompt asking for 0–2 new facts or
+  preferences) and calls the same model the Bot just used.
+  The response is parsed as `[{kind, key, content}, ...]`.
+  New entries are deduped against existing memory by `key`,
+  then appended to the on-disk JSONL via the existing
+  `memory::store::append` SFTP path with the same 2-second
+  per-call timeout.
+- **Inline memory-write pill in `ActivityFeed.tsx`.** Each
+  new fact/preference the reflect step writes emits a
+  `memory:written` Tauri event with `{bot_id, run_id, kind,
+  key, content}`. The ActivityFeed listens for the event and
+  surfaces each write as a small pill ("Bot learned:
+  'Tyler prefers bullet-point summaries'") in its own
+  section. Each pill has a small dismiss (×) button that
+  rolls back the write — `memory_forget` is called with the
+  (bot_id, kind, key) and the pill is removed from the
+  local state. The pill is its own row type, distinct from
+  the existing audit-log row.
+- **Per-row delete confirmation in `MemoryPanel.tsx`.** The
+  panel already has a 🗑 button on every Fact and Preference
+  row. v3.6.0 adds a `window.confirm()` prompt before
+  delete so a stray click can't lose a confirmed fact.
+  The delete itself uses the existing `memory_forget` IPC
+  surface — no new Rust command was needed; the path
+  delegates to the v2.5.0 helper.
+- **New `delete_memory_entry` Tauri command.** Thin alias
+  for `memory_forget(bot_id, kind, key)`. The brief's
+  literal name was a separate IPC, so this entry point
+  is registered for forward-compat — any future caller
+  that wants the v3.6.0-spelled name gets the same
+  behavior as the v2.5.0 one. (See commit message for
+  the rationale.)
+- **Best-effort, not on the critical path.** The reflect
+  step is wrapped in `tokio::spawn` and never blocks the
+  main run. If the LLM call fails, the response isn't
+  parseable as JSON, the SFTP write times out, or the Bot
+  has no VM, the run still completes successfully — the
+  reflect failure is logged at `warn` and otherwise
+  invisible. The Bot's next run is unchanged.
+- **Dedupe by `key`.** If a fact/preference with the same
+  `key` already exists in the Bot's memory file, the
+  reflect step skips the write — confirmed facts aren't
+  overwritten. Re-running the same chat doesn't duplicate
+  the entry.
+- **History is intentionally NOT auto-written.** Per the
+  plan's "Don't" list: the reflect step only writes
+  `kind: "fact"` and `kind: "preference"`. `kind:
+  "history"` stays on the existing `auto_write_history`
+  path (v2.5.0), which uses a deterministic
+  user-message + assistant-reply summary without an LLM
+  call.
+
 ## v3.5.0 — 2026-09-10
 
 ### Added — Phase 6 (Multi-bot pattern + shared folder + Detective/Mailroom/Coordinator template)

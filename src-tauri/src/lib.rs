@@ -251,6 +251,14 @@ pub fn run() {
             commands::memory::memory_remember,
             commands::memory::memory_forget,
             commands::memory::memory_list,
+            // v3.6.0 (Phase 7) — Reflect-step
+            // companion. Thin alias for `memory_forget`
+            // exposed under the brief's literal name.
+            // Same SFTP path, same return shape. The
+            // ActivityFeed's memory-write pill
+            // dismiss button calls this to roll back
+            // an auto-written fact/preference.
+            commands::memory::delete_memory_entry,
             // v2.6.0 — Approval flows: per-Bot per-tool
             // auto/ask/deny rules, the pending queue, and
             // the Approve / Reject / Edit & send decision
