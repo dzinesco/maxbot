@@ -529,6 +529,11 @@ mod tests {
             state: crate::bots::BotState::Idle,
             created_at: now,
             updated_at: now,
+            // v3.2.0 — `computer_use` defaults to "vm" for new
+            // Bots. Group tests don't exercise the Computer Use
+            // field; the value is just here so the struct
+            // literal compiles.
+            computer_use: "vm".to_string(),
         };
         db.upsert_bot(&bot).expect("upsert test bot");
     }

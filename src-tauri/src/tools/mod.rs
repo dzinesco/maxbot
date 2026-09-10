@@ -30,6 +30,7 @@ pub mod shell_run;
 pub mod system;
 pub mod tool;
 pub mod tts;
+pub mod vm_computer_use;
 pub mod web_fetch;
 pub mod web_search;
 pub mod window;

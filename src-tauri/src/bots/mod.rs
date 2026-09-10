@@ -90,8 +90,55 @@ pub struct Bot {
     /// most-recent `bot_run.status` and the `computers.state` row.
     #[serde(default)]
     pub state: BotState,
+    /// v3.2.0 — Computer Use target. The Bot editor dropdown
+    /// lets the user pick between three values:
+    ///   - `"vm"` (default) — the Bot's own per-Bot Linux VM
+    ///     is the Computer Use target. The
+    ///     `vm_computer_use` tool (Chromium + xdotool + scrot
+    ///     via SSH) is in the per-Bot tool list, and the
+    ///     Mac-based `ego_browser` is NOT.
+    ///   - `"mac"` — the legacy Mac / AppleScript path. The
+    ///     `ego_browser` tool is in the per-Bot tool list,
+    ///     and `vm_computer_use` is NOT.
+    ///   - `"mac-with-approval"` — the Mac / AppleScript
+    ///     path, but every `ego_browser` call is wrapped
+    ///     in an approval gate (Phase 5's territory; the
+    ///     approval flow itself lands in v3.4.0, but the
+    ///     `bot.computer_use` enum value is reserved here).
+    ///
+    /// Stored as a free-form String (not a typed enum) so a
+    /// future addition — `"hybrid"`, `"none"`, etc — doesn't
+    /// require a schema migration. `default_computer_use()`
+    /// returns `"vm"` for any new bot, and
+    /// `parse_computer_use()` normalizes unknown / empty
+    /// values to `"vm"` on the read path so a typo can't
+    /// silently disable Computer Use.
+    #[serde(default = "default_computer_use")]
+    pub computer_use: String,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Default value for the new `computer_use` field. Used by
+/// `#[serde(default = ...)]` for old rows that pre-date v3.2.0
+/// and by the `Bot::new_*` constructors. "vm" is the
+/// v3.2.0 default — VM is now the primary Computer Use
+/// target, the Mac path is an opt-in.
+fn default_computer_use() -> String {
+    "vm".to_string()
+}
+
+/// Parse the stored `bot.computer_use` value, falling back
+/// to `"vm"` for any unknown / null / empty string. Mirrors
+/// `BotState::parse` — keeps the read path tolerant of
+/// future enum additions or typos in old DB rows.
+pub fn parse_computer_use(s: &str) -> &'static str {
+    match s {
+        "vm" => "vm",
+        "mac" => "mac",
+        "mac-with-approval" => "mac-with-approval",
+        _ => "vm",
+    }
 }
 
 impl Bot {
@@ -225,13 +272,23 @@ pub struct BotMessage {
 /// allowed tools. The returned registry still owns the same backing
 /// implementations, but `definitions()` only emits the ones the bot
 /// is permitted to call. Unknown tool names are silently dropped.
+///
+/// v3.2.0 — the Computer Use tools (`vm_computer_use` vs
+/// `ego_browser`) are swapped in or out per the bot's
+/// `computer_use` setting. The two filters are composed:
+/// the allowlist is applied first (so a bot that doesn't
+/// have `vm_computer_use` in its allowlist doesn't see it
+/// even when `computer_use == "vm"`), then the
+/// computer-use-specific swap is applied (so a bot with
+/// `ego_browser` in its allowlist but `computer_use ==
+/// "vm"` doesn't see `ego_browser` either).
 pub fn registry_for(bot: &Bot, full: &ToolRegistry) -> ToolRegistry {
-    full.filtered(&bot.allowed_tools)
+    full.computer_use_filtered(&bot.allowed_tools, &bot.computer_use)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::BotState;
+    use super::{default_computer_use, parse_computer_use, BotState};
 
     /// `BotState::parse` is the bridge between the DB column
     /// (free-form TEXT) and the typed enum. Future enum
@@ -285,5 +342,38 @@ mod tests {
     #[test]
     fn bot_state_default_is_idle() {
         assert_eq!(BotState::default(), BotState::Idle);
+    }
+
+    /// v3.2.0 — `parse_computer_use` is the read-path
+    /// bridge between the DB column and the registry
+    /// filter. A typo in the editor must not silently
+    /// disable Computer Use. The fallback is "vm" (the
+    /// v3.2.0 default) — same as `parse_computer_use`
+    /// elsewhere in the codebase.
+    #[test]
+    fn parse_computer_use_recognizes_three_known_values() {
+        assert_eq!(parse_computer_use("vm"), "vm");
+        assert_eq!(parse_computer_use("mac"), "mac");
+        assert_eq!(parse_computer_use("mac-with-approval"), "mac-with-approval");
+    }
+
+    #[test]
+    fn parse_computer_use_falls_back_to_vm_for_unknown_values() {
+        // Empty (pre-v3.2.0 row never set the column,
+        // though the migration DEFAULT makes that rare),
+        // typo, future value — all fall back to "vm".
+        assert_eq!(parse_computer_use(""), "vm");
+        assert_eq!(parse_computer_use("VMM"), "vm");
+        assert_eq!(parse_computer_use("mac-approval"), "vm");
+        assert_eq!(parse_computer_use("hybrid"), "vm");
+    }
+
+    #[test]
+    fn default_computer_use_returns_vm() {
+        // Pinned: v3.2.0 made "vm" the default for new
+        // Bots. A future change ("mac"? "vm-with-approval"?)
+        // would be a deliberate policy shift, not a typo
+        // to slip through.
+        assert_eq!(default_computer_use(), "vm");
     }
 }

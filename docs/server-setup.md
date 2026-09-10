@@ -263,6 +263,18 @@ injects the desktop packages + VNC server per-VM via cloud-init's
 `runcmd` when the VM first boots — that keeps the base image small
 and the provisioning step flexible. The per-VM install includes:
 `xfce4`, `xfce4-goodies`, `x11vnc`, `tigervnc-standalone-server`,
-`qemu-guest-agent`, and `openssh-server`. x11vnc is set to start
-on display `:1` with the VNC password the provisioning step
-generated.
+`qemu-guest-agent`, `openssh-server`, **`chromium-browser`**,
+**`xdotool`**, and **`scrot`** (the last three are v3.2.0 — they
+back the `vm_computer_use` tool that drives the Bot's own browser
+and desktop over SSH). x11vnc is set to start on display `:1` with
+the VNC password the provisioning step generated.
+
+> **Re-provisioning note (v3.2.0):** cloud-init only runs ONCE per
+> VM, at first boot. If you have existing v3.0.x or v3.1.x VMs
+> they will NOT pick up the new packages automatically — destroy
+> them and provision a fresh VM to get the v3.2.0 toolchain
+> (`chromium-browser`, `xdotool`, `scrot`). The `apt install` step
+> in cloud-init's `packages:` block is idempotent on a fresh image
+> (apt short-circuits when the package is already at the right
+> version), so a destroyed-and-reprovisioned VM does not need any
+> extra care.

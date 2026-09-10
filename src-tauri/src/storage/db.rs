@@ -606,6 +606,19 @@ impl Database {
             "state",
             "TEXT NOT NULL DEFAULT 'idle'",
         )?;
+        // v3.2.0 — Computer Use target. The Bot editor lets the
+        // user pick between "vm" (default, the per-Bot Linux VM
+        // via `vm_computer_use`), "mac" (legacy `ego_browser`),
+        // and "mac-with-approval" (Mac path wrapped in an
+        // approval gate, Phase 5). Existing rows backfill to
+        // "vm" so v3.1.0 Bots seamlessly move to the in-VM
+        // path on first open of the Bot editor in v3.2.0+.
+        add_column_if_missing(
+            &conn,
+            "bots",
+            "computer_use",
+            "TEXT NOT NULL DEFAULT 'vm'",
+        )?;
         // v2.2.0 — forward-compat for v2.3 schedules. v2.2 doesn't
         // wire the schedules UI to Skills, but adding the column now
         // means a future migration doesn't have to ALTER an
@@ -1037,7 +1050,7 @@ impl Database {
     pub fn list_bots(&self) -> rusqlite::Result<Vec<crate::bots::Bot>> {
         let conn = self.conn.lock().expect("db lock poisoned");
         let mut stmt = conn.prepare(
-            "SELECT id, name, description, system_prompt, default_model, allowed_tools, icon, color, avatar_color, last_active_at, state, created_at, updated_at
+            "SELECT id, name, description, system_prompt, default_model, allowed_tools, icon, color, avatar_color, last_active_at, state, computer_use, created_at, updated_at
              FROM bots ORDER BY name COLLATE NOCASE ASC",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -1052,6 +1065,12 @@ impl Database {
             // Pull as `Option<String>` and default to "" so the
             // presence gradient can fall back to `color`.
             let avatar_color: Option<String> = row.get(8)?;
+            // v3.2.0 — `computer_use` defaults to "vm" on the
+            // read path (via parse_computer_use) so any future
+            // value (e.g. "hybrid") and any pre-v3.2.0 row
+            // (which carries "vm" from the column DEFAULT)
+            // land in a known-good state.
+            let computer_use_str: String = row.get(11)?;
             Ok(crate::bots::Bot {
                 id: row.get(0)?,
                 name: row.get(1)?,
@@ -1064,8 +1083,9 @@ impl Database {
                 avatar_color: avatar_color.unwrap_or_default(),
                 last_active_at: last_active_str.map(parse_dt),
                 state: crate::bots::BotState::parse(&state_str),
-                created_at: parse_dt(row.get::<_, String>(11)?),
-                updated_at: parse_dt(row.get::<_, String>(12)?),
+                computer_use: crate::bots::parse_computer_use(&computer_use_str).to_string(),
+                created_at: parse_dt(row.get::<_, String>(12)?),
+                updated_at: parse_dt(row.get::<_, String>(13)?),
             })
         })?;
         let mut out = Vec::new();
@@ -1078,7 +1098,7 @@ impl Database {
     pub fn get_bot(&self, id: &str) -> rusqlite::Result<Option<crate::bots::Bot>> {
         let conn = self.conn.lock().expect("db lock poisoned");
         let mut stmt = conn.prepare(
-            "SELECT id, name, description, system_prompt, default_model, allowed_tools, icon, color, avatar_color, last_active_at, state, created_at, updated_at
+            "SELECT id, name, description, system_prompt, default_model, allowed_tools, icon, color, avatar_color, last_active_at, state, computer_use, created_at, updated_at
              FROM bots WHERE id = ?",
         )?;
         let mut rows = stmt.query(params![id])?;
@@ -1094,6 +1114,8 @@ impl Database {
         // v2.0.1 fix: same as `list_bots` — `avatar_color` is
         // nullable so v1.0 rows carry NULL. Default to "".
         let avatar_color: Option<String> = row.get(8)?;
+        // v3.2.0 — see list_bots for the parse_computer_use rationale.
+        let computer_use_str: String = row.get(11)?;
         Ok(Some(crate::bots::Bot {
             id: row.get(0)?,
             name: row.get(1)?,
@@ -1106,8 +1128,9 @@ impl Database {
             avatar_color: avatar_color.unwrap_or_default(),
             last_active_at: last_active_str.map(parse_dt),
             state: crate::bots::BotState::parse(&state_str),
-            created_at: parse_dt(row.get::<_, String>(11)?),
-            updated_at: parse_dt(row.get::<_, String>(12)?),
+            computer_use: crate::bots::parse_computer_use(&computer_use_str).to_string(),
+            created_at: parse_dt(row.get::<_, String>(12)?),
+            updated_at: parse_dt(row.get::<_, String>(13)?),
         }))
     }
 
@@ -1116,9 +1139,15 @@ impl Database {
         let allowed_tools_json =
             serde_json::to_string(&bot.allowed_tools).unwrap_or_else(|_| "[]".to_string());
         let last_active = bot.last_active_at.as_ref().map(|d| d.to_rfc3339());
+        // v3.2.0 — normalize the stored value via
+        // parse_computer_use so a typo in the editor can't
+        // persist a value the registry won't recognize.
+        // The enum has exactly three valid values today; an
+        // empty / unknown string lands in "vm" (the default).
+        let computer_use = crate::bots::parse_computer_use(&bot.computer_use).to_string();
         conn.execute(
-            "INSERT INTO bots (id, name, description, system_prompt, default_model, allowed_tools, icon, color, avatar_color, last_active_at, state, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            "INSERT INTO bots (id, name, description, system_prompt, default_model, allowed_tools, icon, color, avatar_color, last_active_at, state, computer_use, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT(id) DO UPDATE SET
                 name = excluded.name,
                 description = excluded.description,
@@ -1130,6 +1159,7 @@ impl Database {
                 avatar_color = excluded.avatar_color,
                 last_active_at = excluded.last_active_at,
                 state = excluded.state,
+                computer_use = excluded.computer_use,
                 updated_at = excluded.updated_at",
             params![
                 bot.id,
@@ -1143,6 +1173,7 @@ impl Database {
                 bot.avatar_color,
                 last_active,
                 bot.state.as_str(),
+                computer_use,
                 bot.created_at.to_rfc3339(),
                 bot.updated_at.to_rfc3339(),
             ],
@@ -2673,6 +2704,11 @@ mod tests {
             avatar_color: "".to_string(),
             last_active_at: None,
             state: crate::bots::BotState::Idle,
+            // v3.2.0 — `computer_use` defaults to "vm" for
+            // new Bots. These tests don't exercise the
+            // field; the value is just here so the struct
+            // literal compiles.
+            computer_use: "vm".to_string(),
             created_at: now,
             updated_at: now,
         };
@@ -2752,6 +2788,11 @@ mod tests {
             avatar_color: "#ff5c7c".to_string(),
             last_active_at: Some(now),
             state: crate::bots::BotState::Thinking,
+            // v3.2.0 — added the `computer_use` field.
+            // This test pins avatar_color + state +
+            // last_active_at round-trip; the value here is
+            // just to make the struct literal compile.
+            computer_use: "vm".to_string(),
             created_at: now,
             updated_at: now,
         };
@@ -2834,6 +2875,10 @@ mod tests {
             updated_at: now,
             state: crate::bots::BotState::Idle,
             last_active_at: None,
+            // v3.2.0 — `computer_use` defaults to "vm" for
+            // new Bots. The token tests don't exercise
+            // the field.
+            computer_use: "vm".to_string(),
         })
         .expect("upsert bot");
     }
@@ -2920,6 +2965,8 @@ mod tests {
                 updated_at: now,
                 state: crate::bots::BotState::Idle,
                 last_active_at: None,
+                // v3.2.0 — `computer_use` defaults to "vm".
+                computer_use: "vm".to_string(),
             })
             .expect("upsert");
         }

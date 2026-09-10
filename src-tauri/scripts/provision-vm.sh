@@ -132,6 +132,31 @@ packages:
   - tigervnc-standalone-server
   - qemu-guest-agent
   - openssh-server
+  # v3.2.0 — in-VM Computer Use. The `vm_computer_use` tool
+  # (src-tauri/src/tools/vm_computer_use.rs) drives the VM's own
+  # browser + desktop via these CLI tools:
+  #   - `chromium-browser` is the Bot's browser, opened via
+  #     `chromium --no-sandbox <url>`. The `--no-sandbox` is
+  #     needed because we're running as root inside the VM
+  #     (cloud-init's `bootcmd` block creates the `bot` user
+  #     and the per-Bot Computer runs as `bot`, but chromium
+  #     still needs `--no-sandbox` for SUID sandboxes that
+  #     conflict with noVNC's x11vnc session).
+  #   - `xdotool` provides `mousemove x y`, `click 1`, `type`,
+  #     and `key` for synthetic input. The tool shells out to
+  #     these via the existing SshPool.
+  #   - `scrot` is a tiny CLI screenshot tool (60KB). The tool
+  #     calls `scrot -z /tmp/screen.png` and SCPs the result
+  #     back as the post-action screenshot. `xwd` would also
+  #     work but requires piping through `convert`.
+  # These three packages are added to the `packages:` block
+  # (not the `runcmd:` block) so cloud-init's `package_update`
+  # + `package_install` modules handle them as a single apt
+  # transaction. Re-provision existing VMs to pick them up —
+  # cloud-init only runs once per VM (at first boot).
+  - chromium-browser
+  - xdotool
+  - scrot
 runcmd:
   - systemctl set-default graphical.target
   - systemctl enable --now qemu-guest-agent

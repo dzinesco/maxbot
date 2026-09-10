@@ -354,6 +354,20 @@ export interface Bot {
   avatar_color?: string;
   last_active_at?: string | null;
   state?: BotState;
+  // v3.2.0 — Computer Use target. The Bot editor exposes
+  // a dropdown that maps to this field; the value picks
+  // which Computer Use tools the Bot sees at run time.
+  // "vm" (default) → the per-Bot Linux VM is the
+  // Computer Use target (vm_computer_use +
+  // vm_browser_open). "mac" → the legacy
+  // ego_browser / AppleScript path. "mac-with-approval"
+  // → reserved for the v3.4.0 Takeover work; the enum
+  // value is in the schema today so a future Bot
+  // doesn't need a migration. Optional in the TS type
+  // so a v3.1.0 client deserializing a v3.2.0 row
+  // doesn't crash — `BotEditor` falls back to "vm"
+  // when the field is missing.
+  computer_use?: "vm" | "mac" | "mac-with-approval" | string;
   created_at: string;
   updated_at: string;
 }
@@ -570,6 +584,13 @@ export function blankBot(): Bot {
     avatar_color: "",
     last_active_at: null,
     state: "idle",
+    // v3.2.0 — Computer Use target. New Bots default to
+    // "vm" so the in-VM path is the out-of-the-box
+    // behavior. The Bot editor's dropdown also falls
+    // back to "vm" when this field is empty, so an
+    // older client that pre-dates the field still
+    // lands in a known-good state.
+    computer_use: "vm",
     created_at: now,
     updated_at: now,
   };

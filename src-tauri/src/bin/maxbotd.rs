@@ -754,6 +754,10 @@ mod tests {
             updated_at: Utc::now(),
             state: maxbot_lib::bots::BotState::Idle,
             last_active_at: None,
+            // v3.2.0 — added the `computer_use` field; default
+            // to "vm" so the daemon's test fixtures match the
+            // v3.2.0 production default.
+            computer_use: "vm".to_string(),
         };
         db.upsert_bot(&bot).expect("upsert bot");
         // Configure a token so the path is "missing
@@ -857,6 +861,10 @@ mod tests {
             updated_at: Utc::now(),
             state: maxbot_lib::bots::BotState::Idle,
             last_active_at: None,
+            // v3.2.0 — `computer_use` defaults to "vm" for new
+            // Bots; this is a test fixture so it doesn't
+            // affect production defaults.
+            computer_use: "vm".to_string(),
         };
         db.upsert_bot(&bot).expect("upsert bot");
         let token = db.rotate_daemon_token("bot-rt").expect("rotate");

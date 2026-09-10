@@ -113,6 +113,10 @@ fn seed_bot(db: &Database, id: &str, name: &str) {
         avatar_color: String::new(),
         last_active_at: None,
         state: BotState::Idle,
+        // v3.2.0 — `computer_use` defaults to "vm" for
+        // new Bots. Scheduler e2e tests don't exercise
+        // the field.
+        computer_use: "vm".to_string(),
         created_at: now,
         updated_at: now,
     };

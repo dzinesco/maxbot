@@ -1000,6 +1000,10 @@ mod tests {
             avatar_color: "".to_string(),
             last_active_at: None,
             state: crate::bots::BotState::Idle,
+            // v3.2.0 — `computer_use` defaults to "vm" for
+            // new Bots. Smoke tests don't exercise the
+            // field.
+            computer_use: "vm".to_string(),
             created_at: now,
             updated_at: now,
         };
@@ -1212,6 +1216,10 @@ mod tests {
             avatar_color: "".to_string(),
             last_active_at: None,
             state: crate::bots::BotState::Idle,
+            // v3.2.0 — `computer_use` defaults to "vm" for
+            // new Bots. Console smoke tests don't exercise
+            // the field.
+            computer_use: "vm".to_string(),
             created_at: now,
             updated_at: now,
         };
@@ -1413,6 +1421,11 @@ mod tests {
             avatar_color: String::new(),
             last_active_at: None,
             state: crate::bots::BotState::Idle,
+            // v3.2.0 — `computer_use` defaults to "vm" for
+            // new Bots. This insert helper is used by
+            // several test setups; the value is just here
+            // so the struct literal compiles.
+            computer_use: "vm".to_string(),
             created_at: now,
             updated_at: now,
         };

@@ -672,6 +672,40 @@ export function BotEditor({
                 {provisionError}
               </div>
             )}
+            {/* v3.2.0 — Computer Use target. The Bot editor
+                lets the user pick between the in-VM path
+                (default, the Bot's own Linux VM drives
+                Chromium + xdotool) and the Mac /
+                AppleScript path. "Mac with approval" is
+                reserved for the v3.4.0 Takeover work; the
+                enum value lives in the schema today so
+                future Bots don't need a migration. The
+                setting is per-Bot — different Bots can
+                drive different surfaces. New Bots default
+                to "vm" via `blankBot()`. */}
+            <div className="form-row">
+              <label>
+                Computer Use
+                <span className="hint">
+                  {" "}— which surface the Bot's Computer
+                  Use tools drive. The VM is the default in
+                  v3.2.0; the Mac path is an opt-in
+                  fallback.
+                </span>
+              </label>
+              <select
+                value={bot.computer_use || "vm"}
+                onChange={(e) =>
+                  setBot({ ...bot, computer_use: e.target.value })
+                }
+                data-testid="computer-use-select"
+                data-setting-key={`bot.${bot.id || initial.id}.computer-use`}
+              >
+                <option value="vm">VM (default)</option>
+                <option value="mac">Mac</option>
+                <option value="mac-with-approval">Mac with approval</option>
+              </select>
+            </div>
           </section>
 
           {/* Capabilities */}

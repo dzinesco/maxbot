@@ -103,6 +103,11 @@ mod tests {
             avatar_color: String::new(),
             last_active_at: None,
             state: crate::bots::BotState::Idle,
+            // v3.2.0 — `computer_use` defaults to "vm" for
+            // new Bots. Skill tests don't exercise the
+            // field; the value is just here so the struct
+            // literal compiles.
+            computer_use: "vm".to_string(),
             created_at: now,
             updated_at: now,
         };

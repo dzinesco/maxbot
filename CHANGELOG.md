@@ -4,6 +4,88 @@ All notable changes to MaxBot are documented in this file. The format
 follows [Keep a Changelog](https://keepachangelog.com/) and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## v3.2.0 — 2026-09-09
+
+### Added
+- **`vm_computer_use` tool.** A single LLM-callable tool with a
+  `script` parameter — newline-separated helper calls
+  (`screenshot()`, `click_at(x, y)`, `type(text)`, `key(name)`,
+  `open_url(url)`). Each helper SSHes to the Bot's per-Bot Linux
+  VM and runs the right `xdotool` / `chromium-browser` / `scrot`
+  command. The post-action screenshot (base64 PNG) is the tool's
+  result, mirroring `ego_browser`'s shape. Requires consent
+  because the script can navigate, click, and fill forms in the
+  Bot's own browser.
+- **`vm_browser_open` skill primitive.** A thin wrapper around
+  `vm_computer_use` for the "navigate to a URL and snapshot"
+  case. The recorder auto-rewrites a recorded `vm_computer_use`
+  step whose script is exactly one `open_url(...)` call into a
+  `vm_browser_open(url)` step — cleaner skill specs, same end
+  state on replay (the replay path calls the wrapper, which
+  dispatches back to `vm_computer_use` with the same
+  `open_url` script).
+- **Per-Bot `computer_use` setting.** New Bots default to
+  `"vm"`. The Bot editor exposes a `Computer Use` dropdown
+  with three options: VM (default), Mac, Mac with approval.
+  The setting is read by the tool registry when constructing
+  the per-Bot tool list — `vm_computer_use` and
+  `vm_browser_open` are in the list when `computer_use ==
+  "vm"`; `ego_browser` is in the list when `computer_use ==
+  "mac"`. The `mac-with-approval` value is reserved for the
+  v3.4.0 Takeover work; the enum lives in the schema today so a
+  future Bot doesn't need a migration.
+- **`chromium-browser`, `xdotool`, `scrot` in cloud-init.** The
+  new packages join the `packages:` block in
+  `src-tauri/scripts/provision-vm.sh` (NOT `provision.rs` —
+  the cloud-init YAML lives in the shell script, not the
+  Rust file). cloud-init's `package_install` module handles
+  them as a single apt transaction; the install is idempotent
+  on a fresh image.
+- **3+ new vitest cases** for the Bot editor's new `Computer
+  Use` dropdown (default value, all three options, save flow
+  propagates the choice). Plus Rust tests for
+  `parse_computer_use` (3 known values + unknown-value
+  fallback) and the recorder's `vm_browser_open` rewrite
+  (single `open_url`, multi-call scripts, non-vm_computer_use
+  steps, end-to-end `recorder.record()`).
+
+### Changed
+- `tools/registry::ToolRegistry::computer_use_filtered` is the
+  new per-Bot tool filter; it composes on top of the
+  allowlist (`allowed_tools`) and swaps the Computer Use
+  tools in or out per `bot.computer_use`. Bots with
+  `allowed_tools: []` see no Computer Use tools regardless
+  of the `computer_use` value.
+- The `Bot` struct gains a `computer_use: String` field with
+  a `#[serde(default = "default_computer_use")]` fallback to
+  `"vm"`. The `bots` SQLite table gains a `computer_use`
+  column with `DEFAULT 'vm'`, added via
+  `add_column_if_missing` so existing rows backfill cleanly.
+
+### Notes
+- **`bin/maxbotd.rs` had two test-fixture `Bot { ... }`
+  constructors updated** to add the new
+  `computer_use: "vm".to_string()` field. The brief asked
+  for "no daemon changes," but adding a struct field
+  requires every constructor to set the new field or
+  compilation fails. The change is 2 lines, test-only
+  (no daemon behavior), and required to make the slice
+  compile. Documented as the only deviation.
+- **`src-tauri/src/groups/mod.rs` had one test-fixture
+  `Bot { ... }` constructor updated** for the same
+  reason. Also test-only, 1 line.
+- **The cloud-init `packages:` block is in
+  `src-tauri/scripts/provision-vm.sh`, NOT
+  `src-tauri/src/computer/provision.rs`** — the brief
+  asked the implementer to find it. The new packages
+  are added to the existing YAML block in
+  `provision-vm.sh`.
+- **Existing VMs do NOT pick up the new packages
+  automatically.** cloud-init only runs once per VM (at
+  first boot). Re-provision existing VMs to get the
+  v3.2.0 toolchain. The `docs/server-setup.md` note
+  explicitly says so.
+
 ## v3.1.0 — 2026-09-09
 
 ### Added

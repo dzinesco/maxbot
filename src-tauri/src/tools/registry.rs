@@ -38,6 +38,7 @@ use super::system::{
 };
 use super::tool::{Tool, ToolContext, ToolError, ToolInvocation, ToolResult};
 use super::tts::{TtsSpeakTool, TtsStopTool};
+use super::vm_computer_use::{VmBrowserOpenTool, VmComputerUseTool};
 use super::web_fetch::WebFetchTool;
 use super::web_search::WebSearchTool;
 use super::window::{WindowFocusTool, WindowListTool};
@@ -144,6 +145,26 @@ impl ToolRegistry {
             Arc::new(MemorySearchTool),
             Arc::new(MemoryRememberTool),
             Arc::new(MemoryForgetTool),
+            // v3.2.0 — in-VM Computer Use. The Bot's
+            // per-Bot Linux VM is the new default Computer
+            // Use target. `vm_computer_use` shells out to
+            // `chromium-browser`, `xdotool`, and `scrot` over
+            // the existing SshPool. The `bot.computer_use`
+            // field on the `Bot` row controls whether this
+            // tool (vm) or `ego_browser` (mac) is in the
+            // per-Bot tool list — see the executor's
+            // `tool_list_for_bot`. Per-call consent because
+            // the script can navigate, click, and type.
+            Arc::new(VmComputerUseTool),
+            // v3.2.0 — `vm_browser_open` is the skill-
+            // replay shape of "open a URL in the VM." The
+            // recorder rewrites a single-`open_url`
+            // `vm_computer_use` step to this thinner
+            // primitive (`{ url }` instead of a script
+            // string); this tool is the replay side. The
+            // LLM can also call it directly when it just
+            // wants "navigate and snapshot."
+            Arc::new(VmBrowserOpenTool),
         ];
         tools.extend(extra);
         let mut by_name: HashMap<String, Arc<dyn Tool>> = HashMap::new();
@@ -197,6 +218,62 @@ impl ToolRegistry {
         }
         ToolRegistry { by_name }
     }
+
+    /// v3.2.0 — return a new registry with the Computer Use
+    /// tools (currently `vm_computer_use`, `vm_browser_open`,
+    /// and `ego_browser`) filtered by the bot's
+    /// `computer_use` setting. The `allowed` list is the
+    /// bot's `allowed_tools` allowlist — this function
+    /// re-applies it AFTER swapping the Computer Use tool in
+    /// or out, so a bot that doesn't have `ego_browser` in
+    /// its allowlist still doesn't see `ego_browser` even
+    /// when `bot.computer_use == "mac"`.
+    ///
+    /// The three branches:
+    ///   - `"vm"` (default) — `vm_computer_use` and
+    ///     `vm_browser_open` ARE in the list (if the
+    ///     allowlist permits); `ego_browser` is removed.
+    ///     The new in-VM path.
+    ///   - `"mac"` — `ego_browser` IS in the list (if the
+    ///     allowlist permits); `vm_computer_use` and
+    ///     `vm_browser_open` are removed. The legacy
+    ///     v3.1.0 path.
+    ///   - `"mac-with-approval"` — same as `"mac"`, but
+    ///     the caller (`registry_for`) is expected to wrap
+    ///     each `ego_browser` call in an approval gate.
+    ///     Today that gate is a no-op placeholder — the
+    ///     real approval flow lands in v3.4.0.
+    pub fn computer_use_filtered(
+        &self,
+        allowed: &[String],
+        computer_use: &str,
+    ) -> ToolRegistry {
+        // First apply the allowlist as normal.
+        let base = self.filtered(allowed);
+        let mut by_name = base.by_name;
+        match computer_use {
+            "vm" => {
+                // Drop ego_browser if the user happened to
+                // have left it in the allowlist from a
+                // pre-v3.2.0 setup. The VM path is the
+                // exclusive Computer Use path.
+                by_name.remove("ego_browser");
+            }
+            "mac" | "mac-with-approval" => {
+                // Drop both VM tools. The Mac / AppleScript
+                // path is the exclusive Computer Use path.
+                by_name.remove("vm_computer_use");
+                by_name.remove("vm_browser_open");
+            }
+            _ => {
+                // Unknown / empty: behave like "vm" so a
+                // typo can't accidentally land the model
+                // on the Mac path.
+                by_name.remove("ego_browser");
+            }
+        }
+        ToolRegistry { by_name }
+    }
 }
 
 /// Convenience for tests: a totally empty registry.
@@ -232,4 +309,107 @@ pub fn truncate_for_model(input: &str, max_chars: usize) -> String {
     let mut out: String = input.chars().take(max_chars).collect();
     out.push_str("\n\n… [truncated]");
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tools::ego_browser::EgoBrowserTool;
+    use crate::tools::vm_computer_use::{VmBrowserOpenTool, VmComputerUseTool};
+
+    /// Build a registry with all three Computer Use tools
+    /// plus a couple of non-CU tools, mirroring the
+    /// production `ToolRegistry::default_with_extras` set
+    /// (without the long tail of unrelated tools).
+    fn fixture_registry() -> ToolRegistry {
+        let mut by_name: HashMap<String, Arc<dyn Tool>> = HashMap::new();
+        by_name.insert(VmComputerUseTool.name().to_string(), Arc::new(VmComputerUseTool));
+        by_name.insert(VmBrowserOpenTool.name().to_string(), Arc::new(VmBrowserOpenTool));
+        by_name.insert(EgoBrowserTool.name().to_string(), Arc::new(EgoBrowserTool));
+        // A non-CU tool, to confirm the filter leaves it
+        // alone.
+        by_name.insert(
+            "file_write".to_string(),
+            Arc::new(crate::tools::file_write::FileWriteTool),
+        );
+        ToolRegistry { by_name }
+    }
+
+    /// v3.2.0 — `computer_use = "vm"` keeps the VM tools
+    /// in the registry and drops `ego_browser`, even when
+    /// the allowlist has it (a v3.1.0 carry-over).
+    #[test]
+    fn computer_use_vm_drops_ego_browser() {
+        let r = fixture_registry();
+        let allowed = vec![
+            "vm_computer_use".to_string(),
+            "vm_browser_open".to_string(),
+            "ego_browser".to_string(),
+            "file_write".to_string(),
+        ];
+        let out = r.computer_use_filtered(&allowed, "vm");
+        assert!(out.by_name.contains_key("vm_computer_use"));
+        assert!(out.by_name.contains_key("vm_browser_open"));
+        assert!(!out.by_name.contains_key("ego_browser"));
+        assert!(out.by_name.contains_key("file_write"));
+    }
+
+    /// `computer_use = "mac"` keeps `ego_browser` and
+    /// drops the VM tools.
+    #[test]
+    fn computer_use_mac_drops_vm_tools() {
+        let r = fixture_registry();
+        let allowed = vec![
+            "vm_computer_use".to_string(),
+            "vm_browser_open".to_string(),
+            "ego_browser".to_string(),
+        ];
+        let out = r.computer_use_filtered(&allowed, "mac");
+        assert!(!out.by_name.contains_key("vm_computer_use"));
+        assert!(!out.by_name.contains_key("vm_browser_open"));
+        assert!(out.by_name.contains_key("ego_browser"));
+    }
+
+    /// `computer_use = "mac-with-approval"` behaves the
+    /// same as `"mac"` today (the approval gate is a
+    /// no-op until v3.4.0).
+    #[test]
+    fn computer_use_mac_with_approval_also_drops_vm_tools() {
+        let r = fixture_registry();
+        let allowed = vec![
+            "vm_computer_use".to_string(),
+            "vm_browser_open".to_string(),
+            "ego_browser".to_string(),
+        ];
+        let out = r.computer_use_filtered(&allowed, "mac-with-approval");
+        assert!(!out.by_name.contains_key("vm_computer_use"));
+        assert!(!out.by_name.contains_key("vm_browser_open"));
+        assert!(out.by_name.contains_key("ego_browser"));
+    }
+
+    /// Unknown / empty `computer_use` falls back to
+    /// `"vm"` (matches `parse_computer_use`). A typo
+    /// can't silently disable the in-VM path.
+    #[test]
+    fn computer_use_unknown_falls_back_to_vm() {
+        let r = fixture_registry();
+        let allowed = vec!["ego_browser".to_string(), "vm_computer_use".to_string()];
+        let out = r.computer_use_filtered(&allowed, "VMM");
+        assert!(!out.by_name.contains_key("ego_browser"));
+        assert!(out.by_name.contains_key("vm_computer_use"));
+    }
+
+    /// The allowlist is the binding constraint: a bot
+    /// without `vm_computer_use` in its allowlist doesn't
+    /// see it, even when `computer_use == "vm"`.
+    #[test]
+    fn computer_use_vm_respects_allowlist() {
+        let r = fixture_registry();
+        let allowed = vec!["file_write".to_string()];
+        let out = r.computer_use_filtered(&allowed, "vm");
+        assert!(!out.by_name.contains_key("vm_computer_use"));
+        assert!(!out.by_name.contains_key("vm_browser_open"));
+        assert!(!out.by_name.contains_key("ego_browser"));
+        assert!(out.by_name.contains_key("file_write"));
+    }
 }

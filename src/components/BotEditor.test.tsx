@@ -182,6 +182,62 @@ describe("BotEditor — computer section", () => {
   });
 });
 
+// ---- v3.2.0 — Computer Use target dropdown ----
+//
+// The Bot editor exposes a `Computer Use` dropdown that
+// controls which Computer Use tools the Bot sees at run
+// time. "VM" is the v3.2.0 default; "Mac" and "Mac with
+// approval" are opt-in fallbacks.
+
+describe("BotEditor — Computer Use dropdown (v3.2.0)", () => {
+  it("renders a select with VM as the default", () => {
+    const onSave = vi.fn((bot: Bot) => Promise.resolve({ ...bot, id: "x" }));
+    // No override — blankBot() defaults to "" (the
+    // server-side default is "vm" via the column DEFAULT
+    // and serde fallback). The editor's UI falls through
+    // to "vm" when the field is empty.
+    renderEditor(onSave);
+    const select = screen.getByTestId(
+      "computer-use-select",
+    ) as HTMLSelectElement;
+    expect(select.value).toBe("vm");
+  });
+
+  it("exposes all three options", () => {
+    const onSave = vi.fn((bot: Bot) => Promise.resolve({ ...bot, id: "x" }));
+    renderEditor(onSave);
+    const select = screen.getByTestId(
+      "computer-use-select",
+    ) as HTMLSelectElement;
+    const values = Array.from(select.options).map((o) => o.value).sort();
+    expect(values).toEqual(["mac", "mac-with-approval", "vm"]);
+  });
+
+  it("switching to Mac updates the bot and persists on save", async () => {
+    const onSave = vi.fn((bot: Bot) => Promise.resolve({ ...bot, id: "saved-cu" }));
+    renderEditor(onSave);
+
+    const select = screen.getByTestId(
+      "computer-use-select",
+    ) as HTMLSelectElement;
+    fireEvent.change(select, { target: { value: "mac" } });
+    expect(select.value).toBe("mac");
+
+    // Fill in a name (required by the save flow) and save.
+    const nameInput = screen.getByPlaceholderText(
+      "e.g. Figma Bro, Devbot, Spec",
+    ) as HTMLInputElement;
+    fireEvent.change(nameInput, { target: { value: "MacBot" } });
+    fireEvent.click(screen.getByTestId("bot-editor-save"));
+
+    await waitFor(() => {
+      expect(onSave).toHaveBeenCalledTimes(1);
+    });
+    const saved = onSave.mock.calls[0][0];
+    expect(saved.computer_use).toBe("mac");
+  });
+});
+
 describe("BotEditor — save flow", () => {
   it("calls computerProvision with disk+RAM when checkbox is checked", async () => {
     const onSave = vi.fn((bot: Bot) => Promise.resolve({ ...bot, id: "saved-1" }));
