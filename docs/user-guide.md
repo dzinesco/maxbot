@@ -138,7 +138,7 @@ The first-boot `apt-get install` of LightDM + XFCE takes 3–5 minutes
 in the background — the VM is usable (SSH-able, qemu-guest-agent
 responding) long before the desktop is fully ready.
 
-#### Three access levels (Status / Preview / Takeover)
+#### Three access levels (Status / Preview / Drive)
 
 > See [`docs/first-bot-20-minutes.md`](first-bot-20-minutes.md) for
 > the canonical end-to-end "show me the new flow" walk-through.
@@ -153,27 +153,26 @@ Once a Bot has a running computer, three ways to see what it's doing:
   over the existing SSH connection). The Bot can keep driving
   while you watch. **No in-VM VNC server runs in v3.7.2+** — the
   Preview is a single JPEG that refreshes, not a live RFB stream.
-- **Takeover** — full mouse + keyboard control via TigerVNC
-  (v3.7.5+; macOS Screen Sharing mis-handles `VNC_AUTH_NONE` and
-  prompts for a password, so we ship TigerVNC instead). MaxBot
-  opens an `ssh -N -L <port>:127.0.0.1:<qemu-vnc> <user>@<host>`
-  tunnel and hands the renderer `vnc://127.0.0.1:<port>`. The
-  panel mounts in `takeover` mode with two footer buttons:
-  - **Hand back** — the 2FA happy path. Decides the gating
-    approval as `approved` and the Bot's run resumes on the next
-    turn. (See [`docs/2fa-walkthrough.md`](2fa-walkthrough.md)
-    for the full flow.)
-  - **Stop now** (v3.7.5+) — the abort path. Decides the gating
-    approval as `rejected` and (best-effort) calls `stop_bot_run`
-    to halt the executor. The run row ends up `Failed`.
+- **Drive** (v3.7.9+, renamed from "Take over") — a single
+  in-panel click-through. Pointer + keyboard on the JPEG are
+  forwarded to xdotool over the existing SSH connection. A banner
+  reads "You are driving — bot input paused" while active. No
+  external VNC viewer; no password prompt. Click **Hand back** in
+  the banner when done — the per-Bot driving flag is cleared and
+  the Bot's run resumes on the next turn. (See
+  [`docs/2fa-walkthrough.md`](2fa-walkthrough.md) for the full
+  flow.) The abort path is the approval row's **Stop now**
+  button — unchanged from v3.7.5.
 
-The loopback URL never contains the server's IP/hostname — both
-Preview and Takeover bind 127.0.0.1 only, so a process on the Mac
-that can reach localhost can't accidentally reach the VM's
-framebuffer.
+The per-Bot driving flag is the source of truth for "is the user
+driving?". The Bot's `vm_computer_use` tool refuses while the flag
+is set, so the Bot's own clicks never collide with the user's.
+There is no SSH tunnel and no external viewer — pointer / key /
+wheel events on the JPEG ride the same `SshPool.vm_exec` pipe
+the rest of the Computer surface already uses.
 
 For the canonical 2FA walkthrough (Gmail → 2FA prompt →
-takeover → solve → hand back → Bot continues), see
+Drive → solve → Hand back → Bot continues), see
 [`docs/2fa-walkthrough.md`](2fa-walkthrough.md).
 
 #### Tool routing

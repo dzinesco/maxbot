@@ -20,10 +20,6 @@ mechanics, jump to the section you need.
 - A Bot in the roster with a provisioned computer (see the
   [Computer section][user-guide-computer] of `user-guide.md` for the
   server + per-Bot-VM plumbing)
-- TigerVNC installed on the Mac (Homebrew: `brew install --cask
-  tigervnc-viewer`). v3.7.5 swapped the Takeover backend from macOS
-  Screen Sharing to TigerVNC because Screen Sharing mis-handles
-  `VNC_AUTH_NONE` and prompts for a password on every connect.
 
 [user-guide-computer]: user-guide.md#per-bot-computers
 
@@ -81,44 +77,47 @@ primary button. That button is the only correct entry point for
 2FA in the current model — the run will not resume until you click
 **Hand back** or **Stop now** in the Computer panel.
 
-## 8:00 — Click Take over
+## 8:00 — Click Drive
 
-Click **Take over** in the Approvals queue. The Computer panel
-re-mounts in **takeover** mode. MaxBot opens an `ssh -N -L
-<port>:127.0.0.1:<qemu-vnc> <user>@<host>` tunnel (loopback only,
-your Mac's `127.0.0.1` sees the VM's VNC port as if it were local)
-and hands the renderer `vnc://127.0.0.1:<port>`. macOS launches
-TigerVNC against that URL — no prompt for a password, because the
-in-VM VNC server is `VNC_AUTH_NONE` and the SSH tunnel is the
-authentication.
+Click **Drive** in the Computer panel's toolbar. The banner reads
+"You are driving — bot input paused". Move your trackpad / type /
+click on the JPEG — the events go to xdotool over the existing SSH
+connection. The bot's `vm_computer_use` is paused while you're
+driving. Click **Hand back** in the banner when done. No external
+VNC viewer; no password prompt.
 
-Drive the VM as if you were sitting at it. The loopback URL never
-contains the server's IP or hostname, so a process on the Mac that
-can reach localhost can't accidentally reach the VM's framebuffer
-on a non-loopback interface.
+The in-panel click-through replaces the previous
+SSH-tunnel-plus-external-viewer path. There is no separate
+`takeover` mode — the preview panel handles both the read-only
+view and the click-through drive. The per-Bot driving flag is
+set on the Rust side when you click Drive; the Bot's
+`vm_computer_use` tool refuses while the flag is true.
 
 Solve the 2FA in the VM. When you're done, click **Hand back** in
-the panel footer. The approval is decided as `approved`, the SSH
-child is killed, the port is freed, and the Bot's run resumes on
-the next turn with a synthetic tool success.
+the banner. The approval is decided as `approved`, the per-Bot
+driving flag is cleared, and the Bot's run resumes on the next
+turn with a synthetic tool success.
 
 ## 12:00 — Decide not to hand back? Click Stop now
 
 Sometimes you don't want the run to resume. The Bot went off the
 rails, the 2FA prompt is actually a security warning, you need to
-re-plan the task. v3.7.5 added a **Stop now** button next to
-**Hand back** in the same footer.
+re-plan the task. v3.7.5 added a **Stop now** action on the
+approval row, kept unchanged in v3.7.9.
 
 **Hand back** and **Stop now** are not two ways to do the same
 thing. They are two decisions:
 
-- **Hand back** = `approval_decide(approved)` + run resumes on the
-  next turn. This is the 2FA happy path. The Bot's tool call
-  returns success synthetically; the model treats the 2FA as solved
-  and continues.
-- **Stop now** = `stop_bot_run(runId)` (best-effort) +
-  `approval_decide(rejected)` + close the panel. The run row ends
-  up `Failed`. The Bot's executor is halted.
+- **Hand back** = the in-banner button while you're driving.
+  Cascades to `approval_decide(approved)` + clears the per-Bot
+  driving flag + the Bot's run resumes on the next turn. This is
+  the 2FA happy path. The Bot's tool call returns success
+  synthetically; the model treats the 2FA as solved and
+  continues.
+- **Stop now** = the approval row's reject button (v3.7.5
+  semantics, unchanged). Cascades to `stop_bot_run(runId)`
+  (best-effort) + `approval_decide(rejected)` + close the panel.
+  The run row ends up `Failed`. The Bot's executor is halted.
 
 `stop_bot_run` is best-effort on purpose. For daemon-parked runs
 (started while the app was closed), the runId is not in
@@ -176,13 +175,14 @@ so you get a clear "0 entries" toast instead of an error.
 
 A few specific failure modes the 20-minute timeline can surface:
 
-- **TigerVNC doesn't open** — the `vnc://127.0.0.1:<port>` URL only
-  works if the SSH tunnel is up on the Mac end. If the panel says
-  "tunnel failed", Settings → Computer has the wrong server config
-  (SSH user, key id, or host).
+- **Drive doesn't take effect** — the in-panel click-through
+  requires the per-Bot driving flag to be set on the Rust side.
+  If clicking **Drive** doesn't show the banner, the
+  `computer_input_open` Tauri command likely failed. Check the
+  MaxBot log (Settings → About) for the underlying error.
 - **Hand back doesn't resume the Bot** — the most common cause is
-  closing the panel without clicking a footer button. Find the row
-  in the Approvals queue and click Hand back or Stop now
+  closing the panel without clicking Hand back in the banner. Find
+  the row in the Approvals queue and click Hand back or Stop now
   explicitly. There is no "close the panel and abandon" affordance
   by design.
 - **The Preview is a black screen** — the VM is still booting. The

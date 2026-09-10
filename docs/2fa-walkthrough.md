@@ -29,6 +29,15 @@ tool return. That signal routes through
 `approval_decide` (the existing approval row machinery
 from v2.6.0) instead of running the next tool iteration.
 
+> v3.7.9 note: the "Take over" action is in-app — click
+> the Computer panel's Drive button and use your trackpad
+> + keyboard. The approval flow's Hand back / Stop now
+> semantics are unchanged (Hand back = approval(approved),
+> Stop now = stop_bot_run + approval(rejected)). The
+> previous external-viewer-plus-SSH-tunnel path is gone;
+> see [`docs/first-bot-20-minutes.md`](first-bot-20-minutes.md)
+> for the new end-to-end flow.
+
 ## What you'll see in the UI
 
 1. The approval lands in the Approvals queue with the
@@ -37,21 +46,24 @@ from v2.6.0) instead of running the next tool iteration.
 2. The row's primary button is **Take over** (not
    Approve). Approve / Reject still appear as the
    secondary row, but for a takeover the primary path is
-   "Take over → solve in screen sharing → hand back".
+   "Take over → click Drive → solve in panel → hand back".
 3. Clicking **Take over** mounts the ComputerPanel in
-   `takeover` mode (the same panel that powers the
-   preview, but with extra footer buttons).
-4. TigerVNC opens automatically (v3.7.5: switched from
-   macOS Screen Sharing because Screen Sharing mis-handles
-   `VNC_AUTH_NONE` and prompts for a password). You'll
-   see the VM's desktop — login if the screen is locked,
-   then navigate to the 2FA prompt.
+   preview mode already driving (the per-Bot driving
+   flag is set by the parent before mount, so the user
+   lands in the panel able to interact with the VM
+   without an extra click).
+4. The panel's existing JPEG preview IS the interactive
+   surface — move your trackpad, type, click on it; the
+   events go to xdotool over the existing SSH connection.
+   Login if the screen is locked, then navigate to the
+   2FA prompt. No external viewer opens, no password
+   prompt.
 5. The 2FA prompt is on whatever device or app the service
    expects (your phone for TOTP, your hardware key for
    WebAuthn, etc.). Solve it the way you normally would.
 6. Once the service accepts the second factor and the
    Bot's tool call can complete, click **Hand back** in
-   the ComputerPanel footer. That decides the approval as
+   the driving banner. That decides the approval as
    `approved` (synthetic tool result) and the Bot's run
    resumes on the next turn.
 
@@ -97,33 +109,35 @@ unblock for daemon-side runs in any case.
 
 ## Network & auth notes
 
-- The takeover tunnel is `ssh -N -L <local>:<qemu-vnc>
-  <user>@<host>`, loopback only. The Mac's TigerVNC
-  connects to `vnc://127.0.0.1:<local>`. The server's IP
-  is never in the loopback URL.
+- The in-panel click-through rides the existing
+  `SshPool.vm_exec` pipe the rest of the Computer
+  surface already uses — there is no separate SSH
+  tunnel, no external VNC viewer, and no extra port
+  to manage. The `xdotool` script is rendered on the
+  Rust side and the input commands go to the VM's
+  X11 session over SSH.
 - The server (`crispy`, `192.168.0.49`) is reachable
   over SSH from the Mac's keychain agent. No extra
   setup is needed once Settings → `computer_server_host`
   and Settings → `computer_use_default_ssh_key` are set.
-- TigerVNC connects without prompting for a password
-  because the per-Bot VM's VNC is bound to
-  `127.0.0.1` with no auth (qemu:commandline
-  `password=off`). The SSH tunnel is the only auth gate.
-- If you see TigerVNC ask for a password, the SSH
-  tunnel didn't establish. Check the Mac's
-  `~/Library/Logs/MaxBot/` for the
-  `computer_takeover_open` log line.
+- The per-Bot driving flag on the Rust side is the
+  only auth gate. While the flag is set, the Bot's
+  `vm_computer_use` tool refuses — so even if a
+  botched click happens on the Bot's side, no
+  conflicting input can be injected.
 
 ## Edge cases
 
-### "Take over" but no screen opens
+### "Drive" but no input is accepted
 
-The Mac's `open` command couldn't find TigerVNC, or the
-SSH tunnel died. Open TigerVNC manually and connect to
-`vnc://127.0.0.1:<port>` — the local port is shown in
-the ComputerPanel's footer (VNC :PORT). The
-`computer_vnc_local_port` setting controls the range;
-the default is 5900-5999.
+The per-Bot driving flag is the source of truth. If
+clicking the JPEG doesn't drive the VM, the
+`computer_input_open` Tauri command likely failed or
+the screenshot poll hasn't picked up the new
+framebuffer dimensions yet. Check the MaxBot log
+(Settings → About) for the underlying error. Re-click
+Drive; the in-banner Hand back button is the way to
+release the flag.
 
 ### "Hand back" doesn't resume the run
 
@@ -143,9 +157,9 @@ didn't happen. Check:
 ### "Stop now" leaves the VM running
 
 The executor is halted, but the VM itself is left in its
-current state. The takeover tunnel is closed. To shut
+current state. The driving flag is cleared. To shut
 down the VM cleanly, use the **Stop** button in the
-ComputerPanel's toolbar (not the footer's Stop now).
+ComputerPanel's toolbar (not the approval row's Stop now).
 That calls `computer_stop` (clean ACPI shutdown via
 `virsh shutdown`).
 
@@ -154,10 +168,10 @@ That calls `computer_stop` (clean ACPI shutdown via
 The takeover modal-overlay's click handler is a no-op
 intentionally (so the user has to use the buttons
 explicitly, otherwise the Bot would stay paused). If
-both buttons are unresponsive, force-quit the
-ComputerPanel with <kbd>⌘</kbd>+<kbd>W</kbd> on the
-TigerVNC window — the approval row will still be
-pending and you can decide it from the Approvals queue
+both buttons are unresponsive, close the panel via
+<kbd>⌘</kbd>+<kbd>W</kbd> — the approval row will
+still be pending and you can decide it from the
+Approvals queue
 in the next app launch.
 
 ## Related docs
