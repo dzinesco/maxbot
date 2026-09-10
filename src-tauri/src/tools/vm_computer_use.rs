@@ -83,6 +83,41 @@ const SCREENSHOT_PATH: &str = "/tmp/maxbot-screen.png";
 /// xdotool so it doesn't have to guess from `$DISPLAY`.
 const VM_DISPLAY: &str = ":1";
 
+/// v3.7.10: the chromium profile directory. Explicit
+/// (not the default `/home/bot/.config/chromium/`) so
+/// the path is stable across Ubuntu packaging changes
+/// and the dir ownership is documented. Pre-created
+/// by `provision-vm.sh`'s `runcmd:` block with `bot:bot`
+/// ownership (mode 0700); this code never has to mkdir
+/// or chown at runtime. The profile survives VM
+/// reboots because the qcow2 holds `/home/bot/...`,
+/// so cookies and login sessions persist across
+/// reboot — but NOT across Destroy + re-provision
+/// (that's a "snapshot the qcow2" question for a
+/// later version).
+const CHROMIUM_USER_DATA_DIR: &str = "/home/bot/.config/chromium-maxbot";
+
+/// Build the chromium launch command for `open_url(url)`.
+/// Factored out of `execute` so the test surface can
+/// pin the exact script shape (the flags the
+/// provision step pairs with, the nohup/background
+/// tail, and the url quoting). v3.7.10: this is where
+/// the explicit `--user-data-dir=...` flag and
+/// `--no-first-run` live; the provision step in
+/// `provision-vm.sh` creates the dir ahead of time.
+pub(crate) fn build_open_url_cmd(url: &str) -> String {
+    format!(
+        "DISPLAY={d} nohup chromium-browser \
+            --no-sandbox \
+            --no-first-run \
+            --user-data-dir={profile} \
+            --new-window {url} >/dev/null 2>&1 &",
+        d = VM_DISPLAY,
+        profile = CHROMIUM_USER_DATA_DIR,
+        url = shell_quote(url),
+    )
+}
+
 pub struct VmComputerUseTool;
 
 #[async_trait]
@@ -254,19 +289,49 @@ impl Tool for VmComputerUseTool {
                     transcript.push(format!("key(\"{name}\")"));
                 }
                 Call::OpenUrl(url) => {
-                    // `chromium-browser --no-sandbox <url>`. Use
-                    // `&` to detach so the SSH call returns
-                    // immediately (chromium's main process
-                    // lives for the whole session).
-                    // `xdg-open` would defer to the user's
-                    // default browser — but the per-Bot VM's
-                    // default isn't always chromium, so we
-                    // call it explicitly.
-                    let cmd = format!(
-                        "DISPLAY={d} nohup chromium-browser --no-sandbox --new-window {url} >/dev/null 2>&1 &",
-                        d = VM_DISPLAY,
-                        url = shell_quote(url),
-                    );
+                    // v3.7.10: chromium-browser is launched
+                    // with an explicit `--user-data-dir`
+                    // pointing at the per-Bot path
+                    // `CHROMIUM_USER_DATA_DIR`, which the
+                    // `provision-vm.sh` `runcmd:` block
+                    // pre-creates with `bot:bot` ownership
+                    // (mode 0700). The dir sits on the VM's
+                    // qcow2 at `/home/bot/.config/...`, so
+                    // cookies + login sessions survive
+                    // reboots. `--no-first-run` suppresses
+                    // the "make chromium your default
+                    // browser?" / welcome popups that would
+                    // otherwise steal focus from the
+                    // page the model just asked for. The
+                    // script shape lives in
+                    // `build_open_url_cmd` so the unit
+                    // test can pin it; the call site stays
+                    // a one-liner.
+                    //
+                    // The original v3.2.0 launch used
+                    // chromium's compiled-in default
+                    // (`/home/bot/.config/chromium/`).
+                    // That path is on the qcow2 too, so
+                    // session cookies already survived
+                    // reboot in practice — but the path
+                    // was implicit and the ownership
+                    // could drift if a different user
+                    // (e.g. root during a QGA install)
+                    // ever ran chromium. Explicit
+                    // `--user-data-dir` + the provision
+                    // step make the contract clear.
+                    //
+                    // The `nohup ... &` is still load-
+                    // bearing: it detaches the chromium
+                    // process from the SSH call so the
+                    // call returns immediately (chromium's
+                    // main process lives for the whole
+                    // session). `xdg-open` would defer to
+                    // the user's default browser — but
+                    // the per-Bot VM's default isn't
+                    // always chromium, so we call it
+                    // explicitly.
+                    let cmd = build_open_url_cmd(url);
                     pool.vm_exec(&bot_id, &cmd).await.map_err(|e| {
                         ToolError::Execution(format!(
                             "open_url: vm_exec failed: {e}"
@@ -890,5 +955,72 @@ mod tests {
         }
         // And the headline — VM is the default.
         assert!(d.contains("default"), "must explain that VM is the default");
+    }
+
+    // ----- v3.7.10: persistent chromium profile. The
+    // `provision-vm.sh` `runcmd:` block pre-creates
+    // `/home/bot/.config/chromium-maxbot/` with
+    // `bot:bot` ownership so the launch below can pin
+    // `--user-data-dir=...` explicitly. The
+    // `--no-first-run` flag suppresses the "make
+    // chromium your default browser?" / welcome
+    // popups that would otherwise race the model's
+    // intended navigation. Both flags live in
+    // `build_open_url_cmd`; the tests below pin the
+    // exact string so a refactor that drops either
+    // flag (and silently regresses session
+    // persistence) fails loudly.
+    #[test]
+    fn build_open_url_cmd_pins_user_data_dir() {
+        // The explicit profile path — this is the
+        // path `provision-vm.sh` creates. A
+        // regression that swapped it for the
+        // implicit `/home/bot/.config/chromium/`
+        // would break the per-Bot path contract
+        // documented in `provision-vm.sh`.
+        let cmd = build_open_url_cmd("https://example.com");
+        assert!(
+            cmd.contains("--user-data-dir=/home/bot/.config/chromium-maxbot"),
+            "open_url must pin --user-data-dir to the per-Bot path; got: {cmd}"
+        );
+    }
+
+    #[test]
+    fn build_open_url_cmd_pins_no_first_run() {
+        // Without --no-first-run, chromium pops the
+        // "make chromium your default browser?"
+        // dialog on first launch and the model's
+        // intended page is hidden behind it.
+        let cmd = build_open_url_cmd("https://example.com");
+        assert!(
+            cmd.contains("--no-first-run"),
+            "open_url must include --no-first-run to suppress first-run popups; got: {cmd}"
+        );
+    }
+
+    #[test]
+    fn build_open_url_cmd_keeps_existing_flags() {
+        // Regression guard: don't drop the flags
+        // v3.2.0 added. The per-Bot VM's `bot`
+        // user doesn't have the right SUID
+        // sandbox config, so --no-sandbox is
+        // required. DISPLAY=:1 is what targets
+        // the x11vnc session xdotool drives.
+        // `&` detaches so the SSH call returns
+        // immediately (chromium's main process
+        // lives for the whole session).
+        let cmd = build_open_url_cmd("https://example.com");
+        assert!(cmd.contains("--no-sandbox"), "must keep --no-sandbox; got: {cmd}");
+        assert!(cmd.contains("DISPLAY=:1"), "must pin DISPLAY=:1; got: {cmd}");
+        assert!(cmd.contains("&"), "must background the process; got: {cmd}");
+    }
+
+    #[test]
+    fn build_open_url_cmd_quotes_url() {
+        // The URL is passed through `shell_quote`
+        // so a `'` in the path can't break the
+        // outer single-quotes. Pin the canary.
+        let cmd = build_open_url_cmd("https://example.com/it's-here");
+        assert!(cmd.contains("'https://example.com/it'\\''s-here'"));
     }
 }

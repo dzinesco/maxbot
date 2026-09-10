@@ -219,6 +219,26 @@ runcmd:
   - systemctl set-default graphical.target
   - systemctl enable lightdm
   - systemctl enable --now qemu-guest-agent
+  # v3.7.10: pre-create the chromium profile dir
+  # at the explicit path the bot's `vm_computer_use`
+  # launches against (--user-data-dir=...). The
+  # path is on the qcow2's `/home/bot/.config/`,
+  # so cookies and login sessions survive
+  # reboots. cloud-init's `runcmd:` runs as root,
+  # so chown to `bot:bot` is required — without
+  # it, chromium (launched by the `bot` user) would
+  # create the dir as root on first launch and the
+  # second launch (after a cookie or extension
+  # write) would fail with EACCES. Mode 0700 so
+  # other users on the VM can't read the bot's
+  # cookies. The dir is also useful when the user
+  # takes over the panel — they can inspect
+  # `/home/bot/.config/chromium-maxbot/Default/`
+  # to see cookies, history, and the on-disk
+  # extension list.
+  - mkdir -p /home/bot/.config/chromium-maxbot
+  - chown -R bot:bot /home/bot/.config/chromium-maxbot
+  - chmod 700 /home/bot/.config/chromium-maxbot
   # Safety net: re-start sshd in case the openssh-server
   # package upgrade in the packages: block (or any other
   # service install) left it in a bad state. systemctl
