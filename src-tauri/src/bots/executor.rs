@@ -594,6 +594,16 @@ pub async fn run_bot_once(
                 break;
             }
             let resolved_args = parse_tool_args(&tc.arguments);
+            // v3.4.0 (Phase 5) — derive a short
+            // human-readable reason for the approval
+            // row. Rule-based: "sending email" /
+            // "writing file" / etc. Falls through to a
+            // generic "tool {name} requires approval"
+            // for tools we don't have a friendlier
+            // phrase for. The reason is a best-effort
+            // UX aid — the audit log surfaces it as
+            // "Why this asked".
+            let reason = reason_for_tool(&tc.name, &resolved_args);
             // Step 1 — approval gate. The gate runs for
             // every tool, including `message_bot`, so the
             // user can flip the per-Bot rule on
@@ -605,6 +615,7 @@ pub async fn run_bot_once(
                 &resolved_args,
                 Some(&run_id),
                 Some(&tc.id),
+                Some(&reason),
             )
             .await
             {
@@ -707,6 +718,72 @@ pub async fn run_bot_once(
                     is_error,
                 ),
             );
+            // v3.4.0 (Phase 5) — Takeover for 2FA /
+            // CAPTCHA. The plan's decision is option (b):
+            // the LLM self-reports `needs_human` in the
+            // tool's JSON return. We try to parse the
+            // content as JSON; if it has a
+            // `needs_human` string field, we treat the
+            // tool return as a "pause and ask" signal.
+            // The Bot is parked (not failed), a
+            // Takeover approval is enqueued, the per-Bot
+            // takeover state row is upserted, and we
+            // break the inner tool loop. The outer
+            // `while iteration < MAX_BOT_ITERATIONS`
+            // loop will exit on the next cancel check
+            // because we cancel the token below — same
+            // path a user-initiated stop takes.
+            if let Some(needs_human) = extract_needs_human(&content) {
+                let payload = serde_json::json!({
+                    "needs_human": needs_human,
+                    "tool": tc.name,
+                });
+                let takeover_reason =
+                    format!("{} needs human help: {}", tc.name, needs_human);
+                let takeover_id = state
+                    .db
+                    .enqueue_approval(
+                        &bot.id,
+                        crate::approvals::APPROVAL_TOOL_TAKEOVER,
+                        &payload,
+                        Some(&run_id),
+                        Some(&tc.id),
+                        Some(&takeover_reason),
+                    )
+                    .ok();
+                if let Some(aid) = takeover_id {
+                    let _ = state.db.set_bot_takeover_state(
+                        &bot.id,
+                        "needs_human",
+                        &aid,
+                        &needs_human,
+                        &tc.name,
+                    );
+                    // Persist the tool result as a
+                    // `tool` message so the conversation
+                    // log shows the pause.
+                    let _ = state.db.insert_message(
+                        &conversation_id,
+                        MessageRole::Tool,
+                        &content,
+                        &[],
+                    );
+                    messages.push(ChatMessage::Tool {
+                        tool_call_id: tc.id.clone(),
+                        content,
+                    });
+                    hit_error = Some(format!(
+                        "bot paused — takeover needed: {needs_human}"
+                    ));
+                    // Cancel the run so the outer loop
+                    // exits cleanly. The run row is
+                    // marked Cancelled by the existing
+                    // `if cancel.is_cancelled()` branch
+                    // below.
+                    cancel.cancel();
+                    break;
+                }
+            }
             // Persist the tool result as a `tool` message.
             let _ = state.db.insert_message(
                 &conversation_id,
@@ -1103,5 +1180,192 @@ pub async fn run_with_timeout(
                 result_summary: format!("run exceeded {timeout_secs}s timeout"),
             }
         }
+    }
+}
+
+// ---- v3.4.0 (Phase 5) — Reason + needs_human helpers ----
+//
+// `reason_for_tool` is the "Why this asked" string
+// surfaced in the audit log. Rule-derived by default —
+// we look at the tool name + a couple of common args
+// and produce a one-liner the user can scan. The cost
+// is a single static match; the alternative (an LLM
+// call) would defeat the point of the audit log, which
+// is fast + always-on.
+//
+// `extract_needs_human` is the Phase 5 Takeover signal
+// parser. Per the brief, the plan's decision was
+// option (b): the LLM self-reports
+// `needs_human: "<reason>"` in a tool's JSON return.
+// The tool's `ToolResult.content` is a `String`; we
+// try to parse it as JSON and pull the field. Plain
+// (non-JSON) returns are ignored — the spec is
+// explicit: only when the LLM self-reports the signal
+// does the Bot pause.
+
+/// Build a short human-readable reason for an approval
+/// row. The renderer surfaces this in the audit log
+/// ("Why this asked") and in the ApprovalQueue's row
+/// copy. We keep the cost to a single match and avoid
+/// any LLM call.
+fn reason_for_tool(tool_name: &str, args: &serde_json::Value) -> String {
+    match tool_name {
+        "mail_send" => {
+            let to = args
+                .get("to")
+                .and_then(|v| v.as_str())
+                .unwrap_or("recipient");
+            let subject = args.get("subject").and_then(|v| v.as_str());
+            match subject {
+                Some(s) if !s.is_empty() => format!("sending email to {to} — {s}"),
+                _ => format!("sending email to {to}"),
+            }
+        }
+        "mail_draft" => {
+            let to = args
+                .get("to")
+                .and_then(|v| v.as_str())
+                .unwrap_or("recipient");
+            format!("drafting email to {to}")
+        }
+        "file_write" => {
+            let path = args
+                .get("path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("file");
+            format!("writing file: {path}")
+        }
+        "file_read" => "reading file".to_string(),
+        "shell_run" => {
+            let cmd = args
+                .get("cmd")
+                .and_then(|v| v.as_str())
+                .unwrap_or("command");
+            format!("running shell command: {}", first_line(cmd, 80))
+        }
+        "message_bot" => {
+            let to = args
+                .get("to")
+                .and_then(|v| v.as_str())
+                .unwrap_or("another bot");
+            format!("messaging bot: {to}")
+        }
+        "vm_browser_open" => {
+            let url = args.get("url").and_then(|v| v.as_str()).unwrap_or("URL");
+            format!("opening browser: {url}")
+        }
+        "vm_computer_use" => {
+            "driving the Bot's VM (computer use action)".to_string()
+        }
+        "coding" | "grok_prompt" => "running coding task".to_string(),
+        "run_skill" => {
+            let id = args
+                .get("skill_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("skill");
+            format!("running skill: {id}")
+        }
+        "ego_browser" => "using browser (ego_browser)".to_string(),
+        "apple_script" => "running AppleScript".to_string(),
+        _ => format!("tool `{tool_name}` requires approval"),
+    }
+}
+
+/// Parse a tool result's content as JSON and pull the
+/// `needs_human` string field. Returns `None` if the
+/// content is not JSON, doesn't have a `needs_human`
+/// field, or has a non-string value for that field.
+/// Quietly swallows all parse errors — the spec is
+/// explicit: only when the LLM self-reports the signal
+/// does the Bot pause, and an over-eager parser would
+/// spuriously pause runs on incidental JSON content.
+fn extract_needs_human(content: &str) -> Option<String> {
+    let trimmed = content.trim_start();
+    if !trimmed.starts_with('{') {
+        return None;
+    }
+    let v: serde_json::Value = serde_json::from_str(trimmed).ok()?;
+    let s = v.get("needs_human")?.as_str()?;
+    if s.trim().is_empty() {
+        None
+    } else {
+        Some(s.to_string())
+    }
+}
+
+// =====================================================================
+//  Tests
+// =====================================================================
+//
+// We don't have an LLM in the unit-test path, so the
+// interesting Phase 5 paths are tested through the
+// data-layer helpers (`reason_for_tool` and
+// `extract_needs_human`) directly. The Takeover flow
+// is exercised end-to-end in `commands/approvals.rs`
+// (the approval-decide path resolves a Takeover
+// approval back to "running" + clears the state row).
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn reason_for_mail_send_includes_recipient() {
+        let r = reason_for_tool(
+            "mail_send",
+            &json!({ "to": "x@y", "subject": "hi" }),
+        );
+        assert!(r.contains("x@y"));
+        assert!(r.contains("hi"), "subject: {r}");
+    }
+
+    #[test]
+    fn reason_for_file_write_includes_path() {
+        let r = reason_for_tool("file_write", &json!({ "path": "/etc/hosts" }));
+        assert!(r.contains("/etc/hosts"), "got {r}");
+    }
+
+    #[test]
+    fn reason_falls_back_to_generic_for_unknown_tool() {
+        let r = reason_for_tool("some_future_tool", &json!({}));
+        assert!(r.contains("some_future_tool"), "got {r}");
+        assert!(r.contains("approval"), "got {r}");
+    }
+
+    #[test]
+    fn extract_needs_human_parses_json_signal() {
+        let content =
+            r#"{"screenshot": "…", "needs_human": "2FA prompt visible"}"#;
+        assert_eq!(
+            extract_needs_human(content).as_deref(),
+            Some("2FA prompt visible"),
+        );
+    }
+
+    #[test]
+    fn extract_needs_human_ignores_plain_text() {
+        // Per the spec, a plain-text return must NOT
+        // pause the bot. Only an explicit JSON
+        // `needs_human` field triggers Takeover.
+        assert!(extract_needs_human("screenshot taken successfully").is_none());
+    }
+
+    #[test]
+    fn extract_needs_human_ignores_json_without_field() {
+        let content = r#"{"screenshot": "…", "url": "https://x"}"#;
+        assert!(extract_needs_human(content).is_none());
+    }
+
+    #[test]
+    fn extract_needs_human_ignores_empty_string() {
+        let content = r#"{"needs_human": "   "}"#;
+        assert!(extract_needs_human(content).is_none());
+    }
+
+    #[test]
+    fn extract_needs_human_ignores_non_string_value() {
+        let content = r#"{"needs_human": 42}"#;
+        assert!(extract_needs_human(content).is_none());
     }
 }

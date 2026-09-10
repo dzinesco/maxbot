@@ -15,11 +15,29 @@ import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 vi.mock("../lib/tauri", () => ({
   approvalList: vi.fn(),
   approvalDecide: vi.fn(),
+  // v3.4.0 (Phase 5) — Takeover predicate. The
+  // tests below use real `mail_send` tool names
+  // (not `__takeover__`), so the predicate
+  // returns false in every fixture; we still need
+  // to export it because the queue component
+  // imports it.
+  isTakeoverApproval: (a: Approval) =>
+    a.tool_name === "__takeover__",
 }));
 
 import { ApprovalQueue } from "./ApprovalQueue";
-import { approvalDecide, approvalList } from "../lib/tauri";
+import {
+  approvalDecide,
+  approvalList,
+  isTakeoverApproval,
+} from "../lib/tauri";
 import type { Approval, Bot } from "../lib/api";
+
+// Touch the imported `isTakeoverApproval` so the
+// test file's `noUnusedImports` / `verbatimModuleSyntax`
+// doesn't trip on it; the queue component is what
+// actually exercises it.
+void isTakeoverApproval;
 
 const blankBot = (id: string, name: string): Bot => {
   const now = new Date().toISOString();
@@ -139,5 +157,74 @@ describe("ApprovalQueue", () => {
         expect.objectContaining({ to: "user@example.com" }),
       );
     });
+  });
+
+  // v3.4.0 (Phase 5) — Takeover approvals surface
+  // different action buttons (Take over + Skip)
+  // and a dedicated reason line. We assert the
+  // parent gets the takeover request via the
+  // `onTakeoverRequested` callback, and that the
+  // Skip button routes through the regular
+  // `approval_decide('rejected')` path.
+  it("renders Take over / Skip buttons for a Takeover approval", async () => {
+    vi.mocked(approvalList).mockResolvedValueOnce([
+      sampleApproval("a-tak", {
+        tool_name: "__takeover__",
+        reason: "2FA prompt visible",
+        payload: { needs_human: "2FA prompt visible" },
+      }),
+    ]);
+    const onTakeover = vi.fn();
+    render(
+      <ApprovalQueue
+        bots={[blankBot("bot-1", "TestBot")]}
+        onTakeoverRequested={onTakeover}
+      />,
+    );
+    await waitFor(() => {
+      expect(screen.getByTestId("approval-takeover-a-tak")).toBeTruthy();
+    });
+    // The row's reason line is the LLM's
+    // self-reported `needs_human` string.
+    expect(screen.getByTestId("approval-reason").textContent).toContain(
+      "2FA prompt visible",
+    );
+    // No regular Approve / Reject / Edit buttons
+    // on a Takeover row.
+    expect(screen.queryByTestId("approval-approve-a-tak")).toBeNull();
+    // Clicking "Take over" fires the parent's
+    // callback with the bot_id + approval_id, NOT
+    // a direct approval_decide call.
+    fireEvent.click(screen.getByTestId("approval-takeover-a-tak"));
+    expect(onTakeover).toHaveBeenCalledWith("bot-1", "a-tak");
+    expect(approvalDecide).not.toHaveBeenCalled();
+  });
+
+  it("renders the audit-log reason line for a regular approval", async () => {
+    vi.mocked(approvalList).mockResolvedValueOnce([
+      sampleApproval("a-rr", {
+        reason: "sending email to user@example.com — schedule change",
+      }),
+    ]);
+    render(<ApprovalQueue bots={[blankBot("bot-1", "TestBot")]} />);
+    await waitFor(() => {
+      expect(screen.getByTestId("approval-approve-a-rr")).toBeTruthy();
+    });
+    expect(screen.getByTestId("approval-reason").textContent).toContain(
+      "sending email to user@example.com",
+    );
+  });
+
+  it("falls back to a generic reason copy when reason is null", async () => {
+    vi.mocked(approvalList).mockResolvedValueOnce([
+      sampleApproval("a-leg", { reason: null }),
+    ]);
+    render(<ApprovalQueue bots={[blankBot("bot-1", "TestBot")]} />);
+    await waitFor(() => {
+      expect(screen.getByTestId("approval-approve-a-leg")).toBeTruthy();
+    });
+    expect(screen.getByTestId("approval-reason").textContent).toContain(
+      "approval",
+    );
   });
 });

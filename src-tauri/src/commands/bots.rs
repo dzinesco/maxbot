@@ -51,6 +51,7 @@ pub async fn get_bot(state: State<'_, AppState>, id: String) -> Result<Option<Bo
 #[tauri::command]
 pub async fn upsert_bot(state: State<'_, AppState>, bot: Bot) -> Result<Bot, String> {
     let mut bot = bot;
+    let is_new = bot.id.is_empty();
     if bot.id.is_empty() {
         bot.id = Bot::new_id();
     }
@@ -60,9 +61,32 @@ pub async fn upsert_bot(state: State<'_, AppState>, bot: Bot) -> Result<Bot, Str
     bot.updated_at = Utc::now();
     let db = state.db.clone();
     let bot_clone = bot.clone();
-    tokio::task::spawn_blocking(move || db.upsert_bot(&bot_clone).map_err(|e| e.to_string()))
-        .await
-        .map_err(|e| e.to_string())??;
+    let bot_id_for_rules = bot.id.clone();
+    let is_new_for_rules = is_new;
+    tokio::task::spawn_blocking(move || {
+        db.upsert_bot(&bot_clone).map_err(|e| e.to_string())?;
+        // v3.4.0 (Phase 5) — Grok Bot defaults. A
+        // freshly-created Bot (no pre-existing id)
+        // gets the Grok Bot preset applied to its
+        // `approval_rules` table. Idempotent on
+        // re-upsert thanks to the underlying
+        // `INSERT OR REPLACE` semantics: a
+        // pre-existing rule row is overwritten by
+        // the same value, leaving the Bot in the
+        // same state. An existing Bot whose user
+        // has customized rules is unaffected (the
+        // is_new guard skips the apply path).
+        if is_new_for_rules {
+            use crate::approvals::defaults::grok_bot_defaults_iter;
+            for (tool_name, rule) in grok_bot_defaults_iter() {
+                db.set_approval_rule(&bot_id_for_rules, tool_name, rule)
+                    .map_err(|e| e.to_string())?;
+            }
+        }
+        Ok::<(), String>(())
+    })
+    .await
+    .map_err(|e| e.to_string())??;
     Ok(bot)
 }
 
@@ -72,6 +96,34 @@ pub async fn delete_bot(state: State<'_, AppState>, id: String) -> Result<(), St
     tokio::task::spawn_blocking(move || db.delete_bot(&id).map_err(|e| e.to_string()))
         .await
         .map_err(|e| e.to_string())?
+}
+
+/// v3.4.0 (Phase 5) — "Grok Bot defaults" button in
+/// the Bot editor. Resets the Bot's `approval_rules`
+/// to the Grok Bot preset, replacing any user
+/// customizations. The Bot's other state (history,
+/// runs, schedules) is untouched.
+///
+/// Idempotent. Per the brief: "useful when a user
+/// has over-customized and wants to start over."
+#[tauri::command]
+pub async fn apply_grok_bot_defaults(
+    state: State<'_, AppState>,
+    bot_id: String,
+) -> Result<(), String> {
+    let db = state.db.clone();
+    let bot_id_owned = bot_id.clone();
+    tokio::task::spawn_blocking(move || {
+        use crate::approvals::defaults::grok_bot_defaults_iter;
+        for (tool_name, rule) in grok_bot_defaults_iter() {
+            db.set_approval_rule(&bot_id_owned, tool_name, rule)
+                .map_err(|e| e.to_string())?;
+        }
+        Ok::<(), String>(())
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    Ok(())
 }
 
 /// v2.0 Slice E: set a Bot's persisted presence state. Called

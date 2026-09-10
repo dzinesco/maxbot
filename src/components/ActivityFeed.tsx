@@ -73,6 +73,15 @@ interface RowProps {
    *  in the app." `undefined` (legacy row) → "via app" — the
    *  default per the v3.1.0 column migration. */
   triggeredBy?: "app" | "daemon" | "webhook";
+  /** v3.4.0 (Phase 5) — "Why this asked" reason
+   *  surfaced inline in the audit log. Renders as a
+   *  small italic line below the row's primary +
+   *  secondary. `undefined` (legacy row, or a row
+   *  for which the executor didn't compute a
+   *  reason) renders nothing — the row keeps its
+   *  previous shape so the activity feed doesn't
+   *  grow past 1.5x its v3.3.0 line count. */
+  reason?: string | null;
 }
 
 function triggeredByLabel(value: "app" | "daemon" | "webhook" | undefined): string {
@@ -87,7 +96,7 @@ function triggeredByLabel(value: "app" | "daemon" | "webhook" | undefined): stri
   }
 }
 
-function Row({ id, primary, secondary, status, when, triggeredBy }: RowProps) {
+function Row({ id, primary, secondary, status, when, triggeredBy, reason }: RowProps) {
   return (
     <li className="activity-row" data-testid="activity-row" data-row-id={id}>
       <span className={`activity-row-status status-${status}`}>
@@ -103,6 +112,14 @@ function Row({ id, primary, secondary, status, when, triggeredBy }: RowProps) {
         {triggeredByLabel(triggeredBy)}
       </span>
       <span className="activity-row-when">{when}</span>
+      {reason && reason.trim().length > 0 ? (
+        <span
+          className="activity-row-reason muted small"
+          data-testid="activity-row-reason"
+        >
+          Why: {reason}
+        </span>
+      ) : null}
     </li>
   );
 }
@@ -234,6 +251,15 @@ export function ActivityFeed() {
                       secondary={a.bot_id}
                       status={a.status}
                       when={relativeTime(a.created_at)}
+                      // v3.4.0 — "Why this asked"
+                      // reason inline. The Rust
+                      // `list_recent_activity` query
+                      // returns the full row including
+                      // the new `reason` column. The
+                      // `Row` renders nothing when
+                      // `reason` is null (legacy
+                      // row / no reason computed).
+                      reason={a.reason ?? null}
                     />
                   ))}
                 </ul>

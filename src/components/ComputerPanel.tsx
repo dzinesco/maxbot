@@ -852,6 +852,26 @@ function ComputerFooter({
           takeover active — keyboard + mouse captured
         </span>
       )}
+      {/* v3.4.0 (Phase 5) — Takeover Hand back
+        button. The ComputerPanel's existing
+        `onHandBack` prop is the callback the panel
+        uses to signal "user is done driving the VM";
+        the renderer wires it to a call against
+        `approval_decide(approved)`. The button is
+        only shown in `takeover` mode — for
+        `preview` mode we keep the original "Close"
+        button below. The `Hand back` text matches
+        the ComputerToolbar's title so the user has
+        one obvious exit in both places. */}
+      {onHandBack && mode === "takeover" && (
+        <button
+          className="primary small"
+          onClick={onHandBack}
+          data-testid="computer-handback"
+        >
+          Hand back
+        </button>
+      )}
       {onHandBack && mode !== "takeover" && (
         <button className="ghost small" onClick={onHandBack}>
           Close

@@ -12,7 +12,7 @@ use uuid::Uuid;
 
 use crate::storage::Database;
 
-use super::{Approval, ApprovalRule, Rule};
+use super::{Approval, ApprovalRule, BotTakeoverState, Rule};
 
 // ----- approval_rules -----
 
@@ -95,6 +95,12 @@ impl Database {
     /// `role=tool` message against the model). Pass
     /// `None` for callers that don't have the LLM's
     /// id (back-compat with pre-v2.6.2 dispatchers).
+    ///
+    /// `reason` (v3.4.0) is the human-readable
+    /// "Why this asked" string surfaced in the
+    /// ActivityFeed / ApprovalQueue. `None` for
+    /// callers that don't compute one (the renderer
+    /// falls back to a generic "approval required").
     pub fn enqueue_approval(
         &self,
         bot_id: &str,
@@ -102,6 +108,7 @@ impl Database {
         payload: &Value,
         bot_run_id: Option<&str>,
         tool_call_id: Option<&str>,
+        reason: Option<&str>,
     ) -> rusqlite::Result<String> {
         let conn = self.conn.lock().expect("db lock poisoned");
         let id = Uuid::new_v4().to_string();
@@ -111,8 +118,8 @@ impl Database {
         conn.execute(
             "INSERT INTO approvals
                 (id, bot_id, tool_name, status, payload_json,
-                 bot_run_id, tool_call_id, created_at)
-             VALUES (?, ?, ?, 'pending', ?, ?, ?, ?)",
+                 bot_run_id, tool_call_id, created_at, reason)
+             VALUES (?, ?, ?, 'pending', ?, ?, ?, ?, ?)",
             params![
                 id,
                 bot_id,
@@ -121,6 +128,7 @@ impl Database {
                 bot_run_id,
                 tool_call_id,
                 now.to_rfc3339(),
+                reason,
             ],
         )?;
         Ok(id)
@@ -132,7 +140,7 @@ impl Database {
         let conn = self.conn.lock().expect("db lock poisoned");
         let mut stmt = conn.prepare(
             "SELECT id, bot_id, tool_name, status, payload_json,
-                    result_json, bot_run_id, tool_call_id, created_at, decided_at
+                    result_json, bot_run_id, tool_call_id, created_at, decided_at, reason
              FROM approvals WHERE id = ?",
         )?;
         let mut rows = stmt.query(params![id])?;
@@ -153,7 +161,7 @@ impl Database {
         let (sql, params_vec): (&str, Vec<rusqlite::types::Value>) = match bot_id {
             Some(b) => (
                 "SELECT id, bot_id, tool_name, status, payload_json,
-                        result_json, bot_run_id, tool_call_id, created_at, decided_at
+                        result_json, bot_run_id, tool_call_id, created_at, decided_at, reason
                  FROM approvals
                  WHERE status = 'pending' AND bot_id = ?1
                  ORDER BY created_at DESC",
@@ -161,7 +169,7 @@ impl Database {
             ),
             None => (
                 "SELECT id, bot_id, tool_name, status, payload_json,
-                        result_json, bot_run_id, tool_call_id, created_at, decided_at
+                        result_json, bot_run_id, tool_call_id, created_at, decided_at, reason
                  FROM approvals
                  WHERE status = 'pending'
                  ORDER BY created_at DESC",
@@ -203,7 +211,7 @@ impl Database {
         let conn = self.conn.lock().expect("db lock poisoned");
         let mut stmt = conn.prepare(
             "SELECT id, bot_id, tool_name, status, payload_json,
-                    result_json, bot_run_id, tool_call_id, created_at, decided_at
+                    result_json, bot_run_id, tool_call_id, created_at, decided_at, reason
              FROM approvals
              ORDER BY created_at DESC LIMIT ?",
         )?;
@@ -237,6 +245,135 @@ impl Database {
     }
 }
 
+// ----- bot_takeover_state (v3.4.0 Phase 5) -----
+//
+// One row per Bot. The row is upserted on every state
+// transition: a tool result carrying `needs_human`
+// moves the Bot from `running` → `needs_human` and
+// records the gating approval_id. The user clicking
+// "Take over" in the ApprovalQueue moves it to
+// `takeover`. The user clicking "Hand back" (or
+// rejecting) moves it back to `running`.
+//
+// The state is the source of truth across app
+// restarts: the next app launch (after a daemon
+// trigger that paused the Bot) reads the row and
+// surfaces a pending approval in the queue so the
+// user can act on it.
+
+impl Database {
+    /// v3.4.0 (Phase 5) — Upsert the per-Bot
+    /// takeover state row. `state` is one of
+    /// `"running"`, `"needs_human"`, `"takeover"`.
+    /// Idempotent — a second call with the same
+    /// payload just refreshes `updated_at`.
+    pub fn set_bot_takeover_state(
+        &self,
+        bot_id: &str,
+        state: &str,
+        approval_id: &str,
+        reason: &str,
+        triggering_tool: &str,
+    ) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().expect("db lock poisoned");
+        let now = Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO bot_takeover_state
+                (bot_id, state, approval_id, reason, triggering_tool,
+                 created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(bot_id) DO UPDATE SET
+                state = excluded.state,
+                approval_id = excluded.approval_id,
+                reason = excluded.reason,
+                triggering_tool = excluded.triggering_tool,
+                updated_at = excluded.updated_at",
+            params![bot_id, state, approval_id, reason, triggering_tool, now, now],
+        )?;
+        Ok(())
+    }
+
+    /// v3.4.0 (Phase 5) — Fetch the takeover state
+    /// row for a Bot. `Ok(None)` if the Bot is in
+    /// the default `running` state (no row).
+    pub fn get_bot_takeover_state(
+        &self,
+        bot_id: &str,
+    ) -> rusqlite::Result<Option<BotTakeoverState>> {
+        let conn = self.conn.lock().expect("db lock poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT bot_id, state, approval_id, reason, triggering_tool,
+                    created_at, updated_at
+             FROM bot_takeover_state
+             WHERE bot_id = ?",
+        )?;
+        let mut rows = stmt.query(params![bot_id])?;
+        let row = match rows.next()? {
+            Some(r) => r,
+            None => return Ok(None),
+        };
+        let created_at_str: String = row.get(5)?;
+        let updated_at_str: String = row.get(6)?;
+        Ok(Some(BotTakeoverState {
+            bot_id: row.get(0)?,
+            state: row.get(1)?,
+            approval_id: row.get(2)?,
+            reason: row.get(3)?,
+            triggering_tool: row.get(4)?,
+            created_at: parse_dt_field(created_at_str)?,
+            updated_at: parse_dt_field(updated_at_str)?,
+        }))
+    }
+
+    /// v3.4.0 (Phase 5) — All Bots currently in a
+    /// non-`running` takeover state. Used by the
+    /// app-launch hook to surface pending takeover
+    /// approvals that a daemon-driven run enqueued
+    /// while the app was closed.
+    pub fn list_paused_bots(&self) -> rusqlite::Result<Vec<BotTakeoverState>> {
+        let conn = self.conn.lock().expect("db lock poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT bot_id, state, approval_id, reason, triggering_tool,
+                    created_at, updated_at
+             FROM bot_takeover_state
+             WHERE state IN ('needs_human', 'takeover')
+             ORDER BY updated_at DESC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let created_at_str: String = row.get(5)?;
+            let updated_at_str: String = row.get(6)?;
+            Ok(BotTakeoverState {
+                bot_id: row.get(0)?,
+                state: row.get(1)?,
+                approval_id: row.get(2)?,
+                reason: row.get(3)?,
+                triggering_tool: row.get(4)?,
+                created_at: parse_dt_field(created_at_str)?,
+                updated_at: parse_dt_field(updated_at_str)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    /// v3.4.0 (Phase 5) — Clear the takeover state
+    /// for a Bot (back to `running` — i.e. delete
+    /// the row). Called when the user decides the
+    /// approval that gated the takeover, so the next
+    /// app launch doesn't re-surface a stale entry.
+    pub fn clear_bot_takeover_state(&self, bot_id: &str) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().expect("db lock poisoned");
+        conn.execute(
+            "DELETE FROM bot_takeover_state WHERE bot_id = ?",
+            params![bot_id],
+        )?;
+        Ok(())
+    }
+}
+
 /// Shared row → Approval conversion. Used by both
 /// `get_approval` and `list_pending_approvals` so the
 /// SQL stays in one place.
@@ -250,6 +387,7 @@ fn row_to_approval(row: &rusqlite::Row) -> rusqlite::Result<Approval> {
         Some(s) => Some(parse_dt_field(s)?),
         None => None,
     };
+    let reason: Option<String> = row.get(10)?;
     let payload: Value = serde_json::from_str(&payload_str).unwrap_or(Value::Null);
     let result: Option<Value> = result_str
         .as_deref()
@@ -265,6 +403,7 @@ fn row_to_approval(row: &rusqlite::Row) -> rusqlite::Result<Approval> {
         tool_call_id,
         created_at,
         decided_at,
+        reason,
     })
 }
 
@@ -371,7 +510,7 @@ mod tests {
         let (db, _dir) = fresh_db();
         let payload = json!({ "to": "user@example.com", "subject": "hi" });
         let id = db
-            .enqueue_approval("bot-test-1", "mail_send", &payload, Some("run-1"), Some("tc-7"))
+            .enqueue_approval("bot-test-1", "mail_send", &payload, Some("run-1"), Some("tc-7"), Some("sending email to user@example.com"))
             .expect("enqueue");
         let a = db
             .get_approval(&id)
@@ -384,6 +523,7 @@ mod tests {
         assert_eq!(a.tool_call_id.as_deref(), Some("tc-7"));
         assert_eq!(a.payload, payload);
         assert!(a.decided_at.is_none());
+        assert_eq!(a.reason.as_deref(), Some("sending email to user@example.com"));
     }
 
     #[test]
@@ -396,7 +536,7 @@ mod tests {
         // positional matching.
         let (db, _dir) = fresh_db();
         let id = db
-            .enqueue_approval("bot-test-1", "shell_run", &json!({}), None, None)
+            .enqueue_approval("bot-test-1", "shell_run", &json!({}), None, None, None)
             .expect("enqueue");
         let a = db
             .get_approval(&id)
@@ -404,6 +544,7 @@ mod tests {
             .expect("exists");
         assert!(a.tool_call_id.is_none());
         assert!(a.bot_run_id.is_none());
+        assert!(a.reason.is_none());
     }
 
     #[test]
@@ -414,6 +555,7 @@ mod tests {
                 "bot-test-1",
                 "mail_send",
                 &json!({ "to": "x" }),
+                None,
                 None,
                 None,
             )
@@ -435,10 +577,10 @@ mod tests {
         // Two pending + one approved. Pending should
         // surface all pending; the approved one is gone.
         let _ = db
-            .enqueue_approval("bot-test-1", "mail_send", &json!({}), None, None)
+            .enqueue_approval("bot-test-1", "mail_send", &json!({}), None, None, None)
             .expect("enqueue 1");
         let second = db
-            .enqueue_approval("bot-test-1", "file_write", &json!({}), None, None)
+            .enqueue_approval("bot-test-1", "file_write", &json!({}), None, None, None)
             .expect("enqueue 2");
         db.decide_approval(&second, "rejected", None)
             .expect("decide");
@@ -459,13 +601,13 @@ mod tests {
     fn count_pending_approvals() {
         let (db, _dir) = fresh_db();
         let _ = db
-            .enqueue_approval("bot-test-1", "mail_send", &json!({}), None, None)
+            .enqueue_approval("bot-test-1", "mail_send", &json!({}), None, None, None)
             .expect("enqueue a");
         let _ = db
-            .enqueue_approval("bot-test-1", "file_write", &json!({}), None, None)
+            .enqueue_approval("bot-test-1", "file_write", &json!({}), None, None, None)
             .expect("enqueue b");
         let decided = db
-            .enqueue_approval("bot-test-1", "shell_run", &json!({}), None, None)
+            .enqueue_approval("bot-test-1", "shell_run", &json!({}), None, None, None)
             .expect("enqueue c");
         db.decide_approval(&decided, "approved", Some("\"ok\""))
             .expect("decide c");
@@ -473,5 +615,41 @@ mod tests {
             .count_pending_approvals()
             .expect("count pending");
         assert_eq!(n, 2);
+    }
+
+    // v3.4.0 (Phase 5) — takeover state row + reason
+    // round-trip. The takeover state lives in its own
+    // table so a daemon-driven run can park the Bot
+    // before the user opens the app; the next app open
+    // surfaces the row to the queue.
+    #[test]
+    fn bot_takeover_state_round_trip() {
+        let (db, _dir) = fresh_db();
+        db.set_bot_takeover_state(
+            "bot-test-1",
+            "needs_human",
+            "approval-1",
+            "2FA prompt visible",
+            "vm_browser_open",
+        )
+        .expect("set state");
+        let s = db
+            .get_bot_takeover_state("bot-test-1")
+            .expect("get state")
+            .expect("state row exists");
+        assert_eq!(s.state, "needs_human");
+        assert_eq!(s.approval_id, "approval-1");
+        assert_eq!(s.reason, "2FA prompt visible");
+        assert_eq!(s.triggering_tool, "vm_browser_open");
+        // list_paused_bots surfaces it.
+        let paused = db.list_paused_bots().expect("list");
+        assert_eq!(paused.len(), 1);
+        // clear deletes the row — back to "running".
+        db.clear_bot_takeover_state("bot-test-1")
+            .expect("clear");
+        assert!(db
+            .get_bot_takeover_state("bot-test-1")
+            .expect("get after clear")
+            .is_none());
     }
 }

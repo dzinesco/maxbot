@@ -262,6 +262,20 @@ pub fn run() {
             commands::approvals::approval_rule_list,
             commands::approvals::approval_rule_set,
             commands::approvals::approval_decide,
+            // v3.4.0 (Phase 5) — Takeover state
+            // IPC. Lets the renderer poll per-Bot
+            // takeover state on mount and on every
+            // approval decide, so a daemon-driven
+            // run that paused a Bot surfaces the
+            // pending approval in the queue on next
+            // app open.
+            commands::approvals::bot_takeover_state,
+            commands::approvals::list_paused_bots,
+            // v3.4.0 (Phase 5) — Grok Bot defaults
+            // reset. Re-applies the preset to an
+            // existing Bot, overwriting any user
+            // customizations.
+            commands::bots::apply_grok_bot_defaults,
             // v2.8.0 — Always-on Daemon (24/7). ActivityFeed
             // data for the Sidebar + the per-Bot daemon
             // token (read / rotate) for the BotEditor.

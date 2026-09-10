@@ -79,7 +79,13 @@ import {
   ttsStop,
   upsertBot,
   upsertBotSchedule,
+  approvalDecide,
+  listPausedBots,
+  botTakeoverState,
 } from "./lib/tauri";
+
+void listPausedBots;
+void botTakeoverState;
 import {
   blankBot,
   DEFAULT_SETTINGS,
@@ -186,6 +192,19 @@ export default function App() {
   const [computerPanelBotId, setComputerPanelBotId] = useState<string | null>(
     null,
   );
+  // v3.4.0 (Phase 5) — Takeover panel. Distinct from
+  // the preview-mode computer panel so the user can
+  // drive the VM interactively (solve 2FA, click
+  // captcha) without colliding with a regular preview.
+  // `null` when no takeover is active. `approvalId`
+  // is the approval row the ComputerPanel's "Hand
+  // back" button decides on close. Persisted in
+  // `bot_takeover_state` so a daemon-driven run that
+  // parks a Bot surfaces the takeover on next app
+  // open.
+  const [takeoverPanel, setTakeoverPanel] = useState<
+    { botId: string; approvalId: string } | null
+  >(null);
   // v2.2.0 — top-level view switcher. The Sidebar shows
   // two top-level tabs: "Bots" (the chat UI, the default)
   // and "Skills" (the Skills panel). Skills gets its own
@@ -318,6 +337,36 @@ export default function App() {
     summary: string;
   } | null>(null);
   const requestSeq = useRef(0);
+
+  // v3.4.0 (Phase 5) — On app launch, fetch the
+  // per-Bot takeover state. If a daemon-driven run
+  // paused a Bot before the app was opened, this
+  // is how we surface the pending Takeover
+  // approval in the queue. The state is also
+  // re-pulled whenever the bots list changes
+  // (e.g. a new bot is created) so a fresh
+  // take-over doesn't get lost in a stale fetch.
+  useEffect(() => {
+    (async () => {
+      try {
+        const paused = await listPausedBots();
+        // Auto-open the takeover panel for the
+        // first paused bot. We only auto-open one
+        // because the modal is single-instance;
+        // additional paused bots stay in the
+        // queue for the user to act on next.
+        if (paused.length > 0 && takeoverPanel === null) {
+          const first = paused[0];
+          setTakeoverPanel({
+            botId: first.bot_id,
+            approvalId: first.approval_id,
+          });
+        }
+      } catch (e) {
+        console.warn("list_paused_bots failed:", e);
+      }
+    })();
+  }, [bots, takeoverPanel]);
 
   // --- search (debounced) ---
   // When searchQuery is non-empty, kick off a `search_messages` call
@@ -1729,7 +1778,12 @@ export default function App() {
           // tool call across all Bots. Each row has
           // Approve / Reject / Edit & send; the user
           // decides before the tool runs.
-          <ApprovalQueue bots={bots} />
+          <ApprovalQueue
+            bots={bots}
+            onTakeoverRequested={(botId, approvalId) =>
+              setTakeoverPanel({ botId, approvalId })
+            }
+          />
         ) : mainView === "group" && activeGroup ? (
           // v2.4.0 — multi-Bot group view. Renders the
           // active group's transcript with a participant
@@ -1920,6 +1974,42 @@ export default function App() {
               botId={computerPanelBotId}
               mode="preview"
               onClose={() => setComputerPanelBotId(null)}
+            />
+          </div>
+        </div>
+      )}
+      {/* v3.4.0 (Phase 5) — Takeover panel. The
+        ComputerPanel mounts in `takeover` mode with
+        a "Hand back" button. Clicking it (or closing
+        the panel) calls `approval_decide(approved)`
+        against the gating approval and clears the
+        `bot_takeover_state` row server-side, so the
+        Bot's run resumes on the next turn. */}
+      {takeoverPanel && (
+        <div
+          className="modal-overlay takeover-overlay"
+          onClick={() => {
+            // The overlay click is intentionally a
+            // no-op — the user must use the "Hand
+            // back" button so the approval row is
+            // decided. Otherwise the Bot would
+            // remain paused indefinitely.
+          }}
+        >
+          <div
+            className="modal-stacked modal-stacked-wide"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <ComputerPanel
+              botId={takeoverPanel.botId}
+              mode="takeover"
+              onClose={() => {
+                void approvalDecide(takeoverPanel.approvalId, "approved")
+                  .catch((e) =>
+                    console.warn("takeover hand-back failed:", e),
+                  )
+                  .finally(() => setTakeoverPanel(null));
+              }}
             />
           </div>
         </div>

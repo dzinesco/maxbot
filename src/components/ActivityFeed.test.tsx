@@ -131,4 +131,45 @@ describe("ActivityFeed", () => {
     expect(screen.queryByTestId("activity-approvals")).toBeNull();
     expect(screen.queryByTestId("activity-empty")).toBeNull();
   });
+
+  // v3.4.0 (Phase 5) — "Why this asked" reason is
+  // surfaced inline on each approval row. The
+  // shape is "Why: <reason>". Legacy rows (no
+  // reason) render no extra line so the activity
+  // feed doesn't grow past 1.5x its v3.3.0 line
+  // count.
+  it("surfaces the audit-log reason inline on approval rows", async () => {
+    vi.mocked(listRecentActivity).mockResolvedValue({
+      bot_runs: [],
+      skill_runs: [],
+      approvals: [
+        {
+          ...makeApproval("a-r1", "pending"),
+          reason: "sending email to client@axis.com",
+        },
+      ],
+    });
+    render(<ActivityFeed />);
+    await waitFor(() => {
+      expect(screen.getByTestId("activity-approvals")).toBeTruthy();
+    });
+    expect(screen.getByTestId("activity-row-reason").textContent).toContain(
+      "sending email to client@axis.com",
+    );
+  });
+
+  it("does not render a reason line for legacy rows with null reason", async () => {
+    vi.mocked(listRecentActivity).mockResolvedValue({
+      bot_runs: [],
+      skill_runs: [],
+      approvals: [
+        { ...makeApproval("a-r2", "pending"), reason: null },
+      ],
+    });
+    render(<ActivityFeed />);
+    await waitFor(() => {
+      expect(screen.getByTestId("activity-approvals")).toBeTruthy();
+    });
+    expect(screen.queryByTestId("activity-row-reason")).toBeNull();
+  });
 });

@@ -4,6 +4,109 @@ All notable changes to MaxBot are documented in this file. The format
 follows [Keep a Changelog](https://keepachangelog.com/) and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## v3.4.0 — 2026-09-10
+
+### Added — Phase 5 (Approvals only at judgment points)
+
+Tyler's bar: "you only get pinged to approve." The
+prior default rule set asked for everything; Phase 5
+flips the bar to Grok Bot's: read-only auto,
+send / payment / destroy ask, plus Takeover for 2FA
+and an audit log so the user can see *why* each
+approval was asked.
+
+- **Grok Bot defaults preset
+  (`src-tauri/src/approvals/defaults.rs`, new).**
+  When a new Bot is created, its starting
+  `approval_rules` are seeded with the Phase 5
+  preset: `screenshot`, `vm_browser_open`,
+  `vm_computer_use`, `mail_inbox`, `file_read`,
+  `web_search`, `web_fetch`, `memory_*`,
+  `vm_computer_use.click` → `auto`; `mail_send`,
+  `mail_draft`, `message_bot`, `file_write`,
+  `shell_run`, `coding`, `run_skill`, `ego_browser`,
+  `apple_script`, and the aspirational
+  `send_payment` / `destroy_vm` /
+  `create_approval` / `send_email` /
+  `vm_computer_use.type` → `ask`. Aspirational
+  names are inert rules today; the moment a
+  matching tool lands the rule fires.
+- **"Grok Bot defaults" button in the Bot editor
+  Rules section.** One click resets every rule
+  for the current Bot to the preset, replacing
+  any user customizations. Calls the new
+  `apply_grok_bot_defaults` Tauri command.
+- **Takeover for 2FA / CAPTCHA.** The LLM
+  self-reports a `needs_human: "<reason>"`
+  field in a tool's JSON return. The Bot
+  executor detects it, enqueues a Takeover
+  approval (sentinel `tool_name =
+  "__takeover__"`), persists the per-Bot state
+  in a new `bot_takeover_state` table, and
+  parks the run. The user clicks "Take over"
+  in the ApprovalQueue; the Computer panel
+  opens in `takeover` mode (reusing the v3.0.7
+  noVNC `sendKey` / `sendMouse` ref — no new
+  VNC library); the user drives the VM
+  interactively; "Hand back" resumes the Bot.
+  State machine: `running → needs_human →
+  takeover → running` (or `takeover → failed`).
+  Persists across app close/reopen via
+  `bot_takeover_state`; the app-launch hook
+  (`list_paused_bots`) surfaces the entry on
+  next open, so a daemon-driven run that
+  parked a Bot doesn't strand it.
+- **Audit log with "Why this asked" reason.**
+  Every approval row carries a new
+  `reason TEXT` column (added via
+  `add_column_if_missing`, same pattern as
+  v3.1.0's `triggered_by`). The reason is
+  populated when the approval is enqueued
+  (not when decided) — a rule-derived
+  one-liner like "sending email to
+  client@axis.com — schedule change" or
+  "running shell command: ls -la /etc". For
+  Takeover approvals the reason is the LLM's
+  self-reported `needs_human` string. The
+  ApprovalQueue renders the reason as an
+  inline "Why this asked:" line; the
+  ActivityFeed's approval row shows it as a
+  small italic line below the row.
+
+### Changed
+
+- `apply_grok_bot_defaults` and
+  `bot_takeover_state` / `list_paused_bots`
+  are new Tauri commands; the renderer wires
+  them through `lib/tauri.ts`.
+- `upsert_bot` now applies the Grok Bot
+  defaults to the `approval_rules` table on
+  every new Bot (idempotent on re-upsert).
+- `enqueue_approval` takes one more
+  parameter: `reason: Option<&str>`. The
+  column is added to the existing
+  `add_column_if_missing` migration so
+  pre-v3.4.0 rows gracefully read as `NULL`.
+- `approval_decide` recognises a Takeover
+  approval (`tool_name == "__takeover__"`)
+  and routes it through a dedicated
+  approve/reject path that clears the
+  `bot_takeover_state` row and resumes the
+  Bot with a synthetic tool message.
+
+### Migration notes
+
+- Pre-v3.4.0 approval rows gracefully read
+  with `reason = NULL`; the renderer falls
+  back to a generic "approval required"
+  copy for them.
+- The new `bot_takeover_state` table is
+  created on first launch via
+  `CREATE TABLE IF NOT EXISTS`.
+- No schema-version bump — the v3.1.0
+  migration pattern (add columns + create
+  table) keeps the change additive.
+
 ## v3.3.0 — 2026-09-09
 
 ### Added

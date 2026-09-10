@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import type { Bot, BotSchedule, Rule, ToolSummary } from "../lib/api";
 import {
+  applyGrokBotDefaults,
   approvalRuleList,
   approvalRuleSet,
   computerGet,
@@ -784,6 +785,47 @@ export function BotEditor({
                 {" "}— auto runs, ask queues, deny blocks
               </span>
             </h3>
+            {/* v3.4.0 (Phase 5) — Grok Bot defaults
+              preset. One click resets every rule for
+              this Bot to the Phase 5 preset
+              (read-only auto, send/payment/destroy
+              ask). Useful when a user has
+              over-customized and wants to start over.
+              The `apply_grok_bot_defaults` Tauri
+              command replaces the rows in
+              `approval_rules`; we then refetch and
+              update local state. The button is
+              disabled for new Bots (id is empty)
+              because the upsert path already applies
+              the preset on first save. */}
+            <div className="rule-preset-row">
+              <button
+                type="button"
+                className="interval-preset"
+                data-testid="grok-bot-defaults-button"
+                disabled={!bot.id && !initial.id}
+                title="Reset every rule to the Grok Bot preset (read-only auto, send/payment/destroy ask)."
+                onClick={() => {
+                  const targetId = bot.id || initial.id;
+                  if (!targetId) return;
+                  applyGrokBotDefaults(targetId)
+                    .then(() => approvalRuleList(targetId))
+                    .then((rows) => {
+                      const m: Record<string, Rule> = {};
+                      for (const r of rows) m[r.tool_name] = r.rule;
+                      setRules(m);
+                    })
+                    .catch((e) =>
+                      console.warn("apply_grok_bot_defaults failed:", e),
+                    );
+                }}
+              >
+                Grok Bot defaults
+              </button>
+              <span className="hint">
+                Resets every rule to read-only auto, send/payment/destroy ask.
+              </span>
+            </div>
             {/* v3.0.2 — settings-palette bridge. The Rules
               section is one logical "setting" — there's no
               single field to focus, but the user expects

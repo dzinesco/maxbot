@@ -19,7 +19,7 @@ use tauri::{AppHandle, State};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use crate::approvals::{Approval, ApprovalRule, Rule};
+use crate::approvals::{Approval, ApprovalRule, Rule, APPROVAL_TOOL_TAKEOVER};
 use crate::bots::executor::run_bot_once;
 use crate::storage::{MessageRole, PersistedToolCall};
 use crate::tools::registry::ToolRegistry;
@@ -97,6 +97,41 @@ pub async fn approval_rule_set(
     .map_err(|e| e.to_string())?
 }
 
+// ---- takeover state (v3.4.0 Phase 5) ----
+
+/// v3.4.0 (Phase 5) — Per-Bot Takeover state. The
+/// renderer polls this on mount (and after every
+/// approval decide) to know whether a Bot is paused
+/// waiting for a human. The state is the source of
+/// truth across app restarts: a daemon-driven run
+/// that parked the Bot surfaces the pending approval
+/// in the queue on next launch.
+#[tauri::command]
+pub async fn bot_takeover_state(
+    state: State<'_, AppState>,
+    bot_id: String,
+) -> Result<Option<crate::approvals::BotTakeoverState>, String> {
+    let db = state.db.clone();
+    let id = bot_id.clone();
+    tokio::task::spawn_blocking(move || db.get_bot_takeover_state(&id).map_err(|e| e.to_string()))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// v3.4.0 (Phase 5) — List all Bots in a non-`running`
+/// takeover state. Used by the app-launch hook to
+/// surface pending takeover approvals that a
+/// daemon-driven run enqueued while the app was closed.
+#[tauri::command]
+pub async fn list_paused_bots(
+    state: State<'_, AppState>,
+) -> Result<Vec<crate::approvals::BotTakeoverState>, String> {
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || db.list_paused_bots().map_err(|e| e.to_string()))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
 // ---- decide ----
 
 #[derive(Serialize, Clone)]
@@ -130,6 +165,71 @@ pub async fn approval_decide(
 
     match decision.as_str() {
         "approved" | "edited" => {
+            // v3.4.0 (Phase 5) — Takeover approvals
+            // have `tool_name == "__takeover__"` and
+            // carry the takeover request in
+            // `payload.needs_human`. The "tool" is the
+            // user themselves driving the VM; we
+            // don't re-run anything. We just clear
+            // the bot's takeover state, mark the
+            // approval decided, and resume the Bot
+            // with a synthetic tool message so the
+            // LLM can see the takeover happened and
+            // continue.
+            if approval.tool_name == APPROVAL_TOOL_TAKEOVER {
+                let synthetic_result = serde_json::to_string(
+                    &serde_json::json!({
+                        "status": "user_took_over_and_handed_back",
+                        "needs_human": approval
+                            .payload
+                            .get("needs_human")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or(""),
+                    }),
+                )
+                .unwrap_or_else(|_| {
+                    r#"{"status":"user_took_over_and_handed_back"}"#.to_string()
+                });
+                let status = "approved";
+                let db = state.db.clone();
+                let id_for_update = id.clone();
+                let result_for_db = synthetic_result.clone();
+                tokio::task::spawn_blocking(move || {
+                    db.decide_approval(
+                        &id_for_update,
+                        status,
+                        Some(&result_for_db),
+                    )
+                    .map_err(|e| e.to_string())
+                })
+                .await
+                .map_err(|e| e.to_string())??;
+                // Clear the bot's takeover state so
+                // the next app open doesn't re-surface
+                // a stale entry.
+                let db_for_clear = state.db.clone();
+                let bot_id_for_clear = approval.bot_id.clone();
+                let _ = tokio::task::spawn_blocking(move || {
+                    db_for_clear
+                        .clear_bot_takeover_state(&bot_id_for_clear)
+                        .map_err(|e| e.to_string())
+                })
+                .await
+                .map_err(|e| e.to_string())??;
+                // Resume the Bot.
+                resume_bot_after_decide(
+                    &app,
+                    &state,
+                    &approval,
+                    synthetic_result.clone(),
+                )
+                .await;
+                let updated = refetch_approval(&state, &id).await?;
+                return Ok(ApprovalDecideOutput {
+                    approval: updated,
+                    tool_result: Some(synthetic_result),
+                });
+            }
             // Use the edited args if provided,
             // otherwise the original payload.
             let args_value = edited_args
@@ -225,6 +325,56 @@ pub async fn approval_decide(
             })
         }
         "rejected" => {
+            // v3.4.0 — Takeover rejection: user
+            // skipped the takeover (clicked "Skip"
+            // / "Reject" in the queue). Clear the
+            // bot's takeover state and resume the
+            // Bot with a denial-style message so the
+            // LLM can either retry, ask the user for
+            // help, or stop.
+            if approval.tool_name == APPROVAL_TOOL_TAKEOVER {
+                let db = state.db.clone();
+                let id_for_update = id.clone();
+                tokio::task::spawn_blocking(move || {
+                    db.decide_approval(&id_for_update, "rejected", None)
+                        .map_err(|e| e.to_string())
+                })
+                .await
+                .map_err(|e| e.to_string())??;
+                let db_for_clear = state.db.clone();
+                let bot_id_for_clear = approval.bot_id.clone();
+                let _ = tokio::task::spawn_blocking(move || {
+                    db_for_clear
+                        .clear_bot_takeover_state(&bot_id_for_clear)
+                        .map_err(|e| e.to_string())
+                })
+                .await
+                .map_err(|e| e.to_string())??;
+                let denial_content =
+                    serde_json::to_string(&serde_json::json!({
+                        "status": "user_skipped_takeover",
+                        "needs_human": approval
+                            .payload
+                            .get("needs_human")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or(""),
+                    }))
+                    .unwrap_or_else(|_| {
+                        r#"{"status":"user_skipped_takeover"}"#.to_string()
+                    });
+                resume_bot_after_decide(
+                    &app,
+                    &state,
+                    &approval,
+                    denial_content,
+                )
+                .await;
+                let updated = refetch_approval(&state, &id).await?;
+                return Ok(ApprovalDecideOutput {
+                    approval: updated,
+                    tool_result: None,
+                });
+            }
             let db = state.db.clone();
             let id_for_update = id.clone();
             tokio::task::spawn_blocking(move || {
@@ -589,6 +739,7 @@ mod tests {
                 &json!({"to": "x@y"}),
                 Some("run-cmd-1"),
                 Some("tc-LLM-1"),
+                Some("sending email to x@y"),
             )
             .expect("enqueue");
         // 2. The approval's `bot_run_id` resolves to
@@ -657,6 +808,7 @@ mod tests {
                 &json!({"cmd": "ls"}),
                 Some("run-cmd-1"),
                 Some("tc-LLM-2"),
+                None,
             )
             .expect("enqueue");
         let approval = db

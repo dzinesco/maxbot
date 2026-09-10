@@ -33,6 +33,12 @@ vi.mock("../lib/tauri", () => ({
   // editor falls through to `auto` for every tool.
   approvalRuleList: vi.fn(() => Promise.resolve([])),
   approvalRuleSet: vi.fn(() => Promise.resolve()),
+  // v3.4.0 (Phase 5) — Grok Bot defaults. The
+  // button calls `applyGrokBotDefaults` then
+  // re-fetches the rules via `approvalRuleList`.
+  // The default mock resolves; the test below
+  // overrides to assert the call shape.
+  applyGrokBotDefaults: vi.fn(() => Promise.resolve()),
   // v2.8.0 — Daemon: per-Bot bearer token + webhook
   // URL. Default mocks return `null` (no token yet)
   // and a placeholder settings blob.
@@ -69,6 +75,7 @@ vi.mock("../lib/tauri", () => ({
 
 import { BotEditor } from "./BotEditor";
 import {
+  applyGrokBotDefaults,
   approvalRuleSet,
   computerProvision,
   getDaemonToken,
@@ -129,6 +136,12 @@ beforeEach(() => {
   // v2.6.0 — reset the approval rule mocks.
   vi.mocked(approvalRuleSet).mockReset();
   vi.mocked(approvalRuleSet).mockResolvedValue(undefined);
+  // v3.4.0 (Phase 5) — reset the Grok Bot defaults
+  // mock. The default is a no-op resolver; the
+  // test below sets a custom resolver to assert
+  // the call shape.
+  vi.mocked(applyGrokBotDefaults).mockReset();
+  vi.mocked(applyGrokBotDefaults).mockResolvedValue(undefined);
 });
 
 describe("BotEditor — specialist templates", () => {
@@ -503,6 +516,33 @@ describe("BotEditor — Daemon section (v2.8.0)", () => {
     fireEvent.click(screen.getByTestId("daemon-token-copy"));
     await waitFor(() => {
       expect(writeText).toHaveBeenCalledWith("clipboard-tok-7777");
+    });
+  });
+
+  // v3.4.0 (Phase 5) — "Grok Bot defaults" button.
+  // Clicking it on an existing Bot calls
+  // `apply_grok_bot_defaults` and re-fetches the
+  // rule list. The button is disabled for new Bots
+  // (no id yet) because the upsert path already
+  // applies the preset on first save — but the
+  // helper is still wired for re-clicks.
+  it("Grok Bot defaults button calls apply_grok_bot_defaults for an existing Bot", async () => {
+    const onSave = vi.fn((bot: Bot) => Promise.resolve(bot));
+    render(
+      <BotEditor
+        initial={blankBot({ id: "bot-existing-1" })}
+        schedule={noSchedule}
+        availableTools={noTools}
+        isNew={false}
+        onClose={() => {}}
+        onSave={onSave}
+      />,
+    );
+    const btn = await screen.findByTestId("grok-bot-defaults-button");
+    expect(btn).toBeTruthy();
+    fireEvent.click(btn);
+    await waitFor(() => {
+      expect(applyGrokBotDefaults).toHaveBeenCalledWith("bot-existing-1");
     });
   });
 });

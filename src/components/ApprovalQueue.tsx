@@ -19,6 +19,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   approvalDecide,
   approvalList,
+  isTakeoverApproval,
 } from "../lib/tauri";
 import type { Approval, Bot } from "../lib/api";
 
@@ -30,10 +31,19 @@ interface ApprovalQueueProps {
   /** Optional Bot filter; when set, the queue shows
    *  only that Bot's pending approvals. */
   botId?: string;
+  /** v3.4.0 (Phase 5) — fired when the user clicks
+   *  "Take over" on a Takeover approval. The parent
+   *  opens the Computer panel in `takeover` mode
+   *  for `botId` and wires the "Hand back" button
+   *  to `approvalDecide(approved)` against
+   *  `approvalId`. The queue itself only surfaces
+   *  the request — the parent owns the panel
+   *  mount/lifecycle. */
+  onTakeoverRequested?: (botId: string, approvalId: string) => void;
 }
 
 export function ApprovalQueue(props: ApprovalQueueProps) {
-  const { bots, botId } = props;
+  const { bots, botId, onTakeoverRequested } = props;
   const [approvals, setApprovals] = useState<Approval[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -89,6 +99,25 @@ export function ApprovalQueue(props: ApprovalQueueProps) {
     [refresh],
   );
 
+  // v3.4.0 (Phase 5) — Take over. Delegates to
+  // the parent's `onTakeoverRequested` callback,
+  // which opens the Computer panel in `takeover`
+  // mode. The user then drives the VM
+  // interactively (solve 2FA, click a captcha,
+  // etc.) and clicks "Hand back" in the Computer
+  // panel to resume the Bot. The Hand back button
+  // is wired by the parent to call
+  // `approvalDecide(approved)` against this
+  // approval id.
+  const handleTakeOver = useCallback(
+    (a: Approval) => {
+      if (onTakeoverRequested) {
+        onTakeoverRequested(a.bot_id, a.id);
+      }
+    },
+    [onTakeoverRequested],
+  );
+
   return (
     <div className="approval-queue" data-testid="approval-queue">
       <header className="approval-queue__header">
@@ -113,10 +142,19 @@ export function ApprovalQueue(props: ApprovalQueueProps) {
       <ul className="approval-queue__list">
         {approvals.map((a) => {
           const bot = botById[a.bot_id];
+          // v3.4.0 — a Takeover approval gets
+          // different action buttons (no Approve
+          // / Reject / Edit — those don't apply to a
+          // "Bot is paused, please drive the VM"
+          // request).
+          const takeover = isTakeoverApproval(a);
           return (
             <li
               key={a.id}
-              className="approval-queue__row"
+              className={
+                "approval-queue__row" +
+                (takeover ? " approval-queue__row--takeover" : "")
+              }
               data-testid={`approval-row-${a.id}`}
             >
               <div className="approval-queue__row-head">
@@ -124,37 +162,76 @@ export function ApprovalQueue(props: ApprovalQueueProps) {
                   {bot?.icon || "🤖"}{" "}
                   <strong>{bot?.name || a.bot_id}</strong>
                 </span>
-                <code className="approval-queue__tool">{a.tool_name}</code>
+                <code className="approval-queue__tool">
+                  {takeover
+                    ? "Take over (drive the VM)"
+                    : a.tool_name}
+                </code>
                 <span className="muted small">
                   {new Date(a.created_at).toLocaleString()}
                 </span>
               </div>
+              {/* v3.4.0 — "Why this asked" reason
+                surfaced inline. Falls back to a
+                generic copy when the row predates
+                the v3.4.0 reason column. */}
+              <ReasonLine
+                reason={a.reason ?? null}
+                fallback={
+                  takeover
+                    ? "Bot needs human help driving its VM."
+                    : "This tool requires your approval."
+                }
+              />
               <PayloadPreview payload={a.payload} />
               <div className="approval-queue__row-actions">
-                <button
-                  className="primary small"
-                  disabled={busy === a.id}
-                  onClick={() => handleDecide(a.id, "approved")}
-                  data-testid={`approval-approve-${a.id}`}
-                >
-                  Approve
-                </button>
-                <button
-                  className="ghost small"
-                  disabled={busy === a.id}
-                  onClick={() => handleDecide(a.id, "rejected")}
-                  data-testid={`approval-reject-${a.id}`}
-                >
-                  Reject
-                </button>
-                <button
-                  className="ghost small"
-                  disabled={busy === a.id}
-                  onClick={() => setEditing(a)}
-                  data-testid={`approval-edit-${a.id}`}
-                >
-                  Edit & send
-                </button>
+                {takeover ? (
+                  <>
+                    <button
+                      className="primary small"
+                      disabled={busy === a.id}
+                      onClick={() => handleTakeOver(a)}
+                      data-testid={`approval-takeover-${a.id}`}
+                    >
+                      Take over
+                    </button>
+                    <button
+                      className="ghost small"
+                      disabled={busy === a.id}
+                      onClick={() => handleDecide(a.id, "rejected")}
+                      data-testid={`approval-skip-${a.id}`}
+                    >
+                      Skip
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    <button
+                      className="primary small"
+                      disabled={busy === a.id}
+                      onClick={() => handleDecide(a.id, "approved")}
+                      data-testid={`approval-approve-${a.id}`}
+                    >
+                      Approve
+                    </button>
+                    <button
+                      className="ghost small"
+                      disabled={busy === a.id}
+                      onClick={() => handleDecide(a.id, "rejected")}
+                      data-testid={`approval-reject-${a.id}`}
+                    >
+                      Reject
+                    </button>
+                    <button
+                      className="ghost small"
+                      disabled={busy === a.id}
+                      onClick={() => setEditing(a)}
+                      data-testid={`approval-edit-${a.id}`}
+                    >
+                      Edit & send
+                    </button>
+                  </>
+                )}
                 {busy === a.id && (
                   <span className="muted small">deciding…</span>
                 )}
@@ -171,6 +248,33 @@ export function ApprovalQueue(props: ApprovalQueueProps) {
         />
       )}
     </div>
+  );
+}
+
+// ---- v3.4.0 — Reason ("Why this asked") ----
+
+/** Inline expansion of the approval row's reason.
+ *  Surfaces the audit-log "Why this asked" line so
+ *  the user can see the rationale without opening
+ *  the Edit modal. Falls back to a generic copy
+ *  when the row predates the v3.4.0 reason column
+ *  (NULL reason). */
+function ReasonLine({
+  reason,
+  fallback,
+}: {
+  reason: string | null;
+  fallback: string;
+}) {
+  const text = reason && reason.trim().length > 0 ? reason : fallback;
+  return (
+    <p
+      className="approval-queue__reason muted small"
+      data-testid="approval-reason"
+    >
+      <span className="approval-queue__reason-label">Why this asked:</span>{" "}
+      {text}
+    </p>
   );
 }
 

@@ -460,6 +460,57 @@ export interface Approval {
   tool_call_id: string | null;
   created_at: string;
   decided_at: string | null;
+  /**
+   * v3.4.0 (Phase 5) — "Why this asked" reason.
+   * Short, human-readable explanation of why this
+   * approval was queued. Populated when the
+   * approval is enqueued (not when decided), so a
+   * pending row in the queue already carries the
+   * reason. Rule-derived by default
+   * (e.g. "sending email to client@axis.com —
+   * schedule change"); for Takeover approvals the
+   * reason is the LLM's self-reported `needs_human`
+   * string. `null` for rows enqueued before v3.4.0
+   * — the ActivityFeed / ApprovalQueue render the
+   * absence as a generic "approval required" copy
+   * rather than failing.
+   */
+  reason?: string | null;
+  /**
+   * v3.4.0 (Phase 5) — Takeover marker. `true` when
+   * this row is a Takeover request rather than a
+   * real tool approval. Takeover requests are
+   * surfaced in the ApprovalQueue with "Take over"
+   * and "Hand back" buttons; on decide the
+   * `bot_takeover_state` row is cleared and the
+   * Bot's run is resumed.
+   *
+   * We compute this on the client from
+   * `tool_name === "__takeover__"` — a sentinel
+   * rather than a separate column to keep the
+   * schema minimal. The renderer uses it to swap
+   * the action buttons.
+   */
+  is_takeover?: boolean;
+}
+
+/**
+ * v3.4.0 (Phase 5) — Per-Bot Takeover state. The
+ * `bot_takeover_state` IPC surfaces this so the
+ * renderer can show a "Bot is paused waiting for
+ * human" badge on the sidebar / BotAvatar even when
+ * the app opens after a daemon-driven run that
+ * parked the Bot.
+ */
+export interface BotTakeoverState {
+  bot_id: string;
+  /** `"running" | "needs_human" | "takeover"` */
+  state: "running" | "needs_human" | "takeover" | string;
+  approval_id: string;
+  reason: string;
+  triggering_tool: string;
+  created_at: string;
+  updated_at: string;
 }
 
 /** Returned by `approval_decide` — the canonical

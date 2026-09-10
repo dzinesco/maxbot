@@ -48,6 +48,7 @@ pub async fn enqueue_if_ask_rule(
     payload: &Value,
     bot_run_id: Option<&str>,
     tool_call_id: Option<&str>,
+    reason: Option<&str>,
 ) -> Result<Option<String>, String> {
     // Look up the rule. `get_approval_rule` defaults
     // to `Auto` when no row exists, which is the
@@ -68,6 +69,7 @@ pub async fn enqueue_if_ask_rule(
                     payload,
                     bot_run_id,
                     tool_call_id,
+                    reason,
                 )
                 .map_err(|e| format!("enqueue approval failed: {e}"))?;
             Ok(Some(id))
@@ -161,6 +163,7 @@ mod tests {
             &json!({}),
             None,
             None,
+            None,
         )
         .await
         .expect("auto rule returns Ok");
@@ -181,6 +184,7 @@ mod tests {
             &json!({ "to": "x@y" }),
             Some("run-99"),
             Some("tc-99"),
+            Some("sending email to x@y"),
         )
         .await
         .expect("ask rule returns Ok");
@@ -201,6 +205,8 @@ mod tests {
         // match the synthetic tool message back to
         // the model's outstanding `tool_calls`.
         assert_eq!(approval.tool_call_id.as_deref(), Some("tc-99"));
+        // v3.4.0 — reason round-trips onto the row.
+        assert_eq!(approval.reason.as_deref(), Some("sending email to x@y"));
     }
 
     #[tokio::test]
@@ -215,6 +221,7 @@ mod tests {
             "bot-queue-1",
             "shell_run",
             &json!({ "cmd": "rm -rf /" }),
+            None,
             None,
             None,
         )

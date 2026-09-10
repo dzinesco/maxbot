@@ -756,6 +756,7 @@ import type {
   Approval,
   ApprovalDecideOutput,
   ApprovalRule,
+  BotTakeoverState,
   Rule,
 } from "./api";
 
@@ -817,6 +818,53 @@ export async function approvalDecide(
     decision,
     editedArgs: editedArgs ?? null,
   });
+}
+
+// ---- v3.4.0 (Phase 5) — Grok Bot defaults + Takeover ----
+
+/** v3.4.0 — Per-Bot Takeover state. The renderer
+ *  polls this on mount (and after every approval
+ *  decide) to know whether a Bot is paused waiting
+ *  for a human. The state is the source of truth
+ *  across app restarts: a daemon-driven run that
+ *  parked the Bot surfaces the pending approval in
+ *  the queue on next launch. */
+export async function botTakeoverState(
+  botId: string,
+): Promise<BotTakeoverState | null> {
+  return invoke<BotTakeoverState | null>("bot_takeover_state", {
+    botId,
+  });
+}
+
+/** v3.4.0 — List all Bots in a non-`running`
+ *  takeover state. The app-launch hook uses this to
+ *  surface pending takeover approvals that a
+ *  daemon-driven run enqueued while the app was
+ *  closed. */
+export async function listPausedBots(): Promise<BotTakeoverState[]> {
+  return invoke<BotTakeoverState[]>("list_paused_bots");
+}
+
+/** v3.4.0 — Apply the Grok Bot defaults preset to
+ *  an existing Bot. Resets the Bot's `approval_rules`
+ *  to the Grok Bot preset, replacing any user
+ *  customizations. Idempotent. */
+export async function applyGrokBotDefaults(botId: string): Promise<void> {
+  return invoke<void>("apply_grok_bot_defaults", { botId });
+}
+
+/** v3.4.0 — Sentinel tool name for a Takeover
+ *  approval. Match the Rust `APPROVAL_TOOL_TAKEOVER`
+ *  constant. */
+export const APPROVAL_TOOL_TAKEOVER = "__takeover__";
+
+/** v3.4.0 — `true` if this approval is a Takeover
+ *  request rather than a real tool approval.
+ *  Computed on the client from
+ *  `tool_name === APPROVAL_TOOL_TAKEOVER`. */
+export function isTakeoverApproval(a: Approval): boolean {
+  return a.tool_name === APPROVAL_TOOL_TAKEOVER;
 }
 
 // ---- v2.8.0 — Always-on Daemon (24/7) ----

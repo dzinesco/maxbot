@@ -554,6 +554,28 @@ impl Database {
              );
              CREATE INDEX IF NOT EXISTS approvals_by_bot_status
                  ON approvals(bot_id, status, created_at DESC);
+             -- v3.4.0 (Phase 5) — Per-Bot Takeover state.
+             -- One row per Bot in a non-`running` takeover
+             -- state. The Bot executor upserts this when a
+             -- tool return carries `needs_human`; the user
+             -- clears it (via the Hand back / Reject UI) by
+             -- setting state back to `running` (which the
+             -- storage layer implements as `DELETE`). The
+             -- row persists across app close/reopen so a
+             -- daemon-driven run that paused the Bot
+             -- surfaces the pending approval in the queue
+             -- on next launch.
+             CREATE TABLE IF NOT EXISTS bot_takeover_state (
+                 bot_id          TEXT PRIMARY KEY REFERENCES bots(id) ON DELETE CASCADE,
+                 state           TEXT NOT NULL,
+                 approval_id     TEXT NOT NULL,
+                 reason          TEXT NOT NULL DEFAULT '',
+                 triggering_tool TEXT NOT NULL DEFAULT '',
+                 created_at      TEXT NOT NULL,
+                 updated_at      TEXT NOT NULL
+             );
+             CREATE INDEX IF NOT EXISTS bot_takeover_state_by_state
+                 ON bot_takeover_state(state, updated_at DESC);
              -- v2.8.0 — Always-on Daemon (24/7). One row per
              -- Bot that has a daemon webhook enabled. The
              -- `maxbotd` binary consults this table on every
@@ -598,6 +620,20 @@ impl Database {
             &conn,
             "approvals",
             "tool_call_id",
+            "TEXT",
+        )?;
+        // v3.4.0 (Phase 5) — "Why this asked" reason on
+        // each approval row. Populated when the approval
+        // is enqueued (not when decided), so a pending
+        // row in the queue already carries the reason.
+        // NULL is fine for pre-v3.4.0 rows; the
+        // ActivityFeed / ApprovalQueue render the absence
+        // as a generic "approval required" copy rather
+        // than failing.
+        add_column_if_missing(
+            &conn,
+            "approvals",
+            "reason",
             "TEXT",
         )?;
         // v0.7.6: error_message on `messages` — friendly description
