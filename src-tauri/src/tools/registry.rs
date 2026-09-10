@@ -8,6 +8,12 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
+use crate::connectors::{
+    self, CalendarCreateEventTool, CalendarGetEventTool, CalendarListEventsTool,
+    CalendarUpdateEventTool, GithubAddCommentTool, GithubCreateIssueTool, GithubGetIssueTool,
+    GithubListIssuesTool, GmailDraftMessageTool, GmailGetMessageTool, GmailListMessagesTool,
+    GmailSendMessageTool,
+};
 use crate::llm::provider::ToolDefinition;
 
 use super::apple_script::AppleScriptRunTool;
@@ -20,7 +26,7 @@ use super::browsers::{
     ChromeCurrentUrlTool, ChromeExecJsTool, ChromeOpenTool, ChromeTabsTool, SafariCurrentUrlTool,
     SafariExecJsTool, SafariOpenTool, SafariTabsTool,
 };
-use super::calendar::{CalendarCreateEventTool, CalendarTodayTool, CalendarWeekTool};
+use super::calendar::{CalendarTodayTool, CalendarWeekTool};
 use super::clipboard::{ClipboardReadTool, ClipboardWriteTool};
 use super::coding::{GrokPromptTool, GrokSessionStatusTool};
 use super::ego_browser::EgoBrowserTool;
@@ -83,7 +89,44 @@ impl ToolRegistry {
             // v0.4.2 — Calendar + Reminders + Notes
             Arc::new(CalendarTodayTool),
             Arc::new(CalendarWeekTool),
+            // v3.7.0 (Phase 8) — Calendar (Google).
+            // Note: `CalendarCreateEventTool` here is the
+            // **Google Calendar** connector (imported from
+            // `crate::connectors` above), not the Apple
+            // Calendar one. Per the brief, the Google
+            // connector owns the `calendar_create_event`
+            // name from this release forward; the Apple
+            // Calendar `calendar_today` / `calendar_week`
+            // tools (unique names) remain.
+            Arc::new(CalendarListEventsTool),
+            Arc::new(CalendarGetEventTool),
             Arc::new(CalendarCreateEventTool),
+            Arc::new(CalendarUpdateEventTool),
+            // v3.7.0 (Phase 8) — Gmail. The four
+            // tools: list / get / send / draft.
+            // `gmail_send_message` and
+            // `gmail_draft_message` are
+            // per-call-consent; the two reads
+            // are auto. The brief's Grok Bot
+            // preset maps the existing
+            // `mail_send` / `mail_draft`
+            // (Apple Mail) names to these
+            // Gmail tools, so a user who
+            // enables Gmail for a Bot gets
+            // the same Auto/Ask pattern
+            // without picking rules again.
+            Arc::new(GmailListMessagesTool),
+            Arc::new(GmailGetMessageTool),
+            Arc::new(GmailSendMessageTool),
+            Arc::new(GmailDraftMessageTool),
+            // v3.7.0 (Phase 8) — GitHub. PAT-
+            // based, four tools, two reads
+            // (auto) and two writes
+            // (per-call consent).
+            Arc::new(GithubListIssuesTool),
+            Arc::new(GithubGetIssueTool),
+            Arc::new(GithubCreateIssueTool),
+            Arc::new(GithubAddCommentTool),
             Arc::new(RemindersListTool),
             Arc::new(RemindersAddTool),
             Arc::new(RemindersCompleteTool),
@@ -293,6 +336,65 @@ impl ToolRegistry {
         }
         ToolRegistry { by_name }
     }
+
+    /// v3.7.0 (Phase 8) — return a new registry with
+    /// the **connector** tools filtered by the bot's
+    /// `connectors_enabled` setting. The
+    /// `connectors_enabled` string is the
+    /// comma-separated list of connector ids stored on
+    /// the Bot row (e.g. `"gmail,calendar"`). The
+    /// method drops every tool whose name is in
+    /// `connectors::is_connector_tool(name)` AND whose
+    /// owning connector is not in the enabled list.
+    /// Non-connector tools are untouched.
+    ///
+    /// The allowlist still applies — the caller is
+    /// expected to pass the bot's `allowed_tools`
+    /// list, and `connectors_filtered` is applied
+    /// AFTER the allowlist (i.e., a bot that doesn't
+    /// have `gmail_send_message` in its allowlist
+    /// still doesn't see it, even with `"gmail"` in
+    /// `connectors_enabled`).
+    ///
+    /// Compose with `computer_use_filtered` to get the
+    /// full per-Bot view; the executor's
+    /// `registry_for` does this in v3.7.0.
+    pub fn connectors_filtered(
+        &self,
+        allowed: &[String],
+        connectors_enabled: &str,
+    ) -> ToolRegistry {
+        let base = self.filtered(allowed);
+        let enabled: std::collections::HashSet<String> =
+            crate::connectors::parse_enabled(connectors_enabled)
+                .into_iter()
+                .collect();
+        let mut by_name = base.by_name;
+        if enabled.is_empty() {
+            // No connectors enabled — drop every
+            // connector tool. The safe default.
+            by_name.retain(|name, _| !connectors::is_connector_tool(name));
+        } else {
+            by_name.retain(|name, _| {
+                if !connectors::is_connector_tool(name) {
+                    return true;
+                }
+                // For each registered connector id,
+                // check whether this tool belongs to it.
+                // The first match wins; if no match, the
+                // tool is dropped (defensive — every
+                // connector-owned tool should map to
+                // exactly one connector id).
+                for cid in &enabled {
+                    if connectors::tools_for_connector(cid).contains(&name.as_str()) {
+                        return true;
+                    }
+                }
+                false
+            });
+        }
+        ToolRegistry { by_name }
+    }
 }
 
 /// Convenience for tests: a totally empty registry.
@@ -430,5 +532,138 @@ mod tests {
         assert!(!out.by_name.contains_key("vm_browser_open"));
         assert!(!out.by_name.contains_key("ego_browser"));
         assert!(out.by_name.contains_key("file_write"));
+    }
+
+    // v3.7.0 (Phase 8) — `connectors_filtered` is the
+    // per-Bot connector-enable gate. The
+    // `connectors_enabled` string is the comma-separated
+    // list stored on the Bot row; the tool list drops
+    // every `connectors::*`-owned tool whose connector
+    // id is not in the list. The allowlist still
+    // applies — `connectors_filtered` is applied AFTER
+    // the allowlist, so a Bot that doesn't have
+    // `gmail_send_message` in its `allowed_tools`
+    // doesn't see it even when `"gmail"` is in
+    // `connectors_enabled`. (Compose with
+    // `computer_use_filtered` to get the full per-Bot
+    // view; the executor's `registry_for` does this.)
+    fn fixture_registry_with_connectors() -> ToolRegistry {
+        let mut by_name: HashMap<String, Arc<dyn Tool>> = HashMap::new();
+        by_name.insert(
+            "gmail_list_messages".to_string(),
+            Arc::new(GmailListMessagesTool),
+        );
+        by_name.insert(
+            "gmail_send_message".to_string(),
+            Arc::new(GmailSendMessageTool),
+        );
+        by_name.insert(
+            "calendar_list_events".to_string(),
+            Arc::new(CalendarListEventsTool),
+        );
+        by_name.insert(
+            "github_list_issues".to_string(),
+            Arc::new(GithubListIssuesTool),
+        );
+        by_name.insert(
+            "file_write".to_string(),
+            Arc::new(crate::tools::file_write::FileWriteTool),
+        );
+        ToolRegistry { by_name }
+    }
+
+    /// No `connectors_enabled` = no connector tools.
+    /// This is the safe default for Bots created on
+    /// the v3.7.0 code path (the column is NULL until
+    /// the user opts in) and the pre-v3.7.0 behavior
+    /// (a Bot from v3.6.0 has no connector tools to
+    /// see at all).
+    #[test]
+    fn connectors_empty_hides_all_connector_tools() {
+        let r = fixture_registry_with_connectors();
+        let allowed = vec![
+            "gmail_list_messages".to_string(),
+            "gmail_send_message".to_string(),
+            "calendar_list_events".to_string(),
+            "github_list_issues".to_string(),
+            "file_write".to_string(),
+        ];
+        let out = r.connectors_filtered(&allowed, "");
+        assert!(!out.by_name.contains_key("gmail_list_messages"));
+        assert!(!out.by_name.contains_key("gmail_send_message"));
+        assert!(!out.by_name.contains_key("calendar_list_events"));
+        assert!(!out.by_name.contains_key("github_list_issues"));
+        // Non-connector tool survives.
+        assert!(out.by_name.contains_key("file_write"));
+    }
+
+    /// `connectors_enabled = "gmail"` enables the four
+    /// Gmail tools and nothing else.
+    #[test]
+    fn connectors_gmail_only_enables_gmail_tools() {
+        let r = fixture_registry_with_connectors();
+        let allowed = vec![
+            "gmail_list_messages".to_string(),
+            "gmail_send_message".to_string(),
+            "calendar_list_events".to_string(),
+            "github_list_issues".to_string(),
+            "file_write".to_string(),
+        ];
+        let out = r.connectors_filtered(&allowed, "gmail");
+        assert!(out.by_name.contains_key("gmail_list_messages"));
+        assert!(out.by_name.contains_key("gmail_send_message"));
+        assert!(!out.by_name.contains_key("calendar_list_events"));
+        assert!(!out.by_name.contains_key("github_list_issues"));
+        assert!(out.by_name.contains_key("file_write"));
+    }
+
+    /// All three connectors enabled, allowlist
+    /// permits all four tools each = full per-Bot
+    /// connector surface.
+    #[test]
+    fn connectors_all_three_enables_all_twelve_tools() {
+        let r = fixture_registry_with_connectors();
+        let allowed = vec![
+            "gmail_list_messages".to_string(),
+            "gmail_send_message".to_string(),
+            "calendar_list_events".to_string(),
+            "github_list_issues".to_string(),
+            "file_write".to_string(),
+        ];
+        let out = r.connectors_filtered(&allowed, "gmail,calendar,github");
+        assert!(out.by_name.contains_key("gmail_list_messages"));
+        assert!(out.by_name.contains_key("gmail_send_message"));
+        assert!(out.by_name.contains_key("calendar_list_events"));
+        assert!(out.by_name.contains_key("github_list_issues"));
+        assert!(out.by_name.contains_key("file_write"));
+    }
+
+    /// Allowlist is binding: a Bot without
+    /// `gmail_send_message` in `allowed_tools` doesn't
+    /// see it, even with `"gmail"` in
+    /// `connectors_enabled`.
+    #[test]
+    fn connectors_respects_allowlist() {
+        let r = fixture_registry_with_connectors();
+        // User only allowed the read-only tool.
+        let allowed = vec!["gmail_list_messages".to_string()];
+        let out = r.connectors_filtered(&allowed, "gmail");
+        assert!(out.by_name.contains_key("gmail_list_messages"));
+        assert!(!out.by_name.contains_key("gmail_send_message"));
+    }
+
+    /// Unknown connector id is a no-op (filtered out
+    /// by `parse_enabled`). A typo in the editor can't
+    /// accidentally enable something.
+    #[test]
+    fn connectors_unknown_id_is_ignored() {
+        let r = fixture_registry_with_connectors();
+        let allowed = vec![
+            "gmail_list_messages".to_string(),
+            "file_write".to_string(),
+        ];
+        let out = r.connectors_filtered(&allowed, "slack, gmail ,  ");
+        assert!(out.by_name.contains_key("gmail_list_messages"));
+        assert!(!out.by_name.contains_key("slack_list_channels")); // not registered, but would be dropped if it were
     }
 }

@@ -231,6 +231,32 @@ pub struct Settings {
     /// fresh install doesn't talk at the user.
     #[serde(default)]
     pub voice_mode_enabled: bool,
+
+    // ---- v3.7.0 (Phase 8) — Connector credentials ----
+    /// Google OAuth access token used by the Gmail and
+    /// Google Calendar connectors (`connectors::gmail`
+    /// and `connectors::calendar`). One Google account,
+    /// one token; the user pastes it here once and
+    /// both connectors pick it up. Stored plaintext in
+    /// SQLite (same threat model as the LLM API keys
+    /// above; the per-user Application Support directory
+    /// carries the default macOS file protection
+    /// class). None = both connectors return a
+    /// "set google_access_token in Settings" error when
+    /// called.
+    #[serde(default)]
+    pub google_access_token: Option<String>,
+    /// GitHub Personal Access Token (classic or
+    /// fine-grained) used by the `connectors::github`
+    /// tools. None = the GitHub connector returns a
+    /// "set github_pat in Settings" error when called.
+    /// The user generates the token from
+    /// <https://github.com/settings/tokens> and pastes
+    /// it here; the connector sends it as
+    /// `Authorization: token <PAT>`. Per the brief,
+    /// OAuth Apps are out of scope for v3.7.0.
+    #[serde(default)]
+    pub github_pat: Option<String>,
 }
 
 fn default_computer_disk() -> u32 {
@@ -678,6 +704,18 @@ impl Database {
             "computer_use",
             "TEXT NOT NULL DEFAULT 'vm'",
         )?;
+        // v3.7.0 (Phase 8) — per-Bot connector enable
+        // toggles. Comma-separated list of connector
+        // ids (`"gmail"`, `"calendar"`, `"github"`);
+        // empty = no connectors enabled. The tool
+        // registry reads this column at run time and
+        // hides the matching `gmail_*` / `calendar_*` /
+        // `github_*` tools when the corresponding id
+        // is absent. Nullable (no NOT NULL DEFAULT) so
+        // existing rows backfill to NULL → empty
+        // string on the read path (via
+        // `Option<String>::unwrap_or_default()`).
+        add_column_if_missing(&conn, "bots", "connectors_enabled", "TEXT")?;
         // v2.2.0 — forward-compat for v2.3 schedules. v2.2 doesn't
         // wire the schedules UI to Skills, but adding the column now
         // means a future migration doesn't have to ALTER an
@@ -1109,7 +1147,7 @@ impl Database {
     pub fn list_bots(&self) -> rusqlite::Result<Vec<crate::bots::Bot>> {
         let conn = self.conn.lock().expect("db lock poisoned");
         let mut stmt = conn.prepare(
-            "SELECT id, name, description, system_prompt, default_model, allowed_tools, icon, color, avatar_color, last_active_at, state, computer_use, created_at, updated_at
+            "SELECT id, name, description, system_prompt, default_model, allowed_tools, icon, color, avatar_color, last_active_at, state, computer_use, connectors_enabled, created_at, updated_at
              FROM bots ORDER BY name COLLATE NOCASE ASC",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -1130,6 +1168,16 @@ impl Database {
             // (which carries "vm" from the column DEFAULT)
             // land in a known-good state.
             let computer_use_str: String = row.get(11)?;
+            // v3.7.0 (Phase 8) — `connectors_enabled` is
+            // nullable (no DEFAULT) so pre-v3.7.0 rows carry
+            // NULL. Pull as `Option<String>` and default to ""
+            // so the registry's `parse_enabled` sees an empty
+            // list (= no connectors enabled). The registry's
+            // `connectors_filtered` then leaves the connector
+            // tools in the per-Bot tool list, which matches
+            // the pre-v3.7.0 behavior (connector tools
+            // effectively disabled by default).
+            let connectors_enabled: Option<String> = row.get(12)?;
             Ok(crate::bots::Bot {
                 id: row.get(0)?,
                 name: row.get(1)?,
@@ -1143,8 +1191,9 @@ impl Database {
                 last_active_at: last_active_str.map(parse_dt),
                 state: crate::bots::BotState::parse(&state_str),
                 computer_use: crate::bots::parse_computer_use(&computer_use_str).to_string(),
-                created_at: parse_dt(row.get::<_, String>(12)?),
-                updated_at: parse_dt(row.get::<_, String>(13)?),
+                connectors_enabled: connectors_enabled.unwrap_or_default(),
+                created_at: parse_dt(row.get::<_, String>(13)?),
+                updated_at: parse_dt(row.get::<_, String>(14)?),
             })
         })?;
         let mut out = Vec::new();
@@ -1157,7 +1206,7 @@ impl Database {
     pub fn get_bot(&self, id: &str) -> rusqlite::Result<Option<crate::bots::Bot>> {
         let conn = self.conn.lock().expect("db lock poisoned");
         let mut stmt = conn.prepare(
-            "SELECT id, name, description, system_prompt, default_model, allowed_tools, icon, color, avatar_color, last_active_at, state, computer_use, created_at, updated_at
+            "SELECT id, name, description, system_prompt, default_model, allowed_tools, icon, color, avatar_color, last_active_at, state, computer_use, connectors_enabled, created_at, updated_at
              FROM bots WHERE id = ?",
         )?;
         let mut rows = stmt.query(params![id])?;
@@ -1175,6 +1224,9 @@ impl Database {
         let avatar_color: Option<String> = row.get(8)?;
         // v3.2.0 — see list_bots for the parse_computer_use rationale.
         let computer_use_str: String = row.get(11)?;
+        // v3.7.0 (Phase 8) — see list_bots for the
+        // connectors_enabled rationale.
+        let connectors_enabled: Option<String> = row.get(12)?;
         Ok(Some(crate::bots::Bot {
             id: row.get(0)?,
             name: row.get(1)?,
@@ -1188,8 +1240,9 @@ impl Database {
             last_active_at: last_active_str.map(parse_dt),
             state: crate::bots::BotState::parse(&state_str),
             computer_use: crate::bots::parse_computer_use(&computer_use_str).to_string(),
-            created_at: parse_dt(row.get::<_, String>(12)?),
-            updated_at: parse_dt(row.get::<_, String>(13)?),
+            connectors_enabled: connectors_enabled.unwrap_or_default(),
+            created_at: parse_dt(row.get::<_, String>(13)?),
+            updated_at: parse_dt(row.get::<_, String>(14)?),
         }))
     }
 
@@ -1204,9 +1257,22 @@ impl Database {
         // The enum has exactly three valid values today; an
         // empty / unknown string lands in "vm" (the default).
         let computer_use = crate::bots::parse_computer_use(&bot.computer_use).to_string();
+        // v3.7.0 (Phase 8) — trim and skip empties so a
+        // stray `"  ,  , gmail"` from the editor lands
+        // as `"gmail"` instead of an obviously-bad
+        // string. Unknown ids are filtered out at the
+        // registry's read path (`parse_enabled`), so a
+        // typo can't disable a connector.
+        let connectors_enabled: String = bot
+            .connectors_enabled
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join(",");
         conn.execute(
-            "INSERT INTO bots (id, name, description, system_prompt, default_model, allowed_tools, icon, color, avatar_color, last_active_at, state, computer_use, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            "INSERT INTO bots (id, name, description, system_prompt, default_model, allowed_tools, icon, color, avatar_color, last_active_at, state, computer_use, connectors_enabled, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT(id) DO UPDATE SET
                 name = excluded.name,
                 description = excluded.description,
@@ -1219,6 +1285,7 @@ impl Database {
                 last_active_at = excluded.last_active_at,
                 state = excluded.state,
                 computer_use = excluded.computer_use,
+                connectors_enabled = excluded.connectors_enabled,
                 updated_at = excluded.updated_at",
             params![
                 bot.id,
@@ -1233,6 +1300,7 @@ impl Database {
                 last_active,
                 bot.state.as_str(),
                 computer_use,
+                connectors_enabled,
                 bot.created_at.to_rfc3339(),
                 bot.updated_at.to_rfc3339(),
             ],
@@ -2902,6 +2970,15 @@ mod tests {
             // field; the value is just here so the struct
             // literal compiles.
             computer_use: "vm".to_string(),
+            // v3.7.0 (Phase 8) — `connectors_enabled`
+            // is the new per-Bot field for the
+            // connector enable toggles. Empty string =
+            // no connectors enabled. None of the
+            // existing test fixtures exercise the
+            // connector surface; the empty value is
+            // the safe default that matches a Bot
+            // row written by pre-v3.7.0 code.
+            connectors_enabled: String::new(),
             created_at: now,
             updated_at: now,
         };
@@ -2986,6 +3063,12 @@ mod tests {
             // last_active_at round-trip; the value here is
             // just to make the struct literal compile.
             computer_use: "vm".to_string(),
+            // v3.7.0 (Phase 8) — added the
+            // `connectors_enabled` field. The test
+            // doesn't exercise the connector
+            // surface; the value is here only so
+            // the struct literal compiles.
+            connectors_enabled: String::new(),
             created_at: now,
             updated_at: now,
         };
@@ -3072,6 +3155,11 @@ mod tests {
             // new Bots. The token tests don't exercise
             // the field.
             computer_use: "vm".to_string(),
+            // v3.7.0 (Phase 8) — empty
+            // `connectors_enabled` is the safe
+            // default; the token tests don't
+            // exercise the connector surface.
+            connectors_enabled: String::new(),
         })
         .expect("upsert bot");
     }
@@ -3160,6 +3248,11 @@ mod tests {
                 last_active_at: None,
                 // v3.2.0 — `computer_use` defaults to "vm".
                 computer_use: "vm".to_string(),
+                // v3.7.0 (Phase 8) — empty
+                // `connectors_enabled`; this test
+                // doesn't exercise the connector
+                // surface.
+                connectors_enabled: String::new(),
             })
             .expect("upsert");
         }

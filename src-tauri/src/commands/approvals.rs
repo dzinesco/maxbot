@@ -691,6 +691,14 @@ mod tests {
             // the field; the value is just here so the
             // struct literal compiles.
             computer_use: "vm".to_string(),
+            // v3.7.0 (Phase 8) — added the
+            // `connectors_enabled` field. The
+            // command tests don't exercise the
+            // connector surface; the empty value
+            // matches the pre-v3.7.0 default and
+            // is here only to make the struct
+            // literal compile.
+            connectors_enabled: String::new(),
             created_at: now,
             updated_at: now,
         };

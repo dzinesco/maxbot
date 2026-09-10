@@ -892,3 +892,14 @@ export async function rotateDaemonToken(botId: string): Promise<string> {
 export async function listRecentActivity(): Promise<ActivityFeed> {
   return invoke<ActivityFeed>("list_recent_activity");
 }
+
+/** v3.7.0 (Phase 8) — Test the named connector's
+ *  credentials by pinging the relevant upstream
+ *  API. `connector` is `"gmail"`, `"calendar"`, or
+ *  `"github"`. Returns a human-readable status
+ *  string (e.g. `"Gmail OK: signed in as ..."`).
+ *  Throws on auth failure / missing credential —
+ *  the BotEditor surfaces the message in a toast. */
+export async function connectorTest(connector: string): Promise<string> {
+  return invoke<string>("connector_test", { connector });
+}

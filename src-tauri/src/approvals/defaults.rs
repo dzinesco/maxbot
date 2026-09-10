@@ -103,6 +103,38 @@ pub const GROK_BOT_DEFAULTS: &[PresetRow] = &[
     ("shared_read", Rule::Auto),
     ("shared_list", Rule::Auto),
     ("shared_write", Rule::Ask),
+    // v3.7.0 (Phase 8) — Connectors. The three new
+    // connector surfaces (Gmail, Google Calendar,
+    // GitHub) follow the same read-only = Auto,
+    // mutating = Ask pattern as the rest of the
+    // preset. The brief's note "map the new Gmail
+    // tools to the existing preset names" reads as:
+    // the `mail_inbox` / `mail_search` / `mail_send`
+    // / `mail_draft` rules above (Apple Mail) carry
+    // the same Auto/Ask split as the new Gmail
+    // tools, so a user who's already accepted the
+    // Apple Mail pattern sees the same pattern
+    // when they enable Gmail for a Bot.
+    //
+    // **Gmail.** The two reads (list / get) are
+    // auto; the two writes (send / draft) are ask.
+    ("gmail_list_messages", Rule::Auto),
+    ("gmail_get_message", Rule::Auto),
+    ("gmail_send_message", Rule::Ask),
+    ("gmail_draft_message", Rule::Ask),
+    // **Google Calendar.** Same read = Auto /
+    // mutating = Ask split.
+    ("calendar_list_events", Rule::Auto),
+    ("calendar_get_event", Rule::Auto),
+    ("calendar_create_event", Rule::Ask),
+    ("calendar_update_event", Rule::Ask),
+    // **GitHub.** Same split. The two reads
+    // (list / get) are auto; create and comment
+    // are ask.
+    ("github_list_issues", Rule::Auto),
+    ("github_get_issue", Rule::Auto),
+    ("github_create_issue", Rule::Ask),
+    ("github_add_comment", Rule::Ask),
 ];
 
 /// Apply the Grok Bot preset to a Bot, replacing any
@@ -167,6 +199,31 @@ mod tests {
         }
     }
 
+    /// v3.7.0 (Phase 8) — the read-only half of the
+    /// three new connectors (Gmail / Google Calendar
+    /// / GitHub). Each connector's two reads land in
+    /// `auto`, matching the Phase 5 read-only pattern
+    /// (screenshot / vm_browser_open): the human
+    /// shouldn't be interrupted for a pure read.
+    #[test]
+    fn read_only_connector_tools_default_to_auto() {
+        let m = preset_map();
+        for tool in [
+            "gmail_list_messages",
+            "gmail_get_message",
+            "calendar_list_events",
+            "calendar_get_event",
+            "github_list_issues",
+            "github_get_issue",
+        ] {
+            assert_eq!(
+                m.get(tool).copied(),
+                Some(Rule::Auto),
+                "Phase 8 spec: {tool} must be auto in the Grok Bot preset",
+            );
+        }
+    }
+
     #[test]
     fn read_only_fs_tools_default_to_auto() {
         // v3.5.0 (Phase 6) — the shared folder's
@@ -202,6 +259,32 @@ mod tests {
                 m.get(tool).copied(),
                 Some(Rule::Ask),
                 "Phase 5 spec: {tool} must be ask in the Grok Bot preset",
+            );
+        }
+    }
+
+    /// v3.7.0 (Phase 8) — the mutating half of the
+    /// three new connectors. Each connector's
+    /// mutating calls land in `ask`, matching the
+    /// Phase 5 pattern (file_write / shell_run): the
+    /// human gets a single confirmation per call.
+    /// The send/draft/create/update/comment calls
+    /// all hit this rule.
+    #[test]
+    fn mutating_connector_tools_default_to_ask() {
+        let m = preset_map();
+        for tool in [
+            "gmail_send_message",
+            "gmail_draft_message",
+            "calendar_create_event",
+            "calendar_update_event",
+            "github_create_issue",
+            "github_add_comment",
+        ] {
+            assert_eq!(
+                m.get(tool).copied(),
+                Some(Rule::Ask),
+                "Phase 8 spec: {tool} must be ask in the Grok Bot preset",
             );
         }
     }

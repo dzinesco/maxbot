@@ -15,6 +15,7 @@
 pub mod approvals;
 pub mod bots;
 pub mod computer;
+pub mod connectors;
 pub mod groups;
 pub mod memory;
 pub mod mcp;
@@ -94,6 +95,18 @@ pub fn run() {
             // without needing real network access to
             // succeed in any meaningful way.
             seed_demo_skill(&db);
+            // v3.7.0 (Phase 8) — Seed the three
+            // connector demo Skills
+            // (`gmail-daily-summary` / `calendar-today`
+            // / `github-my-issues`). Same idempotency
+            // rule as the v3.3.0 skill: if any Skill
+            // already exists (the v3.3.0 default), the
+            // seed is a no-op. The new skills are
+            // canaries for the Phase 8 connector
+            // wiring; the user can run them from the
+            // Skills panel to confirm the connector
+            // tool is reachable.
+            crate::skills::seeded::seed_connector_demo_skills(&db);
             // Read Settings once before `db` is moved into
             // the Arc so we can pass them to the
             // ComputerManager constructor.
@@ -231,6 +244,16 @@ pub fn run() {
             commands::skills::skill_run_last_trace,
             commands::skills::skill_record_start,
             commands::skills::skill_record_stop,
+            // v3.7.0 (Phase 8) — Connectors. Test
+            // connection surfaces in the
+            // BotEditor's Connectors section.
+            // The actual connector tools
+            // (`gmail_*` / `calendar_*` /
+            // `github_*`) are dispatched via the
+            // normal tool-call path; this command
+            // is just the human "Test connection"
+            // button.
+            crate::connectors::connector_test,
             // v2.4.0 — Multi-Bot groups: list / get / create
             // groups, manage members, send messages, fetch
             // history, and run a single Bot in the group for

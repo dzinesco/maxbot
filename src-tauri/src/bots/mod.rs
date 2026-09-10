@@ -115,6 +115,24 @@ pub struct Bot {
     /// silently disable Computer Use.
     #[serde(default = "default_computer_use")]
     pub computer_use: String,
+    /// v3.7.0 (Phase 8) — comma-separated list of
+    /// enabled connector ids. The set of valid ids
+    /// lives in `crate::connectors::CONNECTOR_IDS`
+    /// (today: `"gmail"`, `"calendar"`, `"github"`).
+    /// Empty string = no connectors enabled. The tool
+    /// registry filters its tool list by this field
+    /// on top of the existing `allowed_tools` allowlist
+    /// so a Bot whose `connectors_enabled` doesn't
+    /// include `"gmail"` doesn't see `gmail_*` in its
+    /// tool list — even if the user accidentally added
+    /// them to `allowed_tools`. Stored as a free-form
+    /// string (not a typed enum) so a future
+    /// `"slack"`, `"notion"`, etc. doesn't require a
+    /// schema migration. `parse_enabled` in
+    /// `crate::connectors` normalizes unknown values
+    /// to a no-op (they're filtered out on read).
+    #[serde(default)]
+    pub connectors_enabled: String,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
@@ -282,8 +300,15 @@ pub struct BotMessage {
 /// computer-use-specific swap is applied (so a bot with
 /// `ego_browser` in its allowlist but `computer_use ==
 /// "vm"` doesn't see `ego_browser` either).
+///
+/// v3.7.0 (Phase 8) — the connector tools (`gmail_*` /
+/// `calendar_*` / `github_*`) are filtered by the bot's
+/// `connectors_enabled` list. Composed after
+/// `computer_use_filtered`, so the order is:
+/// allowlist → computer_use swap → connectors swap.
 pub fn registry_for(bot: &Bot, full: &ToolRegistry) -> ToolRegistry {
-    full.computer_use_filtered(&bot.allowed_tools, &bot.computer_use)
+    let after_cu = full.computer_use_filtered(&bot.allowed_tools, &bot.computer_use);
+    after_cu.connectors_filtered(&bot.allowed_tools, &bot.connectors_enabled)
 }
 
 #[cfg(test)]

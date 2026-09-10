@@ -533,6 +533,7 @@ mod tests {
             // Bots. Group tests don't exercise the Computer Use
             // field; the value is just here so the struct
             // literal compiles.
+            connectors_enabled: String::new(),
             computer_use: "vm".to_string(),
         };
         db.upsert_bot(&bot).expect("upsert test bot");

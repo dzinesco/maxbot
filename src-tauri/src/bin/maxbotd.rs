@@ -758,6 +758,15 @@ mod tests {
             // to "vm" so the daemon's test fixtures match the
             // v3.2.0 production default.
             computer_use: "vm".to_string(),
+            // v3.7.0 (Phase 8) — added the
+            // `connectors_enabled` field. The
+            // daemon's token tests don't
+            // exercise the connector surface;
+            // the empty value matches the
+            // pre-v3.7.0 default and is here
+            // only to make the struct literal
+            // compile.
+            connectors_enabled: String::new(),
         };
         db.upsert_bot(&bot).expect("upsert bot");
         // Configure a token so the path is "missing
@@ -865,6 +874,11 @@ mod tests {
             // Bots; this is a test fixture so it doesn't
             // affect production defaults.
             computer_use: "vm".to_string(),
+            // v3.7.0 (Phase 8) — empty
+            // `connectors_enabled`; the token
+            // tests don't exercise the
+            // connector surface.
+            connectors_enabled: String::new(),
         };
         db.upsert_bot(&bot).expect("upsert bot");
         let token = db.rotate_daemon_token("bot-rt").expect("rotate");

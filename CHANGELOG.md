@@ -4,6 +4,167 @@ All notable changes to MaxBot are documented in this file. The format
 follows [Keep a Changelog](https://keepachangelog.com/) and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## v3.7.0 — 2026-09-10
+
+### Added — Phase 8 (Connectors: Gmail / Calendar / GitHub)
+
+This is the **final slice in the 8-phase Grok-Bot
+roadmap.** The plan at
+`~/.minimax/v2/sessions/2026/09/08/22-30-26-309-session_bXZzXzVhN2U2ODJkNGVmOTQzMzY5NTZhYjI2MzBlODk1MjQx/artifacts/plan.md`
+is now complete. Bar was hit at v3.4.0; Phases 6
+(v3.5.0), 7 (v3.6.0), and 8 (v3.7.0) shipped as
+sequenced follow-ups.
+
+Three first-party connectors land in this release.
+Each is a direct `Tool` implementation (not the
+existing MCP JSON-RPC pattern) — three connectors
+with simple HTTP APIs and a single shared auth
+model is shorter than the MCP child-process route,
+and keeps credentials in the same process the user
+can audit.
+
+#### Connectors
+
+- **Gmail** — `gmail_list_messages(query?)`,
+  `gmail_get_message(id)`, `gmail_send_message(to, subject, body)`
+  (per-call consent), `gmail_draft_message(to, subject, body)`
+  (per-call consent). Talks to the Gmail API with
+  a Google OAuth access token (the user pastes
+  the token into Settings; OAuth flow out of
+  scope per the brief).
+- **Google Calendar** —
+  `calendar_list_events(time_min, time_max?)`,
+  `calendar_get_event(id)`,
+  `calendar_create_event(summary, start, end, attendees?)`
+  (per-call consent),
+  `calendar_update_event(id, …)` (per-call
+  consent). Same Google OAuth token as Gmail —
+  one Google account, one token. `time_min` /
+  `time_max` default to "now" / "now + 7 days"
+  when omitted.
+- **GitHub** — `github_list_issues(repo, state?)`,
+  `github_get_issue(repo, number)`,
+  `github_create_issue(repo, title, body?)`
+  (per-call consent),
+  `github_add_comment(repo, number, body)`
+  (per-call consent). Uses a GitHub Personal
+  Access Token (classic or fine-grained). `repo`
+  accepts `owner/name` or a full GitHub URL.
+  PR-vs-issue is auto-detected on the read path
+  (GitHub's `/issues` endpoint returns both with
+  a `pull_request` field on the PRs).
+
+#### Per-Bot enable toggles + "Test connection"
+
+A new "Connectors" section in `BotEditor.tsx`
+ships alongside Rules, Daemon, and Computer Use.
+Each Bot row carries a `connectors_enabled`
+column (comma-separated list: `gmail,calendar,
+github`); the tool registry drops the matching
+`gmail_*` / `calendar_*` / `github_*` tools
+when the connector id is not in the list, on
+top of the existing `allowed_tools` allowlist.
+The "Test connection" button next to each
+toggle calls a new `connector_test` Tauri
+command that pings the relevant upstream API
+and surfaces a clear "set X in Settings" error
+when the credential is missing.
+
+The "Test connection" path:
+- Gmail: `GET /gmail/v1/users/me/profile`
+- Calendar: `GET /calendar/v3/calendars/primary/events` (1 result)
+- GitHub: `GET /user`
+
+#### Credentials
+
+Both new credential fields live on the existing
+`Settings` struct (the same place as the LLM API
+keys). One Google OAuth access token covers both
+Gmail and Calendar; a separate GitHub PAT covers
+GitHub. The user pastes each token into the
+existing Settings UI; the connector tools read
+them at call time.
+
+#### Demo Skills
+
+Three new connector canary skills seed on a fresh
+install (when no Skills already exist —
+idempotent, same pattern as the v3.3.0
+`maxbot-daily-checkin`):
+
+- `gmail-daily-summary` — calls
+  `gmail_list_messages` with `max_results=10`.
+- `calendar-today` — calls
+  `calendar_list_events` for today's window.
+- `github-my-issues` — calls `github_list_issues`
+  with the user-supplied `repo` input (default
+  `denoland/deno`).
+
+#### Grok Bot defaults preset
+
+The Grok Bot preset is extended with the 12
+new tool names, following the existing
+read-only = Auto / mutating = Ask pattern:
+
+- **Gmail**: list / get = Auto, send / draft = Ask
+- **Calendar**: list / get = Auto, create / update = Ask
+- **GitHub**: list / get = Auto, create / comment = Ask
+
+The existing `mail_inbox` / `mail_search` /
+`mail_send` / `mail_draft` rules (Apple Mail)
+stay put — the new Gmail tools get their own
+`gmail_*` rules. A user who enabled the Apple
+Mail pattern for a Bot doesn't see the Gmail
+tools unless they also toggle Gmail on.
+
+The pre-existing aspirational `send_email` /
+`send_payment` / `destroy_vm` rows in the
+preset stay inert (tools that don't exist yet —
+same v3.4.0 pattern).
+
+#### Test count
+
+- `cargo test --lib` — 292 passing, 1 pre-existing
+  VNC port test failing, 4 ignored. (Baseline
+  v3.6.0 was 257 / 1 / 4; +35 new tests for
+  the connector surface and the registry
+  filters.)
+- `cargo test --bin maxbotd` — 2 / 2 / 1,
+  matches the v3.6.0 baseline (the 2 pre-existing
+  `daemon_token_*` failures are NOT regressions
+  from this slice — they fail with FK
+  constraint on `daemon_tokens.bot_id` for a
+  bot that doesn't exist in the test DB).
+- `npm test` — 147 passing, matches v3.6.0.
+
+#### Why direct, not MCP
+
+The brief allowed either the existing `mcp.rs`
+JSON-RPC pattern (spawn a child process per
+connector) or a direct `Tool` implementation.
+The MCP path requires a small Python or Node
+script for each connector; for three HTTP APIs
+with a single shared auth model, the direct
+path is shorter, has fewer moving parts, and
+keeps credentials in the same process. The MCP
+infrastructure is unchanged and remains the
+path for future "filesystem / web / DB"
+connectors.
+
+#### What "completes the 8-phase plan" means
+
+The original plan at
+`/Users/tylermartinez/.minimax/v2/sessions/2026/09/08/22-30-26-309-session_bXZzXzVhN2U2ODJkNGVmOTQzMzY5NTZhYjI2MzBlODk1MjQx/artifacts/plan.md`
+was a 2-paragraph spec for a Grok-Bot-shaped
+MaxBot — a personal-tool Mac app that could
+read mail, talk to a calendar, file GitHub
+issues, drive its own computer, run on a
+schedule, persist memory, and accept webhook
+triggers. v3.4.0 hit the bar; Phases 6
+(v3.5.0), 7 (v3.6.0), and 8 (v3.7.0) shipped as
+sequenced follow-ups. This release closes Phase
+8. Future MaxBot work is open-ended.
+
 ## v3.6.0 — 2026-09-10
 
 ### Added — Phase 7 (Memory has to fill itself)

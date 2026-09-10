@@ -368,6 +368,15 @@ export interface Bot {
   // doesn't crash — `BotEditor` falls back to "vm"
   // when the field is missing.
   computer_use?: "vm" | "mac" | "mac-with-approval" | string;
+  // v3.7.0 (Phase 8) — comma-separated list of
+  // enabled connector ids. The renderer turns the
+  // list into checkboxes in the BotEditor's
+  // Connectors section. Empty = no connectors
+  // enabled. Valid ids today: "gmail", "calendar",
+  // "github". Stored as a free-form string on the
+  // Rust side so adding a new connector doesn't
+  // require a schema migration.
+  connectors_enabled?: string;
   created_at: string;
   updated_at: string;
 }

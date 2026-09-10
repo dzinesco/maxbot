@@ -107,6 +107,7 @@ mod tests {
             // new Bots. Skill tests don't exercise the
             // field; the value is just here so the struct
             // literal compiles.
+            connectors_enabled: String::new(),
             computer_use: "vm".to_string(),
             created_at: now,
             updated_at: now,

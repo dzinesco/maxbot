@@ -6,6 +6,7 @@ import {
   approvalRuleSet,
   computerGet,
   computerProvision,
+  connectorTest,
   getDaemonToken,
   getSettings,
   revealBotFolder,
@@ -197,6 +198,34 @@ export function BotEditor({
     { state: string; vm_ip: string | null; vnc_port: number | null } | null
   >(null);
   const [provisionError, setProvisionError] = useState<string | null>(null);
+  // v3.7.0 (Phase 8) — Connectors. The
+  // `connectors_enabled` field on the Bot row is
+  // a comma-separated list of connector ids
+  // (`"gmail,calendar"`). We model it as a Set
+  // locally for clean toggles, and stringify
+  // on save. The Rust `connectors::parse_enabled`
+  // drops unknown ids, so a typo in the editor
+  // can't accidentally enable something the
+  // registry doesn't know about.
+  const [connectorsEnabled, setConnectorsEnabled] = useState<Set<string>>(
+    () => new Set(),
+  );
+  // Per-connector "Test connection" status. `idle`
+  // = fresh; `running` = in flight; `ok` / `error`
+  // show a small inline message next to the
+  // button. Kept in component state (not a toast)
+  // so the user can see the result without
+  // dismissing anything. Same shape as the Daemon
+  // `testStatus` two sections up.
+  const [connectorTestStatus, setConnectorTestStatus] = useState<
+    Record<
+      string,
+      | { kind: "idle" }
+      | { kind: "running" }
+      | { kind: "ok"; message: string }
+      | { kind: "error"; message: string }
+    >
+  >({});
   const [saving, setSaving] = useState(false);
   // ---- v2.6.0 — Approval rules ----
   // Per-Bot per-tool rule (auto / ask / deny). Loaded
@@ -314,6 +343,23 @@ export function BotEditor({
     return m;
   }, [availableTools]);
 
+  // v3.7.0 (Phase 8) — Hydrate the `connectorsEnabled`
+  // Set from the initial Bot's `connectors_enabled`
+  // field. The Rust side stores a comma-separated
+  // string; we split on commas here and drop any
+  // empty / whitespace-only entries (matches the
+  // Rust `parse_enabled` behavior). When the user
+  // toggles a checkbox, the Set mutates locally; on
+  // save, we re-stringify the Set back to the
+  // comma-separated form.
+  useEffect(() => {
+    const parsed = (initial.connectors_enabled ?? "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0);
+    setConnectorsEnabled(new Set(parsed));
+  }, [initial.id]);
+
   function toggleTool(name: string) {
     setBot((b) => {
       const has = b.allowed_tools.includes(name);
@@ -349,7 +395,20 @@ export function BotEditor({
     }
     setProvisionError(null);
     setSaving(true);
-    const finalBot: Bot = { ...bot, name: trimmedName };
+    // v3.7.0 (Phase 8) — Stringify the connector Set
+    // back to a comma-separated list. The Rust side
+    // re-parses and trims on read; we trim / dedupe
+    // here for a tidy write. Order doesn't matter
+    // (the Set is unordered) and the Rust
+    // `parse_enabled` filters unknown ids, so a
+    // stale id in the Set is a no-op rather than
+    // an error.
+    const connectorsEnabledStr = Array.from(connectorsEnabled).join(",");
+    const finalBot: Bot = {
+      ...bot,
+      name: trimmedName,
+      connectors_enabled: connectorsEnabledStr,
+    };
     const finalSchedule: BotSchedule = {
       bot_id: finalBot.id,
       interval_seconds: intervalSeconds,
@@ -1116,6 +1175,146 @@ export function BotEditor({
               </div>
             </section>
           )}
+
+          {/* v3.7.0 (Phase 8) — Connectors. The
+              per-Bot enable toggles + "Test connection"
+              buttons. Disabled connectors don't appear
+              in the LLM's tool list (the Rust
+              `connectors_filtered` drops them on
+              `registry_for`). The Test button calls
+              `connector_test` (Tauri command) which
+              pings the relevant API and returns a
+              human-readable status; the result is
+              shown inline next to the button (not as
+              a toast) so the user can read it without
+              dismissing anything. The three
+              connectors, the connector id used in
+              `Bot.connectors_enabled`, and a
+              one-line description for each. The
+              description is what shows in the LLM's
+              tool description when the connector is
+              enabled — the user gets the same line
+              we expose in the registry's
+              `description()`. */}
+          <section
+            className="form-section"
+            data-testid="bot-editor-connectors"
+          >
+            <h3>Connectors</h3>
+            <div className="muted small" style={{ marginBottom: 8 }}>
+              Toggle which third-party services this Bot can
+              reach. Each connector adds four tools to the Bot's
+              tool list (read = auto, mutating = ask). Credentials
+              live in Settings; a connector that's enabled
+              without a credential returns a "set X in Settings"
+              error at call time.
+            </div>
+            {(
+              [
+                {
+                  id: "gmail",
+                  label: "Gmail",
+                  desc: "Gmail (read inbox, get message, send, draft).",
+                },
+                {
+                  id: "calendar",
+                  label: "Google Calendar",
+                  desc: "Google Calendar (list events, get event, create, update).",
+                },
+                {
+                  id: "github",
+                  label: "GitHub",
+                  desc: "GitHub (list issues, get issue, create, comment).",
+                },
+              ] as const
+            ).map((c) => {
+              const status =
+                connectorTestStatus[c.id] ?? { kind: "idle" as const };
+              return (
+                <div
+                  key={c.id}
+                  className="bot-editor__connector-row"
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 12,
+                    padding: "6px 0",
+                  }}
+                >
+                  <label
+                    style={{ flex: "0 0 auto", display: "flex", alignItems: "center", gap: 6 }}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={connectorsEnabled.has(c.id)}
+                      onChange={(e) => {
+                        setConnectorsEnabled((prev) => {
+                          const next = new Set(prev);
+                          if (e.target.checked) {
+                            next.add(c.id);
+                          } else {
+                            next.delete(c.id);
+                          }
+                          return next;
+                        });
+                      }}
+                      data-testid={`bot-editor-connector-${c.id}-checkbox`}
+                    />
+                    <strong>{c.label}</strong>
+                  </label>
+                  <span className="muted small" style={{ flex: 1 }}>
+                    {c.desc}
+                  </span>
+                  <button
+                    type="button"
+                    className="ghost small"
+                    disabled={status.kind === "running"}
+                    onClick={async () => {
+                      setConnectorTestStatus((prev) => ({
+                        ...prev,
+                        [c.id]: { kind: "running" },
+                      }));
+                      try {
+                        const msg = await connectorTest(c.id);
+                        setConnectorTestStatus((prev) => ({
+                          ...prev,
+                          [c.id]: { kind: "ok", message: msg },
+                        }));
+                      } catch (e) {
+                        setConnectorTestStatus((prev) => ({
+                          ...prev,
+                          [c.id]: { kind: "error", message: String(e) },
+                        }));
+                      }
+                    }}
+                    data-testid={`bot-editor-connector-${c.id}-test`}
+                  >
+                    {status.kind === "running" ? "Testing…" : "Test connection"}
+                  </button>
+                  {status.kind === "ok" && (
+                    <span
+                      className="muted small"
+                      data-testid={`bot-editor-connector-${c.id}-status`}
+                      data-status="ok"
+                      style={{ color: "rgb(134, 239, 172)" }}
+                    >
+                      {status.message}
+                    </span>
+                  )}
+                  {status.kind === "error" && (
+                    <span
+                      className="muted small"
+                      data-testid={`bot-editor-connector-${c.id}-status`}
+                      data-status="error"
+                      style={{ color: "rgb(252, 165, 165)" }}
+                    >
+                      {status.message}
+                    </span>
+                  )}
+                </div>
+              );
+            })}
+          </section>
         </div>
 
         <footer className="modal-footer">

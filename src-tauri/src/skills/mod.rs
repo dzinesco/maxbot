@@ -47,6 +47,7 @@
 pub mod executor;
 pub mod recorder;
 pub mod scheduler_e2e;
+pub mod seeded;
 pub mod store;
 
 use chrono::{DateTime, Utc};

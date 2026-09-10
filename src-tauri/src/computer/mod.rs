@@ -1003,6 +1003,7 @@ mod tests {
             // v3.2.0 — `computer_use` defaults to "vm" for
             // new Bots. Smoke tests don't exercise the
             // field.
+            connectors_enabled: String::new(),
             computer_use: "vm".to_string(),
             created_at: now,
             updated_at: now,
@@ -1219,6 +1220,7 @@ mod tests {
             // v3.2.0 — `computer_use` defaults to "vm" for
             // new Bots. Console smoke tests don't exercise
             // the field.
+            connectors_enabled: String::new(),
             computer_use: "vm".to_string(),
             created_at: now,
             updated_at: now,
@@ -1425,6 +1427,7 @@ mod tests {
             // new Bots. This insert helper is used by
             // several test setups; the value is just here
             // so the struct literal compiles.
+            connectors_enabled: String::new(),
             computer_use: "vm".to_string(),
             created_at: now,
             updated_at: now,

@@ -116,6 +116,7 @@ fn seed_bot(db: &Database, id: &str, name: &str) {
         // v3.2.0 — `computer_use` defaults to "vm" for
         // new Bots. Scheduler e2e tests don't exercise
         // the field.
+        connectors_enabled: String::new(),
         computer_use: "vm".to_string(),
         created_at: now,
         updated_at: now,
