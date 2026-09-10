@@ -1,22 +1,30 @@
-// ComputerPanel — the three-mode UI for the per-Bot VM
-// (v2.0 Slice C, v3.7.2 re-render).
+// ComputerPanel — the two-mode UI for the per-Bot VM
+// (v2.0 Slice C, v3.7.2 re-render, v3.7.9 click-through
+// takeover).
 //
-// Modes (per the Grok Bot essay):
+// Modes:
 //   - status    : tiny chip (icon + dot + uptime). Used in the
 //                 title bar (`App.tsx` chrome wires this; we
 //                 just expose the standalone component).
 //   - preview   : pinned side panel, ~30% width, view-only
-//                 screenshot poll. The Bot is still driving;
-//                 the user is a passive observer. "Take over
-//                 with Screen Sharing" button is available.
-//   - takeover  : full-window preview with the same
-//                 screenshot poll, plus a "Take over with
-//                 Screen Sharing" / "Stop takeover" pair.
-//                 Takeover hands off to macOS `Screen
-//                 Sharing` via an `ssh -L` tunnel; the
-//                 in-app preview stays up so the Bot can
-//                 resume regardless of whether the human
-//                 has the mouse.
+//                 screenshot poll. The Bot is still driving.
+//                 "Drive" button in the toolbar hands the
+//                 VM to the user via in-panel click-through
+//                 (v3.7.9). The same screenshot poll stays
+//                 up so the Bot can resume when the user
+//                 hands back.
+//
+// v3.7.9 click-through takeover:
+//   - A single in-panel click-through on the existing
+//     JPEG preview replaces the previous external-VNC
+//     takeover path. No external viewer app, no SSH
+//     tunnel — pointer and key events are sent to the
+//     VM's X11 session via the Rust-side `xdotool`
+//     script renderer.
+//   - The `initialDriving` prop (default false) lets the
+//     approval-queue mount the panel already driving. The
+//     `onClose` callback in that case cascades the
+//     approval-decide + input-close (see App.tsx).
 //
 // v3.7.2 changes from v3.0.x:
 //   - The noVNC↔RFB WebSocket bridge is gone. The Tauri
@@ -27,24 +35,29 @@
 //     `computerScreenshot(botId)`. The Tauri side runs
 //     `virsh screenshot <vm> /tmp/...ppm` (or PPM→JPEG
 //     via ImageMagick) and pipes the bytes back.
-//   - Takeover uses the existing SSH `-L` tunnel, opened
-//     by `computerTakeoverOpen(botId)`. The returned
-//     local port is what `open vnc://127.0.0.1:<port>`
-//     hands to macOS `Screen Sharing`.
 //
 // Data flow:
 //   1. `computerGet(botId)` is called on mount and every
-//      `pollIntervalMs` (default 5s) in Preview / Takeover.
+//      `pollIntervalMs` (default 5s) in Preview.
 //   2. We also subscribe to `computer://state-changed`
 //      so a state transition flips the panel without
 //      waiting for the next poll.
 //   3. `computerScreenshot(botId)` is polled at 300ms
 //      whenever `computer.state === "running"`. The
 //      poll pauses on `document.hidden` and never stacks
-//      more than one in-flight request.
+//      more than one in-flight request. When the mouse
+//      is down (drag) the poll accelerates to 150ms so
+//      the user sees continuous visual feedback.
 //   4. Toolbar buttons (Start / Stop / Restart / Destroy)
 //      call the corresponding Tauri commands; they disable
 //      while the VM is in `provisioning` (or `error`).
+//   5. The "Drive" toolbar button calls
+//      `computerInputOpen(botId)` which sets a per-Bot
+//      flag on the Rust side. The Bot's `vm_computer_use`
+//      tool refuses while the flag is true. Pointer /
+//      key / wheel events on the `<img>` go to
+//      `computerInputEvent(botId, event)`. "Hand back"
+//      calls `computerInputClose(botId)`.
 //
 // Restart is a thin convenience: Stop + Start with a small
 // delay between them so libvirt's `virsh start` after a clean
@@ -55,42 +68,41 @@ import type { Computer, Settings } from "../lib/api";
 import {
   computerDestroy,
   computerGet,
+  computerInputClose,
+  computerInputEvent,
+  computerInputOpen,
   computerInstallDefaultKey,
   computerProvision,
   computerScreenshot,
   computerStart,
   computerStop,
-  computerTakeoverClose,
-  computerTakeoverOpen,
   getSettings,
   onComputerStateChanged,
   saveSettings,
 } from "../lib/tauri";
+import type { InputEvent } from "../lib/tauri";
 import { ComputerFileBrowser } from "./ComputerFileBrowser";
 
-export type ComputerMode = "status" | "preview" | "takeover";
+export type ComputerMode = "status" | "preview";
 
 export interface ComputerPanelProps {
   botId: string;
   mode: ComputerMode;
-  /** Used in preview / takeover modes. Called when the user
-   * clicks the close button (or "Hand back to Bot"). */
+  /** Used in preview mode. Called when the user
+   * clicks the close button. The panel also calls
+   * `onClose` when the user clicks "Hand back" — the
+   * parent owns the cascade (in the approval-queue
+   * case that's `approvalDecide(approved)` +
+   * `computerInputClose`). */
   onClose?: () => void;
-  /** v3.7.5: takeover-only "Stop now" button. When
-   * provided AND the mode is `"takeover"`, the footer
-   * shows a second button next to "Hand back" that:
-   *   - calls `stop_bot_run(run_id)` to cancel the
-   *     Bot's executor (best-effort)
-   *   - decides the gating approval as `rejected` so the
-   *     row leaves the queue
-   *   - closes the panel
-   * This is the abort path: "I solved 2FA, give the Bot
-   * back" uses `onClose` (hand back → approve). "I don't
-   * want to give the Bot back at all" uses `onStopRun`.
-   * The parent (App.tsx) owns the cascade. Optional
-   * because preview mode (no executor) doesn't expose
-   * this button. */
-  onStopRun?: () => void;
+  /** v3.7.9: when true, the panel mounts in driving
+   * mode (the Rust driving flag is implicitly set by
+   * the parent via `computerInputOpen` BEFORE mount;
+   * the panel does not re-call it on mount). The
+   * approval-queue uses this so the user lands in
+   * the panel already able to interact with the VM
+   * without a click. */
+  initialDriving?: boolean;
   /** Override the default poll interval (ms) for
    * `computerGet`. The preview screenshot poll has its
    * own 300ms cadence. The plan calls for 5s; tests pass
@@ -100,6 +112,122 @@ export interface ComputerPanelProps {
 
 const DEFAULT_POLL_MS = 5000;
 const SCREENSHOT_POLL_MS = 300;
+/** v3.7.9: when the user is dragging, drop the poll
+ * interval to ~150ms so the visual feedback is smooth. */
+const SCREENSHOT_POLL_DRAGGING_MS = 150;
+
+interface FbSize {
+  w: number;
+  h: number;
+}
+type FbPoint = { x: number; y: number } | null;
+
+/** v3.7.9: map a DOM PointerEvent's clientX/Y to
+ *  framebuffer coordinates for the VM's QEMU virtual
+ *  display. The `<img>` is letterboxed (object-fit:
+ *  contain) so a click on the letterbox is "outside"
+ *  the rendered image — return null in that case so
+ *  the caller can drop the event. */
+export function mapToFramebuffer(
+  clientX: number,
+  clientY: number,
+  img: HTMLImageElement,
+  fb: FbSize,
+): FbPoint {
+  if (!fb.w || !fb.h) return null;
+  const rect = img.getBoundingClientRect();
+  if (!rect.width || !rect.height) return null;
+  const imgAspect = fb.w / fb.h;
+  const boxAspect = rect.width / rect.height;
+  let renderW: number;
+  let renderH: number;
+  let offsetX: number;
+  let offsetY: number;
+  if (imgAspect > boxAspect) {
+    // Letterboxed top/bottom.
+    renderW = rect.width;
+    renderH = renderW / imgAspect;
+    offsetX = 0;
+    offsetY = (rect.height - renderH) / 2;
+  } else {
+    // Letterboxed left/right.
+    renderH = rect.height;
+    renderW = renderH * imgAspect;
+    offsetX = (rect.width - renderW) / 2;
+    offsetY = 0;
+  }
+  if (
+    clientX < offsetX ||
+    clientX > offsetX + renderW ||
+    clientY < offsetY ||
+    clientY > offsetY + renderH
+  ) {
+    return null;
+  }
+  const ratioX = (clientX - offsetX) / renderW;
+  const ratioY = (clientY - offsetY) / renderH;
+  return {
+    x: Math.round(ratioX * fb.w),
+    y: Math.round(ratioY * fb.h),
+  };
+}
+
+/** v3.7.9: DOM `KeyboardEvent.key` → xdotool key
+ *  name. Most printable characters pass through
+ *  unchanged; named keys (Enter, Escape, Arrow*, …)
+ *  are mapped via the table. Modifier keys are
+ *  passed through lowercase — xdotool sees them as
+ *  modifiers on the next non-modifier event when
+ *  `--clearmodifiers` is set on the consuming side. */
+const DOM_KEY_TO_XDOTOOL: Record<string, string> = {
+  Enter: "Return",
+  Escape: "Escape",
+  Backspace: "BackSpace",
+  Tab: "Tab",
+  ArrowUp: "Up",
+  ArrowDown: "Down",
+  ArrowLeft: "Left",
+  ArrowRight: "Right",
+  Delete: "Delete",
+  Home: "Home",
+  End: "End",
+  PageUp: "Page_Up",
+  PageDown: "Page_Down",
+  " ": "space",
+};
+
+export function domKeyToXdotool(e: KeyboardEvent): string {
+  // Named keys: lookup the table first. The
+  // table also covers the single-character " "
+  // (space) which must map to "space" — without
+  // the table check first, the single-character
+  // branch below would pass it through as " "
+  // and xdotool would reject it.
+  if (DOM_KEY_TO_XDOTOOL[e.key]) {
+    return DOM_KEY_TO_XDOTOOL[e.key];
+  }
+  // Modifier-only keys: skip (let xdotool see them
+  // as modifiers on the next non-modifier event).
+  if (
+    e.key === "Shift" ||
+    e.key === "Control" ||
+    e.key === "Alt" ||
+    e.key === "Meta"
+  ) {
+    return e.key.toLowerCase();
+  }
+  // Single character keys: pass through. For
+  // letters, xdotool expects lowercase ("xdotool
+  // keydown -- a") unless a Shift modifier is held.
+  // We rely on xdotool's --clearmodifiers semantics
+  // to handle Shift automatically. For symbols, the
+  // key is what it is.
+  if (e.key.length === 1) {
+    return e.key.toLowerCase();
+  }
+  // Fallback: try the raw key as-is.
+  return e.key;
+}
 
 /** Format seconds → "1h 2m" / "12m" / "47s". Used in status
  * mode for the uptime chip. */
@@ -131,7 +259,7 @@ export function ComputerPanel({
   botId,
   mode,
   onClose,
-  onStopRun,
+  initialDriving,
   pollIntervalMs = DEFAULT_POLL_MS,
 }: ComputerPanelProps) {
   // Status mode is a self-contained chip — short-circuit before
@@ -144,9 +272,8 @@ export function ComputerPanel({
   return (
     <FullComputerPanel
       botId={botId}
-      mode={mode}
       onClose={onClose}
-      onStopRun={onStopRun}
+      initialDriving={initialDriving ?? false}
       pollIntervalMs={pollIntervalMs}
     />
   );
@@ -194,17 +321,15 @@ function ComputerStatusChip({ botId }: { botId: string }) {
 
 interface FullComputerPanelProps {
   botId: string;
-  mode: "preview" | "takeover";
   onClose?: () => void;
-  onStopRun?: () => void;
+  initialDriving: boolean;
   pollIntervalMs: number;
 }
 
 function FullComputerPanel({
   botId,
-  mode,
   onClose,
-  onStopRun,
+  initialDriving,
   pollIntervalMs,
 }: FullComputerPanelProps) {
   const [computer, setComputer] = useState<Computer | null>(null);
@@ -217,15 +342,6 @@ function FullComputerPanel({
   // loading overlay to the `<img>`.
   const [frameUrl, setFrameUrl] = useState<string | null>(null);
   const [firstFrame, setFirstFrame] = useState(false);
-  // v3.7.2: takeover (Screen Sharing) state. `takeoverOpen`
-  // is true while an `ssh -L` tunnel is alive;
-  // `takeoverPort` is the local port the renderer (and
-  // the user) can hand to `open vnc://127.0.0.1:<port>`.
-  // `takeoverError` surfaces the Tauri command failure
-  // (e.g. NoFreePort, auth failure after auto-recover).
-  const [takeoverOpen, setTakeoverOpen] = useState(false);
-  const [takeoverPort, setTakeoverPort] = useState<number | null>(null);
-  const [takeoverError, setTakeoverError] = useState<string | null>(null);
   // `viewerError` is set when the screenshot poll fails.
   // Distinct from `errorMsg`, which is reserved for the
   // computer.state === "error" path. The poll failure
@@ -269,6 +385,29 @@ function FullComputerPanel({
   // successful install — "Default key installed — restart
   // MaxBot to apply the new auth path".
   const [installConfirm, setInstallConfirm] = useState<string | null>(null);
+  // v3.7.9: click-through driving mode. `driving` is
+  // the React state; `drivingRef` mirrors it so the
+  // unmount cleanup (which can't read state) can
+  // decide whether to fire `computerInputClose` to
+  // release the per-Bot driving flag.
+  const [driving, setDriving] = useState<boolean>(initialDriving);
+  const [drivingError, setDrivingError] = useState<string | null>(null);
+  const drivingRef = useRef(driving);
+  useEffect(() => {
+    drivingRef.current = driving;
+  }, [driving]);
+  // `mouseDownRef` is true between pointerdown and
+  // pointerup. The screenshot poll reads it to
+  // accelerate from 300ms → 150ms while the user
+  // is dragging, so the visual feedback is smooth.
+  const mouseDownRef = useRef(false);
+  // v3.7.9: the natural framebuffer dimensions. Set
+  // by the screenshot poll (the IPC payload carries
+  // `width`/`height` in v3.7.9+). The `<img>` events
+  // map `clientX/Y` to framebuffer coordinates using
+  // this ref.
+  const fbSizeRef = useRef<FbSize>({ w: 0, h: 0 });
+  const imgRef = useRef<HTMLImageElement>(null);
   // `lastSeenAt` is an ISO string; we tick once a second to
   // refresh the displayed uptime in status / preview modes.
   const lastSeenAt = computer?.last_seen_at ?? null;
@@ -388,23 +527,31 @@ function FullComputerPanel({
     };
   }, [lastSeenAt]);
 
-  // v3.7.2: screenshot poll. Pulls a fresh JPEG from
-  // the host's QEMU framebuffer every 300ms whenever
-  // the VM is in `running` state. Single in-flight
-  // request (no stacking). Pauses on `document.hidden`
-  // so backgrounded tabs don't burn SSH + virsh. The
+  // v3.7.2 / v3.7.9: screenshot poll. Pulls a fresh JPEG
+  // from the host's QEMU framebuffer at 300ms (or 150ms
+  // while the user is dragging) whenever the VM is in
+  // `running` state. Single in-flight request (no
+  // stacking). Pauses on `document.hidden` so
+  // backgrounded tabs don't burn SSH + virsh. The
   // previous blob URL is revoked before the next one
   // is set; otherwise the prior frame stays pinned
   // until unmount.
   //
+  // v3.7.9: the poll is a `setTimeout`-based recursive
+  // loop (not `setInterval`) so the next delay can
+  // change on the fly based on `mouseDownRef.current`.
+  // The poll also reads `width`/`height` off the new
+  // `ComputerScreenshotOutput` payload into
+  // `fbSizeRef` for the input-event coordinate mapping.
+  //
   // The poll is keyed on `computer?.state` — flipping
   // to `stopped` / `provisioning` / `error` cancels
-  // the interval (cleanup in the return) and clears
-  // any in-flight ref. When state flips back to
-  // `running`, the effect re-runs and the interval
-  // comes back automatically.
+  // the timer (cleanup in the return) and clears any
+  // in-flight ref. When state flips back to `running`,
+  // the effect re-runs and the poll comes back
+  // automatically.
   useEffect(() => {
-    let intervalId: ReturnType<typeof setInterval> | null = null;
+    let timer: ReturnType<typeof setTimeout> | null = null;
     let cancelled = false;
     const pullFrame = async () => {
       if (cancelled) return;
@@ -420,28 +567,30 @@ function FullComputerPanel({
       if (typeof document !== "undefined" && document.hidden) return;
       inFlight.current = true;
       try {
-        const bytes = await computerScreenshot(botId);
+        // v3.7.9: the IPC contract changed — the
+        // payload now carries the natural framebuffer
+        // dimensions alongside the JPEG bytes. The
+        // `Computer` type from `computerGet` does NOT
+        // carry `framebufferWidth`/`Height`, so the
+        // renderer reads them off the screenshot
+        // payload here.
+        const result = await computerScreenshot(botId);
         if (cancelled) return;
+        if (result.width > 0 && result.height > 0) {
+          fbSizeRef.current = { w: result.width, h: result.height };
+        }
         // Wrap the bytes in a `Blob` for the
         // `URL.createObjectURL(blob)` call below. The
-        // `bytes` array may be a `Uint8Array` (our
-        // default) or a plain `number[]` (if Tauri
-        // ever returns a JSON array directly). The
-        // explicit `new Uint8Array(bytes)` ensures
-        // the Blob constructor receives an
-        // `ArrayBuffer`-backed `Uint8Array` rather
-        // than a `SharedArrayBuffer`-flavored one,
-        // which the DOM lib types treat as
-        // `ArrayBufferLike` and reject at the type
-        // level (the runtime works either way, but
-        // TypeScript 5.x + the latest `@types/...`
-        // tightened the constraint).
-        const u8 = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
-        // `BlobPart` is `Uint8Array<ArrayBuffer> | ...`
-        // and our `u8` is `Uint8Array<ArrayBufferLike>`
-        // (the DOM lib types tightened the bound in TS
-        // 5.x). The runtime accepts either, so cast
-        // through `unknown` to keep the call site short.
+        // `bytes` field is always a `Uint8Array` from
+        // the Rust side now (the old `number[]` path
+        // is gone). The `BlobPart` cast keeps the
+        // TypeScript 5.x DOM lib happy about
+        // `Uint8Array<ArrayBuffer>` vs
+        // `Uint8Array<ArrayBufferLike>`.
+        const u8 =
+          result.bytes instanceof Uint8Array
+            ? result.bytes
+            : new Uint8Array(result.bytes);
         const blob = new Blob([u8 as BlobPart], { type: "image/jpeg" });
         const url = URL.createObjectURL(blob);
         // Revoke the previous blob URL so it doesn't
@@ -479,10 +628,21 @@ function FullComputerPanel({
         inFlight.current = false;
       }
     };
+    const tick = () => {
+      if (cancelled) return;
+      void pullFrame();
+      // v3.7.9: adaptive poll interval — drop to
+      // 150ms while the user is dragging so visual
+      // feedback is smooth, otherwise the default
+      // 300ms.
+      const delay = mouseDownRef.current
+        ? SCREENSHOT_POLL_DRAGGING_MS
+        : SCREENSHOT_POLL_MS;
+      timer = setTimeout(tick, delay);
+    };
     if (computer?.state === "running") {
       // Kick a frame immediately, then poll.
-      void pullFrame();
-      intervalId = setInterval(pullFrame, SCREENSHOT_POLL_MS);
+      void tick();
     }
     const onVis = () => {
       // When the tab becomes visible again, force a
@@ -501,8 +661,8 @@ function FullComputerPanel({
     }
     return () => {
       cancelled = true;
-      if (intervalId !== null) {
-        clearInterval(intervalId);
+      if (timer !== null) {
+        clearTimeout(timer);
       }
       if (typeof document !== "undefined") {
         document.removeEventListener("visibilitychange", onVis);
@@ -511,10 +671,9 @@ function FullComputerPanel({
   }, [botId, computer?.state]);
 
   // v3.7.2: revoke the most recent blob URL on unmount.
-  // The interval-cleanup already clears the timer; this
-  // is the symmetric cleanup for the blob ref so the
-  // last frame doesn't pin its bytes after the panel
-  // closes.
+  // The timer-cleanup already clears the poll; this is
+  // the symmetric cleanup for the blob ref so the last
+  // frame doesn't pin its bytes after the panel closes.
   useEffect(() => {
     return () => {
       if (blobRef.current) {
@@ -524,40 +683,47 @@ function FullComputerPanel({
     };
   }, []);
 
-  // v3.7.2: takeover (Screen Sharing) handlers. The
-  // Tauri command returns the local port after spawning
-  // the `ssh -L` tunnel; it also fires `open vnc://...`
-  // on the Mac as a best-effort hand-off. The user
-  // can re-open Screen Sharing from the toolbar if
-  // they dismiss the first `open`.
-  const handleTakeoverOpen = useCallback(async () => {
-    setActionPending(true);
-    setTakeoverError(null);
+  // v3.7.9: unmount cleanup for click-through driving.
+  // If the panel is unmounted while `drivingRef.current
+  // === true` (e.g. user closed the panel mid-driving,
+  // or the parent unmounted without an explicit Hand
+  // back), fire `computerInputClose` so the per-Bot
+  // driving flag is released. The Rust side is
+  // idempotent so a no-op double-close is safe.
+  useEffect(() => {
+    return () => {
+      if (drivingRef.current) {
+        void computerInputClose(botId);
+      }
+    };
+  }, [botId]);
+
+  // v3.7.9: Drive / Hand back handlers. The Drive
+  // button calls `computerInputOpen` which sets the
+  // per-Bot driving flag on the Rust side. The Bot's
+  // `vm_computer_use` tool refuses while it's true.
+  // Hand back calls `computerInputClose` and tells
+  // the parent via `onClose?.()` so the parent can
+  // run its cascade (e.g. `approvalDecide(approved)`).
+  const handleDrive = useCallback(async () => {
+    setDrivingError(null);
     try {
-      const port = await computerTakeoverOpen(botId);
-      setTakeoverOpen(true);
-      setTakeoverPort(port);
+      await computerInputOpen(botId);
+      setDriving(true);
     } catch (e) {
-      setTakeoverError(String(e));
-      setTakeoverOpen(false);
-      setTakeoverPort(null);
-    } finally {
-      setActionPending(false);
+      setDrivingError(String(e));
     }
   }, [botId]);
 
-  const handleTakeoverClose = useCallback(async () => {
-    setActionPending(true);
+  const handleHandBack = useCallback(async () => {
     try {
-      await computerTakeoverClose(botId);
-    } catch (e) {
-      setTakeoverError(String(e));
+      await computerInputClose(botId);
     } finally {
-      setTakeoverOpen(false);
-      setTakeoverPort(null);
-      setActionPending(false);
+      setDriving(false);
     }
-  }, [botId]);
+    // Tell the parent the user is done driving.
+    onClose?.();
+  }, [botId, onClose]);
 
   // --- toolbar handlers ---
   const handleStart = useCallback(async () => {
@@ -715,23 +881,124 @@ function FullComputerPanel({
     }
   }, [botId, settings]);
 
+  // v3.7.9: input event dispatchers. All four use
+  // `mapToFramebuffer` to translate `clientX/Y` →
+  // framebuffer coordinates. Buttons use the
+  // `+ 1` convention so a left click (DOM button
+  // 0) maps to xdotool button 1.
+  const dispatchPointerEvent = useCallback(
+    (
+      e: React.PointerEvent<HTMLImageElement>,
+      type: "pointer_down" | "pointer_up",
+    ) => {
+      if (!imgRef.current) return;
+      const pt = mapToFramebuffer(
+        e.clientX,
+        e.clientY,
+        imgRef.current,
+        fbSizeRef.current,
+      );
+      if (!pt) return;
+      const event: InputEvent = {
+        type,
+        x: pt.x,
+        y: pt.y,
+        button: e.button + 1,
+      };
+      void computerInputEvent(botId, event);
+    },
+    [botId],
+  );
+
+  const handlePointerMove = useCallback(
+    (e: React.PointerEvent<HTMLImageElement>) => {
+      if (!imgRef.current) return;
+      // Only fire on drag (a button held) or while
+      // the mouse is down by the panel's tracking
+      // ref. Otherwise we'd flood the wire with one
+      // event per pixel of idle mouse movement.
+      if (e.buttons === 0 && !mouseDownRef.current) return;
+      const pt = mapToFramebuffer(
+        e.clientX,
+        e.clientY,
+        imgRef.current,
+        fbSizeRef.current,
+      );
+      if (!pt) return;
+      const event: InputEvent = { type: "pointer_move", x: pt.x, y: pt.y };
+      void computerInputEvent(botId, event);
+    },
+    [botId],
+  );
+
+  const handleWheel = useCallback(
+    (e: React.WheelEvent<HTMLImageElement>) => {
+      if (!imgRef.current) return;
+      e.preventDefault();
+      const pt = mapToFramebuffer(
+        e.clientX,
+        e.clientY,
+        imgRef.current,
+        fbSizeRef.current,
+      );
+      if (!pt) return;
+      const event: InputEvent = {
+        type: "wheel",
+        x: pt.x,
+        y: pt.y,
+        deltaY: e.deltaY,
+      };
+      void computerInputEvent(botId, event);
+    },
+    [botId],
+  );
+
+  const handleKeyDown = useCallback(
+    (e: React.KeyboardEvent<HTMLImageElement>) => {
+      // Tab moves focus out of the image by default
+      // — explicitly prevent it so the user can
+      // keep driving the VM.
+      if (e.key === "Tab") {
+        e.preventDefault();
+        return;
+      }
+      e.preventDefault();
+      const event: InputEvent = {
+        type: "key_down",
+        name: domKeyToXdotool(e.nativeEvent),
+      };
+      void computerInputEvent(botId, event);
+    },
+    [botId],
+  );
+
+  const handleKeyUp = useCallback(
+    (e: React.KeyboardEvent<HTMLImageElement>) => {
+      e.preventDefault();
+      const event: InputEvent = {
+        type: "key_up",
+        name: domKeyToXdotool(e.nativeEvent),
+      };
+      void computerInputEvent(botId, event);
+    },
+    [botId],
+  );
+
   // --- render ---
-  const wrapClass =
-    mode === "takeover"
-      ? "computer-panel computer-panel__takeover"
-      : "computer-panel computer-panel__preview";
+  const wrapClass = "computer-panel computer-panel__preview";
 
   if (loading) {
     return (
-      <div className={wrapClass} data-mode={mode} data-testid="computer-panel">
+      <div className={wrapClass} data-mode="preview" data-testid="computer-panel">
         <ComputerToolbar
-          mode={mode}
           computer={null}
           onClose={onClose}
           onStart={handleStart}
           onStop={handleStop}
           onRestart={handleRestart}
           onDestroy={handleDestroy}
+          driving={driving}
+          onDriveToggle={() => void handleDrive()}
           disabled
         />
         <div className="computer-panel__body computer-panel__body--loading">
@@ -754,15 +1021,16 @@ function FullComputerPanel({
     // disk/RAM defaults so the user doesn't have to
     // re-enter them.
     return (
-      <div className={wrapClass} data-mode={mode} data-testid="computer-panel">
+      <div className={wrapClass} data-mode="preview" data-testid="computer-panel">
         <ComputerToolbar
-          mode={mode}
           computer={null}
           onClose={onClose}
           onStart={handleStart}
           onStop={handleStop}
           onRestart={handleRestart}
           onDestroy={handleDestroy}
+          driving={driving}
+          onDriveToggle={() => void handleDrive()}
           disabled
         />
         <div className="computer-panel__body computer-panel__body--empty">
@@ -818,15 +1086,16 @@ function FullComputerPanel({
 
   if (computer.state === "provisioning") {
     return (
-      <div className={wrapClass} data-mode={mode} data-testid="computer-panel">
+      <div className={wrapClass} data-mode="preview" data-testid="computer-panel">
         <ComputerToolbar
-          mode={mode}
           computer={computer}
           onClose={onClose}
           onStart={handleStart}
           onStop={handleStop}
           onRestart={handleRestart}
           onDestroy={handleDestroy}
+          driving={driving}
+          onDriveToggle={() => void handleDrive()}
           disabled
         />
         <div className="computer-panel__body computer-panel__body--loading">
@@ -843,15 +1112,16 @@ function FullComputerPanel({
 
   if (computer.state === "error") {
     return (
-      <div className={wrapClass} data-mode={mode} data-testid="computer-panel">
+      <div className={wrapClass} data-mode="preview" data-testid="computer-panel">
         <ComputerToolbar
-          mode={mode}
           computer={computer}
           onClose={onClose}
           onStart={handleStart}
           onStop={handleStop}
           onRestart={handleRestart}
           onDestroy={handleDestroy}
+          driving={driving}
+          onDriveToggle={() => void handleDrive()}
           disabled={actionPending}
         />
         <div className="computer-panel__body computer-panel__body--error">
@@ -884,18 +1154,19 @@ function FullComputerPanel({
     return (
       <div
         className={wrapClass}
-        data-mode={mode}
+        data-mode="preview"
         data-testid="computer-panel"
         data-domain-not-found="true"
       >
         <ComputerToolbar
-          mode={mode}
           computer={computer}
           onClose={onClose}
           onStart={handleStart}
           onStop={handleStop}
           onRestart={handleRestart}
           onDestroy={handleDestroy}
+          driving={driving}
+          onDriveToggle={() => void handleDrive()}
           disabled={actionPending}
         />
         <div
@@ -958,24 +1229,24 @@ function FullComputerPanel({
   }
 
   return (
-    <div className={wrapClass} data-mode={mode} data-testid="computer-panel">
+    <div className={wrapClass} data-mode="preview" data-testid="computer-panel">
       <ComputerToolbar
-        mode={mode}
         computer={computer}
         onClose={onClose}
         onStart={handleStart}
         onStop={handleStop}
         onRestart={handleRestart}
         onDestroy={handleDestroy}
-        // v3.7.2: takeover (Screen Sharing) buttons.
-        // The pair replaces the v3.0.x "Open console" /
-        // "Hand back to Bot" buttons. The SSH tunnel
-        // lives until the user clicks Stop; the in-app
-        // preview stays up the whole time so the Bot
-        // can resume regardless of who has the mouse.
-        onTakeoverOpen={handleTakeoverOpen}
-        onTakeoverClose={handleTakeoverClose}
-        takeoverOpen={takeoverOpen}
+        // v3.7.9: click-through takeover. The
+        // single button flips between "Drive" and
+        // "Hand back". The Driving action is
+        // fire-and-forget; the panel's
+        // `handleDrive` / `handleHandBack`
+        // callbacks do the work.
+        driving={driving}
+        onDriveToggle={() =>
+          driving ? void handleHandBack() : void handleDrive()
+        }
         // v2.3.5: only show the "Use my default key"
         // button when the user is still on the per-Bot
         // key path. After a successful install the
@@ -1001,6 +1272,36 @@ function FullComputerPanel({
         }
         disabled={actionPending}
       />
+      {/* v3.7.9: driving banner. Above the body
+          so it sits between the toolbar and the
+          screenshot. Sits only when `driving` is
+          true; the in-banner "Hand back" button
+          cascades to `handleHandBack` (which calls
+          `onClose?.()` so the parent can decide). */}
+      {driving && (
+        <div
+          className="computer-panel__driving-banner"
+          data-testid="driving-banner"
+        >
+          <span>You are driving — bot input paused</span>
+          <button
+            type="button"
+            className="primary small"
+            onClick={() => void handleHandBack()}
+            data-testid="computer-handback"
+          >
+            Hand back
+          </button>
+        </div>
+      )}
+      {drivingError && (
+        <div
+          className="computer-panel__error-detail"
+          data-testid="driving-error"
+        >
+          {drivingError}
+        </div>
+      )}
       <div className="computer-panel__body">
         <div className="computer-panel__tabs" role="tablist">
           <button
@@ -1038,6 +1339,12 @@ function FullComputerPanel({
             // (above) update its `src`. Before the
             // first frame arrives, show a spinner so
             // the user knows we're still working.
+            //
+            // v3.7.9: the `<img>` is now the input
+            // surface for click-through driving. The
+            // handlers fire only when `driving` is
+            // true and translate clientX/Y to
+            // framebuffer coordinates.
             !firstFrame ? (
               <div className="computer-panel__body--loading">
                 <div className="computer-panel__spinner" />
@@ -1053,75 +1360,43 @@ function FullComputerPanel({
               </div>
             ) : (
               <img
+                ref={imgRef}
                 src={frameUrl ?? undefined}
                 alt="VM display"
                 className="computer-panel__screenshot"
                 draggable={false}
                 data-testid="computer-screenshot"
+                tabIndex={driving ? 0 : -1}
+                style={{
+                  objectFit: "contain",
+                  cursor: driving ? "none" : "default",
+                  userSelect: "none",
+                }}
+                onPointerDown={(e) => {
+                  if (!driving || !imgRef.current) return;
+                  imgRef.current.focus();
+                  e.preventDefault();
+                  mouseDownRef.current = true;
+                  dispatchPointerEvent(e, "pointer_down");
+                }}
+                onPointerMove={handlePointerMove}
+                onPointerUp={(e) => {
+                  if (!driving || !imgRef.current) return;
+                  mouseDownRef.current = false;
+                  dispatchPointerEvent(e, "pointer_up");
+                }}
+                onPointerLeave={() => {
+                  mouseDownRef.current = false;
+                }}
+                onWheel={handleWheel}
+                onKeyDown={handleKeyDown}
+                onKeyUp={handleKeyUp}
               />
             )
           ) : (
             <ComputerFileBrowser botId={botId} />
           )}
         </div>
-        {/* v3.7.2: takeover status pill. Sits below the
-            preview body, above the footer. Shows the
-            local port so the user can re-open Screen
-            Sharing if they dismissed the first `open`.
-            The `open` button here is the same
-            `vnc://127.0.0.1:<port>` URL — macOS
-            re-runs Screen Sharing against it. */}
-        {bodyTab === "console" && takeoverOpen && takeoverPort !== null ? (
-          <div
-            className="computer-panel__takeover-status"
-            data-testid="takeover-status"
-          >
-            <span>
-              Takeover tunnel open on localhost:{takeoverPort}
-            </span>
-            <button
-              type="button"
-              className="computer-panel__takeover-reopen"
-              onClick={() => {
-                // Best-effort: re-launch Screen Sharing
-                // with the existing tunnel.
-                const url = `vnc://127.0.0.1:${takeoverPort}`;
-                // Use a hidden anchor + click to avoid a
-                // pop-up blocker on programmatic `open`.
-                const a = document.createElement("a");
-                a.href = url;
-                a.rel = "noopener noreferrer";
-                a.click();
-              }}
-            >
-              Open Screen Sharing
-            </button>
-          </div>
-        ) : null}
-        {bodyTab === "console" && takeoverError ? (
-          <div
-            className="computer-panel__viewer-error"
-            data-testid="takeover-error"
-          >
-            <div className="computer-panel__error-title">
-              Takeover failed
-            </div>
-            <div className="computer-panel__error-detail">
-              {takeoverError}
-            </div>
-            <div
-              className="computer-panel__error-detail"
-              style={{ opacity: 0.7, marginTop: 8 }}
-            >
-              Most common cause: the SSH tunnel could not
-              authenticate. Try the terminal smoke test
-              (<code>ssh crispy</code>) from your shell —
-              if that works, click "Use my default key"
-              in the toolbar to bootstrap the VM's
-              <code>authorized_keys</code> for MaxBot.
-            </div>
-          </div>
-        ) : null}
         {/* v2.3.5: small inline confirmation after a
             successful "Use my default key" install. Sits
             above the footer so it doesn't fight the
@@ -1141,37 +1416,23 @@ function FullComputerPanel({
           </div>
         ) : null}
       </div>
-      <ComputerFooter
-        mode={mode}
-        computer={computer}
-        uptime={uptime}
-        onHandBack={onClose}
-        onStopRun={onStopRun}
-      />
+      <ComputerFooter computer={computer} uptime={uptime} />
     </div>
   );
 }
 
 interface ComputerToolbarProps {
-  mode: ComputerMode;
   computer: Computer | null;
   onClose?: () => void;
   onStart: () => void;
   onStop: () => void;
   onRestart: () => void;
   onDestroy: () => void;
-  /** v3.7.2: takeover (Screen Sharing) handlers. The
-   * pair replaces the v3.0.x "Open console" / "Hand
-   * back to Bot" buttons. The takeover tunnel lives
-   * until the user clicks Stop; the in-app preview
-   * stays up the whole time. Optional because the
-   * early-return states (loading / no computer /
-   * provisioning / error) reuse this toolbar but
-   * don't expose takeover actions — the VM isn't
-   * in a state where takeover would do anything. */
-  onTakeoverOpen?: () => void;
-  onTakeoverClose?: () => void;
-  takeoverOpen?: boolean;
+  /** v3.7.9: single Drive / Hand back toggle.
+   * The parent wires this to the right action
+   * based on `driving`. */
+  driving: boolean;
+  onDriveToggle: () => void;
   /** v2.3.5: show the "Use my default key" button when
    * the user is still on the per-Bot key path. Clicking
    * it installs the user's default public key into the
@@ -1181,16 +1442,14 @@ interface ComputerToolbarProps {
 }
 
 function ComputerToolbar({
-  mode,
   computer,
   onClose,
   onStart,
   onStop,
   onRestart,
   onDestroy,
-  onTakeoverOpen,
-  onTakeoverClose,
-  takeoverOpen = false,
+  driving,
+  onDriveToggle,
   onInstallDefaultKey,
   disabled,
 }: ComputerToolbarProps) {
@@ -1254,25 +1513,28 @@ function ComputerToolbar({
           Use my default key
         </button>
       )}
-      {/* v3.7.2: Take over with Screen Sharing. The
-          single button flips between open and close.
-          The actual `open vnc://...` happens on the
-          Rust side (the Tauri command spawns it as a
-          best-effort handoff). The user can re-open
-          from the takeover-status pill if they
-          dismissed the first launch. */}
+      {/* v3.7.9: click-through takeover. The
+          single button flips between "Drive" and
+          "Hand back" based on the `driving` flag.
+          The Rust side sets a per-Bot flag on
+          `computerInputOpen`; the Bot's
+          `vm_computer_use` tool refuses while
+          it's true. The in-panel pointer / key
+          events on the `<img>` are translated
+          to xdotool commands and forwarded to
+          the VM's X11 session. */}
       <button
-        className="ghost small"
-        onClick={takeoverOpen ? onTakeoverClose : onTakeoverOpen}
-        disabled={stateDisabled || state !== "running" || !onTakeoverOpen}
+        className={driving ? "primary small" : "ghost small"}
+        onClick={onDriveToggle}
+        disabled={stateDisabled || state !== "running"}
         title={
-          takeoverOpen
-            ? "Stop the SSH tunnel; macOS Screen Sharing will lose its connection"
-            : "Open macOS Screen Sharing against an ssh -L tunnel to the VM"
+          driving
+            ? "Stop driving, hand the VM back to the Bot"
+            : "Drive the VM with your trackpad + keyboard"
         }
-        data-testid="computer-takeover"
+        data-testid="computer-drive"
       >
-        {takeoverOpen ? "Stop takeover" : "Take over with Screen Sharing"}
+        {driving ? "Hand back" : "Drive"}
       </button>
       <button
         className="danger small"
@@ -1287,9 +1549,9 @@ function ComputerToolbar({
         <button
           className="ghost small"
           onClick={onClose}
-          title={mode === "takeover" ? "Hand back to Bot" : "Close preview"}
+          title="Close preview"
         >
-          {mode === "takeover" ? "Hand back to Bot" : "Close"}
+          Close
         </button>
       )}
     </div>
@@ -1297,82 +1559,26 @@ function ComputerToolbar({
 }
 
 interface ComputerFooterProps {
-  mode: ComputerMode;
   computer: Computer;
   uptime: number | null;
-  onHandBack?: () => void;
-  /** v3.7.5: takeover-only "Stop now" abort button.
-   *  See `ComputerPanelProps.onStopRun`. */
-  onStopRun?: () => void;
 }
 
-function ComputerFooter({
-  mode,
-  computer,
-  uptime,
-  onHandBack,
-  onStopRun,
-}: ComputerFooterProps) {
+function ComputerFooter({ computer, uptime }: ComputerFooterProps) {
+  // v3.7.9: the footer is just the readout row now.
+  // The "Hand back" / "Stop now" buttons that lived
+  // here in v3.7.5/v3.7.7 are gone — driving mode
+  // has its own in-body banner with a Hand back
+  // button, and the abort path is the Approval
+  // row's "Skip" / "Reject" in App.tsx.
   return (
     <div className="computer-panel__footer">
-      <span className="computer-panel__footer-cell">
-        {computer.vm_name}
-      </span>
+      <span className="computer-panel__footer-cell">{computer.vm_name}</span>
       <span className="computer-panel__footer-cell muted">
         VNC :{computer.vnc_port ?? "—"}
       </span>
       <span className="computer-panel__footer-cell muted">
         up {formatUptime(uptime)}
       </span>
-      <span className="computer-panel__footer-spacer" />
-      {mode === "takeover" && (
-        <span className="computer-panel__footer-cell muted">
-          takeover active — keyboard + mouse captured
-        </span>
-      )}
-      {/* v3.4.0 (Phase 5) — Takeover Hand back
-        button. The ComputerPanel's existing
-        `onHandBack` prop is the callback the panel
-        uses to signal "user is done driving the VM";
-        the renderer wires it to a call against
-        `approval_decide(approved)`. The button is
-        only shown in `takeover` mode — for
-        `preview` mode we keep the original "Close"
-        button below. The `Hand back` text matches
-        the ComputerToolbar's title so the user has
-        one obvious exit in both places. */}
-      {onHandBack && mode === "takeover" && (
-        <button
-          className="primary small"
-          onClick={onHandBack}
-          data-testid="computer-handback"
-        >
-          Hand back
-        </button>
-      )}
-      {/* v3.7.5: Takeover "Stop now" abort button.
-        Sits next to "Hand back" in takeover mode.
-        Hand back resumes the run with a synthetic
-        tool success; Stop now halts the executor and
-        decides the gating approval as rejected (the
-        user is done with this run, not handing it
-        back to the Bot). The parent owns the
-        cascade — see `ComputerPanelProps.onStopRun`. */}
-      {onStopRun && mode === "takeover" && (
-        <button
-          className="danger small"
-          onClick={onStopRun}
-          data-testid="computer-stop-run"
-          title="Halt the Bot's run now. The approval is decided as rejected; the run row is marked Failed."
-        >
-          Stop now
-        </button>
-      )}
-      {onHandBack && mode !== "takeover" && (
-        <button className="ghost small" onClick={onHandBack}>
-          Close
-        </button>
-      )}
     </div>
   );
 }

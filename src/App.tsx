@@ -39,6 +39,7 @@ import type { SettingEntry } from "./components/SettingsPalette";
 import {
   createConversation,
   computerDestroy,
+  computerInputClose,
   deleteBot,
   deleteConversation,
   getBot,
@@ -2099,52 +2100,34 @@ export default function App() {
           >
             <ComputerPanel
               botId={takeoverPanel.botId}
-              mode="takeover"
+              mode="preview"
+              // v3.7.9: the approval-queue mount opens
+              // the panel already driving. The parent
+              // (App.tsx) has already called
+              // `computerInputOpen` via the
+              // `botTakeoverState` event handler that
+              // triggered `setTakeoverPanel`; the
+              // panel does not re-call it on mount.
+              initialDriving
               onClose={() => {
-                // v3.4.0 — "Hand back" resumes the run
-                // with a synthetic tool success. This is
-                // the 2FA happy path: user solved it,
-                // approval(approved), Bot continues.
+                // v3.7.9: "Hand back" cascades two
+                // things — clear the per-Bot driving
+                // flag (so the Bot's `vm_computer_use`
+                // tool resumes) and decide the gating
+                // approval as approved (so the Bot's
+                // run resumes on the next turn). The
+                // panel's `handleHandBack` already
+                // called `computerInputClose`; we
+                // re-call it here defensively in case
+                // the parent unmounted the panel via
+                // a different path (e.g. the user
+                // hit the modal's overlay click).
+                void computerInputClose(takeoverPanel.botId).catch((e) =>
+                  console.warn("computerInputClose on hand back failed:", e),
+                );
                 void approvalDecide(takeoverPanel.approvalId, "approved")
                   .catch((e) =>
                     console.warn("takeover hand-back failed:", e),
-                  )
-                  .finally(() => setTakeoverPanel(null));
-              }}
-              onStopRun={() => {
-                // v3.7.5 — "Stop now" halts the
-                // executor and decides the gating
-                // approval as rejected. The run row is
-                // marked Failed (the bot-error event
-                // fires from the cancel); the approval
-                // row leaves the queue. Used when the
-                // user does NOT want to hand the Bot
-                // back (e.g. the 2FA was a one-time
-                // throwaway account, or the user
-                // decided to abort). Best-effort for
-                // the run_id: daemon-parked runs
-                // (started while the app was closed)
-                // don't have a run_id in
-                // `activeRunByBot`, so the cancel is
-                // a no-op for those — the
-                // approvalDecide("rejected") below
-                // is what unblocks the row.
-                const runId =
-                  activeRunByBot[takeoverPanel.botId] ?? null;
-                if (runId) {
-                  void stopBotRun(runId).catch((e) =>
-                    console.warn(
-                      `stopBotRun for ${runId} failed (continuing):`,
-                      e,
-                    ),
-                  );
-                }
-                void approvalDecide(takeoverPanel.approvalId, "rejected")
-                  .catch((e) =>
-                    console.warn(
-                      "takeover stop-now approvalDecide failed:",
-                      e,
-                    ),
                   )
                   .finally(() => setTakeoverPanel(null));
               }}

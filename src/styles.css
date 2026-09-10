@@ -3065,10 +3065,13 @@ button.link:hover {
   -webkit-user-drag: none;
 }
 
-/* v3.7.2: takeover (Screen Sharing) status pill. Sits
-   below the screenshot body, above the footer. Shows
-   the local port so the user can re-open Screen
-   Sharing if they dismissed the first `open`. */
+/* v3.7.2→v3.7.9: legacy takeover status pill. The
+   v3.7.9 click-through takeover no longer needs this
+   (the per-Bot driving flag on the Rust side is the
+   source of truth and the in-body banner is the UI).
+   Kept in the CSS in case a future reverse-direction
+   debug surface wants to surface the flag's current
+   state to the user. */
 .computer-panel__takeover-status {
   flex: 0 0 auto;
   display: flex;
