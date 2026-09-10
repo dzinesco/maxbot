@@ -4,6 +4,39 @@ All notable changes to MaxBot are documented in this file. The format
 follows [Keep a Changelog](https://keepachangelog.com/) and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## v3.0.1 — 2026-09-09
+
+### Added
+- **"What's new in v3" first-launch overlay.** On the
+  first launch after v3.0.1, a modal summarizes the v3.0
+  design polish in 5 bullets (palette, font, tactile
+  feedback, skeleton shimmer, ActivityFeed stale-data
+  UX) so the user doesn't miss what changed. Single
+  "Got it" button dismisses; pressing `Esc` or clicking
+  the backdrop also dismisses. The seen state is
+  persisted in the `meta` table under the
+  `seen_v3_intro` key, so the overlay never reappears
+  on subsequent launches. The key is read in parallel
+  with `is_onboarded` in the App.tsx bootstrap; the
+  overlay only mounts when the user is onboarded AND
+  the flag is unset (a mid-onboarding user is on the
+  Welcome surface, not the chat, so the overlay would
+  be confusing there).
+- **`WhatsNewOverlay` component + test.** A
+  presentational modal in `src/components/WhatsNewOverlay.tsx`
+  with a dedicated `data-testid` for each of the 5
+  bullets, the Got-it button, and the dismiss paths.
+  The vitest suite covers: (a) all 5 bullets render
+  in order, (b) clicking Got-it calls the dismiss
+  handler, (c) pressing Esc calls the dismiss handler,
+  (d) non-Escape keys do NOT dismiss, (e) backdrop
+  click dismisses, (f) clicking inside the modal does
+  NOT dismiss (stopPropagation).
+
+### Changed
+- **Bumped to 3.0.1** in `package.json`,
+  `src-tauri/Cargo.toml`, and `src-tauri/tauri.conf.json`.
+
 ## v3.0.0 — 2026-09-09
 
 v3.0.0 is the integration release — no new features, just a

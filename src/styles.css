@@ -5232,3 +5232,140 @@ button.link:hover {
   gap: 8px;
 }
 
+/* ---------- v3.0.1 — "What's new in v3" first-launch overlay ----------
+ * A modal that surfaces the v3.0 design polish on the first launch
+ * after the upgrade. Persisted via the `seen_v3_intro` meta key —
+ * the parent owns the gate; this block is purely visual. The mark,
+ * the bullet list, and the title all reuse the Electric Blue
+ * accent from v3.0.0 so the overlay reads as part of the same
+ * design vocabulary as the chat surface below it. The backdrop is
+ * dimmer than the settings modal's (0.62 vs 0.55) so the overlay
+ * clearly reads as the "primary thing the user needs to deal with"
+ * — it's blocking, dismissable, and visually centered. */
+
+.whats-new-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.62);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 60; /* above .modal-overlay (50) so the overlay wins */
+  animation: whats-new-fade-in 160ms ease-out;
+}
+
+@keyframes whats-new-fade-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+.whats-new-modal {
+  width: 480px;
+  max-width: 92vw;
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 28px 26px 22px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.45);
+  /* Slide-in feel — paired with the backdrop fade so the
+   * overlay announces itself without being jumpy. */
+  animation: whats-new-pop-in 200ms cubic-bezier(0.2, 0.7, 0.3, 1.1);
+}
+
+@keyframes whats-new-pop-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .whats-new-overlay,
+  .whats-new-modal {
+    animation: none;
+  }
+}
+
+.whats-new-mark {
+  width: 44px;
+  height: 44px;
+  border-radius: var(--radius-md, 8px);
+  background: linear-gradient(135deg, var(--accent), var(--accent-2, var(--accent)));
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 700;
+  font-size: 22px;
+  letter-spacing: -0.02em;
+  margin-bottom: 4px;
+  align-self: flex-start;
+}
+
+.whats-new-title {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--text-1, #fafafa);
+}
+
+.whats-new-subtitle {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-2, #a1a1aa);
+}
+
+.whats-new-bullets {
+  list-style: none;
+  margin: 4px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.whats-new-bullet {
+  position: relative;
+  padding: 8px 10px 8px 28px;
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--text-1, #fafafa);
+  background: var(--bg-2, rgba(255, 255, 255, 0.03));
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm, 6px);
+}
+
+/* Small accent dot to the left of each bullet — visual rhythm,
+ * not a checkmark (these are "look what changed" items, not a
+ * task list). */
+.whats-new-bullet::before {
+  content: "";
+  position: absolute;
+  left: 12px;
+  top: 50%;
+  width: 6px;
+  height: 6px;
+  margin-top: -3px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+.whats-new-footer {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 6px;
+}
+
+.whats-new-got-it {
+  min-width: 96px;
+}
+

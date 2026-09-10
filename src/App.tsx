@@ -21,6 +21,12 @@ import { ApprovalQueue } from "./components/ApprovalQueue";
 import { RoutinesPanel } from "./components/RoutinesPanel";
 import { SendToBotModal } from "./components/SendToBotModal";
 import { Welcome } from "./components/Welcome";
+// v3.0.1 — first-launch "What's new in v3" overlay. Mounted
+// post-onboarding when the `seen_v3_intro` meta flag is unset.
+// The component itself is purely presentational; the persistence
+// + gating logic lives in App.tsx (the bootstrap fetches the
+// flag, the dismiss handler writes it back).
+import { WhatsNewOverlay } from "./components/WhatsNewOverlay";
 import {
   createConversation,
   deleteBot,
@@ -112,6 +118,17 @@ export default function App() {
    * via the "Reset onboarding" entry.
    */
   const [isOnboarded, setIsOnboarded] = useState<boolean | null>(null);
+  // v3.0.1 — "What's new in v3" first-launch overlay. Tri-state
+  // mirrors `isOnboarded`: `null` while the bootstrap is
+  // running, `true` to show the overlay, `false` to skip it
+  // (either the user already dismissed it, or they haven't
+  // onboarded yet so the welcome is the right surface). The
+  // bootstrap reads the `seen_v3_intro` meta key in parallel
+  // with `is_onboarded`; on a fresh install the key is
+  // missing, so we default to "show the overlay".
+  const [showWhatsNewV3, setShowWhatsNewV3] = useState<boolean | null>(
+    null,
+  );
   const [streamingId, setStreamingId] = useState<string | null>(null);
   const [bootError, setBootError] = useState<string | null>(null);
   const [bots, setBots] = useState<Bot[]>([]);
@@ -310,13 +327,19 @@ export default function App() {
   useEffect(() => {
     (async () => {
       try {
-        const [s, c, b, sched, tools, onboarded] = await Promise.all([
+        const [s, c, b, sched, tools, onboarded, seenV3Intro] = await Promise.all([
           getSettings(),
           listConversations(),
           listBots(),
           listAllSchedules(),
           listAvailableTools(),
           metaGet("is_onboarded"),
+          // v3.0.1 — first-launch overlay gate. Missing
+          // key (fresh install) is treated as "not seen
+          // yet", so we show the overlay. Any non-empty
+          // value means the user has already dismissed
+          // it on a previous launch and we skip it.
+          metaGet("seen_v3_intro"),
         ]);
         setSettings(s);
         setConversations(c);
@@ -331,6 +354,12 @@ export default function App() {
         setBotSchedules(schedMap);
         setAvailableTools(tools);
         setIsOnboarded(onboarded === "1");
+        // v3.0.1 — show the "What's new" overlay only
+        // for onboarded users who haven't seen it yet.
+        // A user mid-onboarding is on the Welcome
+        // surface, not the chat, so the overlay would
+        // be confusing — they haven't even seen v3 yet.
+        setShowWhatsNewV3(onboarded === "1" && seenV3Intro !== "1");
         // v2.0 Slice E: per-Bot chat scoping. On boot, pick a
         // sensible starting Bot: (a) if the user has any
         // Bots, auto-select the first one and open its
@@ -1395,6 +1424,20 @@ export default function App() {
     }
   }, [conversations, activeId]);
 
+  // v3.0.1 — dismiss the "What's new in v3" overlay. We
+  // optimistically close the overlay first (so the UI
+  // doesn't hang on a slow meta write), then persist the
+  // flag. The persistence is best-effort — a failure is
+  // logged but the overlay stays dismissed, because the
+  // worst case is the user sees the overlay again on the
+  // next launch, which is annoying but not destructive.
+  const handleDismissWhatsNew = useCallback(() => {
+    setShowWhatsNewV3(false);
+    metaSet("seen_v3_intro", "1").catch((e) => {
+      console.error("metaSet seen_v3_intro failed:", e);
+    });
+  }, []);
+
   // Loading state: don't flash the welcome before bootstrap completes.
   // A blank screen with the brand color is fine here — the bootstrap
   // typically resolves in <100ms. If the bootstrap throws, surface
@@ -1708,6 +1751,18 @@ export default function App() {
           onCreated={handleGroupCreated}
           onClose={() => setCreateGroupOpen(false)}
         />
+      )}
+      {/* v3.0.1 — first-launch "What's new in v3" overlay.
+          Mounted on top of the chat once the bootstrap
+          resolves AND the user is onboarded AND the
+          `seen_v3_intro` flag is missing. The overlay is
+          z-stacked above the existing modals (it owns a
+          high z-index in its own CSS block) so the user
+          can't dismiss it by clicking another surface
+          first. Persisted dismissal is handled in
+          `handleDismissWhatsNew`. */}
+      {showWhatsNewV3 && (
+        <WhatsNewOverlay onDismiss={handleDismissWhatsNew} />
       )}
     </div>
   );
