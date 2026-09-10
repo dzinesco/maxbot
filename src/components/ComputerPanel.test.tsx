@@ -347,6 +347,87 @@ describe("ComputerPanel — takeover (v3.7.2 Screen Sharing)", () => {
   });
 });
 
+describe("ComputerPanel — takeover footer (v3.7.5 2FA)", () => {
+  // v3.7.5: the takeover footer exposes two buttons:
+  //   - "Hand back"  → onClose (App.tsx wires this to
+  //                     approval_decide(approved) — the
+  //                     2FA happy path, run resumes)
+  //   - "Stop now"   → onStopRun (App.tsx wires this to
+  //                     stop_bot_run + approval_decide
+  //                     (rejected) — the abort path)
+  // The ComputerPanel itself just renders the buttons
+  // and forwards clicks; the parent owns the cascade.
+
+  it("renders 'Hand back' in takeover mode when onClose is provided", async () => {
+    vi.mocked(computerGet).mockResolvedValue(runningComputer);
+    const user = (await import("@testing-library/user-event")).default;
+    render(
+      <ComputerPanel
+        botId="bot-1"
+        mode="takeover"
+        onClose={vi.fn()}
+        pollIntervalMs={60000}
+      />,
+    );
+    const handback = await screen.findByTestId("computer-handback");
+    expect(handback).toHaveTextContent(/Hand back/);
+    // No stop-run button when onStopRun is omitted.
+    expect(screen.queryByTestId("computer-stop-run")).toBeNull();
+  });
+
+  it("renders 'Stop now' in takeover mode when onStopRun is provided", async () => {
+    vi.mocked(computerGet).mockResolvedValue(runningComputer);
+    render(
+      <ComputerPanel
+        botId="bot-1"
+        mode="takeover"
+        onClose={vi.fn()}
+        onStopRun={vi.fn()}
+        pollIntervalMs={60000}
+      />,
+    );
+    const stop = await screen.findByTestId("computer-stop-run");
+    expect(stop).toHaveTextContent(/Stop now/);
+  });
+
+  it("does NOT render 'Stop now' in preview mode (no executor to halt)", async () => {
+    vi.mocked(computerGet).mockResolvedValue(runningComputer);
+    render(
+      <ComputerPanel
+        botId="bot-1"
+        mode="preview"
+        onClose={vi.fn()}
+        onStopRun={vi.fn()}
+        pollIntervalMs={60000}
+      />,
+    );
+    // The preview footer shows "Close", not "Stop now".
+    // Wait for the panel to finish loading.
+    await screen.findByTestId("computer-takeover");
+    expect(screen.queryByTestId("computer-stop-run")).toBeNull();
+  });
+
+  it("'Stop now' calls onStopRun, not onClose", async () => {
+    vi.mocked(computerGet).mockResolvedValue(runningComputer);
+    const onClose = vi.fn();
+    const onStopRun = vi.fn();
+    const user = (await import("@testing-library/user-event")).default;
+    render(
+      <ComputerPanel
+        botId="bot-1"
+        mode="takeover"
+        onClose={onClose}
+        onStopRun={onStopRun}
+        pollIntervalMs={60000}
+      />,
+    );
+    const stop = await screen.findByTestId("computer-stop-run");
+    await user.click(stop);
+    expect(onStopRun).toHaveBeenCalledTimes(1);
+    expect(onClose).not.toHaveBeenCalled();
+  });
+});
+
 // v2.3.5: the "Use my default key" toolbar button. Renders
 // when the per-Bot key path is still active (the migration
 // case for existing VMs) and hidden once the user has

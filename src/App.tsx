@@ -1387,29 +1387,23 @@ export default function App() {
     [availableTools],
   );
 
-  const handleDeleteBot = useCallback(
-    async (id: string) => {
-      await deleteBot(id);
-      await refreshBots();
-    },
-    [refreshBots],
-  );
-
   // v3.7.6: per-row destroy cascade. Triggered by the
-  // hover-revealed "×" button in the BotRoster sidebar.
-  // The cascade is:
+  // hover-revealed "×" button in the BotRoster sidebar
+  // AND the Bot editor's Delete button. The cascade is:
   //   1) confirm (window.confirm — destructive, no undo)
   //   2) computerDestroy (best-effort; tolerate NoComputer
   //      so Bots without a VM are still destroyable)
   //   3) deleteBot (drops the SQLite `bots` row)
-  //   4) refreshBots so the roster updates
+  //   4) close any open editor/computer-panel/active
+  //      conversation for that Bot
+  //   5) refreshBots so the roster updates
   // The ComputerPanel's existing Destroy button only
   // handles step 2 — it doesn't drop the bot row, so
   // clicking it leaves an orphan. The Bot editor's Delete
-  // button only handles step 3 — it doesn't touch the VM,
-  // so clicking it leaves the disk behind on crispy. This
-  // cascade is the one canonical "destroy a Bot" path
-  // Tyler asked for.
+  // button only handled step 3 before v3.7.6 — it didn't
+  // touch the VM, so clicking it left the disk behind on
+  // crispy. This cascade is the one canonical "destroy a
+  // Bot" path Tyler asked for.
   const handleDestroyBot = useCallback(
     async (id: string) => {
       // Look up the Bot's display name for the confirm
@@ -1456,6 +1450,22 @@ export default function App() {
       refreshBots,
       selectedBotId,
     ],
+  );
+
+  // v3.7.6: the Bot editor's Delete button shares the
+  // same destructive cascade as the per-row × in the
+  // sidebar. Previously it just dropped the SQLite row
+  // (orphaning the VM on crispy) and showed no confirm —
+  // both footguns. Now both buttons route through
+  // `handleDestroyBot` (confirm + VM teardown + UI
+  // cleanup). This thin wrapper exists so the Bot
+  // editor's `onDelete` prop type stays `() => void`
+  // without re-plumbing.
+  const handleDeleteBot = useCallback(
+    async (id: string) => {
+      await handleDestroyBot(id);
+    },
+    [handleDestroyBot],
   );
 
   const handleRunBot = useCallback(
@@ -2091,9 +2101,50 @@ export default function App() {
               botId={takeoverPanel.botId}
               mode="takeover"
               onClose={() => {
+                // v3.4.0 — "Hand back" resumes the run
+                // with a synthetic tool success. This is
+                // the 2FA happy path: user solved it,
+                // approval(approved), Bot continues.
                 void approvalDecide(takeoverPanel.approvalId, "approved")
                   .catch((e) =>
                     console.warn("takeover hand-back failed:", e),
+                  )
+                  .finally(() => setTakeoverPanel(null));
+              }}
+              onStopRun={() => {
+                // v3.7.5 — "Stop now" halts the
+                // executor and decides the gating
+                // approval as rejected. The run row is
+                // marked Failed (the bot-error event
+                // fires from the cancel); the approval
+                // row leaves the queue. Used when the
+                // user does NOT want to hand the Bot
+                // back (e.g. the 2FA was a one-time
+                // throwaway account, or the user
+                // decided to abort). Best-effort for
+                // the run_id: daemon-parked runs
+                // (started while the app was closed)
+                // don't have a run_id in
+                // `activeRunByBot`, so the cancel is
+                // a no-op for those — the
+                // approvalDecide("rejected") below
+                // is what unblocks the row.
+                const runId =
+                  activeRunByBot[takeoverPanel.botId] ?? null;
+                if (runId) {
+                  void stopBotRun(runId).catch((e) =>
+                    console.warn(
+                      `stopBotRun for ${runId} failed (continuing):`,
+                      e,
+                    ),
+                  );
+                }
+                void approvalDecide(takeoverPanel.approvalId, "rejected")
+                  .catch((e) =>
+                    console.warn(
+                      "takeover stop-now approvalDecide failed:",
+                      e,
+                    ),
                   )
                   .finally(() => setTakeoverPanel(null));
               }}

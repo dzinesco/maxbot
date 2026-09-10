@@ -140,13 +140,6 @@ responding) long before the desktop is fully ready.
 
 #### Three access levels (Status / Preview / Takeover)
 
-> **TODO (v3.7.7 will replace this section):** the screenshot path
-> below was rewritten in v3.7.2; the `docs/first-bot-20-minutes.md`
-> walk-through (landed in v3.7.7) is the canonical "show me the
-> new flow" reference. This section stays here as a 1-paragraph
-> quick-reference; v3.7.7 replaces the paragraph with a link to
-> the new doc.
-
 Once a Bot has a running computer, three ways to see what it's doing:
 
 - **Status** — a small chip in the title bar that turns purple
@@ -157,18 +150,28 @@ Once a Bot has a running computer, three ways to see what it's doing:
   over the existing SSH connection). The Bot can keep driving
   while you watch. **No in-VM VNC server runs in v3.7.2+** — the
   Preview is a single JPEG that refreshes, not a live RFB stream.
-- **Takeover** — full mouse + keyboard control via macOS Screen
-  Sharing. MaxBot opens an `ssh -N -L <port>:127.0.0.1:<qemu-vnc>
-  <user>@<host>` tunnel and hands the renderer
-  `vnc://127.0.0.1:<port>`. macOS opens the Screen Sharing app
-  against the loopback port. Click **Hand back to Bot** when done
-  — the SSH child is killed, the port is freed, and the Bot
-  resumes control.
+- **Takeover** — full mouse + keyboard control via TigerVNC
+  (v3.7.5+; macOS Screen Sharing mis-handles `VNC_AUTH_NONE` and
+  prompts for a password, so we ship TigerVNC instead). MaxBot
+  opens an `ssh -N -L <port>:127.0.0.1:<qemu-vnc> <user>@<host>`
+  tunnel and hands the renderer `vnc://127.0.0.1:<port>`. The
+  panel mounts in `takeover` mode with two footer buttons:
+  - **Hand back** — the 2FA happy path. Decides the gating
+    approval as `approved` and the Bot's run resumes on the next
+    turn. (See [`docs/2fa-walkthrough.md`](2fa-walkthrough.md)
+    for the full flow.)
+  - **Stop now** (v3.7.5+) — the abort path. Decides the gating
+    approval as `rejected` and (best-effort) calls `stop_bot_run`
+    to halt the executor. The run row ends up `Failed`.
 
 The loopback URL never contains the server's IP/hostname — both
 Preview and Takeover bind 127.0.0.1 only, so a process on the Mac
 that can reach localhost can't accidentally reach the VM's
 framebuffer.
+
+For the canonical 2FA walkthrough (Gmail → 2FA prompt →
+takeover → solve → hand back → Bot continues), see
+[`docs/2fa-walkthrough.md`](2fa-walkthrough.md).
 
 #### Tool routing
 

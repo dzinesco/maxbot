@@ -76,6 +76,21 @@ export interface ComputerPanelProps {
   /** Used in preview / takeover modes. Called when the user
    * clicks the close button (or "Hand back to Bot"). */
   onClose?: () => void;
+  /** v3.7.5: takeover-only "Stop now" button. When
+   * provided AND the mode is `"takeover"`, the footer
+   * shows a second button next to "Hand back" that:
+   *   - calls `stop_bot_run(run_id)` to cancel the
+   *     Bot's executor (best-effort)
+   *   - decides the gating approval as `rejected` so the
+   *     row leaves the queue
+   *   - closes the panel
+   * This is the abort path: "I solved 2FA, give the Bot
+   * back" uses `onClose` (hand back → approve). "I don't
+   * want to give the Bot back at all" uses `onStopRun`.
+   * The parent (App.tsx) owns the cascade. Optional
+   * because preview mode (no executor) doesn't expose
+   * this button. */
+  onStopRun?: () => void;
   /** Override the default poll interval (ms) for
    * `computerGet`. The preview screenshot poll has its
    * own 300ms cadence. The plan calls for 5s; tests pass
@@ -116,6 +131,7 @@ export function ComputerPanel({
   botId,
   mode,
   onClose,
+  onStopRun,
   pollIntervalMs = DEFAULT_POLL_MS,
 }: ComputerPanelProps) {
   // Status mode is a self-contained chip — short-circuit before
@@ -130,6 +146,7 @@ export function ComputerPanel({
       botId={botId}
       mode={mode}
       onClose={onClose}
+      onStopRun={onStopRun}
       pollIntervalMs={pollIntervalMs}
     />
   );
@@ -179,6 +196,7 @@ interface FullComputerPanelProps {
   botId: string;
   mode: "preview" | "takeover";
   onClose?: () => void;
+  onStopRun?: () => void;
   pollIntervalMs: number;
 }
 
@@ -186,6 +204,7 @@ function FullComputerPanel({
   botId,
   mode,
   onClose,
+  onStopRun,
   pollIntervalMs,
 }: FullComputerPanelProps) {
   const [computer, setComputer] = useState<Computer | null>(null);
@@ -1127,6 +1146,7 @@ function FullComputerPanel({
         computer={computer}
         uptime={uptime}
         onHandBack={onClose}
+        onStopRun={onStopRun}
       />
     </div>
   );
@@ -1281,6 +1301,9 @@ interface ComputerFooterProps {
   computer: Computer;
   uptime: number | null;
   onHandBack?: () => void;
+  /** v3.7.5: takeover-only "Stop now" abort button.
+   *  See `ComputerPanelProps.onStopRun`. */
+  onStopRun?: () => void;
 }
 
 function ComputerFooter({
@@ -1288,6 +1311,7 @@ function ComputerFooter({
   computer,
   uptime,
   onHandBack,
+  onStopRun,
 }: ComputerFooterProps) {
   return (
     <div className="computer-panel__footer">
@@ -1324,6 +1348,24 @@ function ComputerFooter({
           data-testid="computer-handback"
         >
           Hand back
+        </button>
+      )}
+      {/* v3.7.5: Takeover "Stop now" abort button.
+        Sits next to "Hand back" in takeover mode.
+        Hand back resumes the run with a synthetic
+        tool success; Stop now halts the executor and
+        decides the gating approval as rejected (the
+        user is done with this run, not handing it
+        back to the Bot). The parent owns the
+        cascade — see `ComputerPanelProps.onStopRun`. */}
+      {onStopRun && mode === "takeover" && (
+        <button
+          className="danger small"
+          onClick={onStopRun}
+          data-testid="computer-stop-run"
+          title="Halt the Bot's run now. The approval is decided as rejected; the run row is marked Failed."
+        >
+          Stop now
         </button>
       )}
       {onHandBack && mode !== "takeover" && (
