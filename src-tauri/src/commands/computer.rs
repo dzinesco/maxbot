@@ -214,10 +214,20 @@ pub async fn computer_screenshot(
 
 /// v3.7.2: open an `ssh -L` tunnel from a free local
 /// port in the configured VNC range to the VM's VNC
-/// port on the server, then open macOS `Screen Sharing`
-/// against it. Returns the local port so the renderer's
+/// port on the server, then open a VNC viewer against
+/// it. Returns the local port so the renderer's
 /// "Stop takeover" button can call `takeover_close`
 /// with it.
+///
+/// v3.7.5: launches TigerVNC Viewer instead of macOS
+/// Screen Sharing. macOS Screen Sharing prompts for a
+/// password even when the server offers VNC_AUTH_NONE
+/// only (verified end-to-end: server's RFB handshake
+/// returns `\x01\x01` = 1 security type = VNC_AUTH_NONE,
+/// but Screen Sharing still asks). TigerVNC handles
+/// VNC_AUTH_NONE cleanly and connects without prompting.
+/// If TigerVNC isn't installed, falls back to the
+/// default `vnc://` handler (Screen Sharing).
 ///
 /// Idempotent: if a takeover is already open for this
 /// bot, returns the existing local port without
@@ -236,16 +246,23 @@ pub async fn computer_takeover_open(
         .takeover_open(&db, &bot_id)
         .await
         .map_err(|e| e.to_string())?;
-    // Best-effort hand-off to macOS Screen Sharing. The
-    // `open` command is fire-and-forget — if it fails
-    // (e.g. Screen Sharing is not installed), the
-    // renderer still has the local port to display in
-    // the "tunnel is open, click to copy URL" hint.
+    // Best-effort hand-off to TigerVNC. `open -a TigerVNC`
+    // forces the TigerVNC app to handle the URL even
+    // though macOS's default vnc:// handler is Screen
+    // Sharing. Falls back to Screen Sharing if TigerVNC
+    // isn't installed (e.g. user has the old build).
     let url = format!("vnc://127.0.0.1:{local_port}");
-    let _ = std::process::Command::new("open")
+    let tiger_result = std::process::Command::new("open")
+        .arg("-a")
+        .arg("TigerVNC")
         .arg(&url)
-        .spawn()
-        .map_err(|e| e.to_string());
+        .spawn();
+    if tiger_result.is_err() {
+        // Fall back to default handler (Screen Sharing).
+        let _ = std::process::Command::new("open")
+            .arg(&url)
+            .spawn();
+    }
     Ok(local_port)
 }
 
