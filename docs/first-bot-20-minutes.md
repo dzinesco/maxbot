@@ -222,4 +222,12 @@ out what the per-Bot VM does and does not protect against. For the
 - [`docs/server-setup.md`](server-setup.md) — the libvirt / QEMU
   / cloud-init provisioning on the Linux server (per-Bot VM
   creation, Ed25519 keypair generation, the v3.7.2 noVNC removal
+- The **Google Account** section of the settings palette (open with
+  <kbd>⌘</kbd>+<kbd>K</kbd>, scroll to the bottom) handles the
+  one-time OAuth setup for the Gmail + Calendar connector tools.
+  Paste a Google Cloud project's Desktop OAuth client_id +
+  client_secret, click **Connect Google**, complete the consent in
+  the browser, and the refresh token is stored. See
+  [user-guide.md#google-account-v3712](user-guide.md#google-account-v3712)
+  for the full flow + revocation instructions.
   notes)

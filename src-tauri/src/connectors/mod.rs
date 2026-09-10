@@ -63,6 +63,7 @@
 pub mod calendar;
 pub mod github;
 pub mod gmail;
+pub mod oauth;
 
 // Re-export the connector tool structs so the tool
 // registry can `use crate::connectors::GmailListMessagesTool`
@@ -191,8 +192,12 @@ pub async fn connector_test(
         .load_settings()
         .map_err(|e| format!("load settings: {e}"))?;
     match connector.as_str() {
-        "gmail" => gmail::test_connection(&settings).await,
-        "calendar" => calendar::test_connection(&settings).await,
+        // v3.7.12: Gmail + Calendar need the `db` so
+        // their `test_connection` can resolve an access
+        // token via the OAuth refresh path. GitHub still
+        // takes only `&Settings` (it reads the PAT).
+        "gmail" => gmail::test_connection(&state.db, &settings).await,
+        "calendar" => calendar::test_connection(&state.db, &settings).await,
         "github" => github::test_connection(&settings).await,
         other => Err(format!(
             "unknown connector `{other}`; expected one of gmail, calendar, github"

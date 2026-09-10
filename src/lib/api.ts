@@ -140,6 +140,25 @@ export interface Settings {
   // (local-only dev path). Tyler sets this to
   // `http://crispy:8443` to route through the LAN daemon.
   maxbotd_url: string;
+
+  // ---- v3.7.12 — real Google OAuth ----
+  //
+  // Set after the user pastes a Google Cloud project's
+  // Desktop OAuth client into Settings → Google Account
+  // and clicks "Connect Google". `google_oauth_client_id`
+  // + `google_oauth_client_secret` are user-visible
+  // (the Settings palette has inputs for them);
+  // `google_refresh_token` + `google_access_token` +
+  // `google_access_token_expiry` are hidden — managed
+  // by the Rust side after the user grants consent.
+  // The Gmail / Calendar connector tools read
+  // `google_access_token` and refresh it from
+  // `google_refresh_token` when it expires.
+  google_oauth_client_id: string | null;
+  google_oauth_client_secret: string | null;
+  google_refresh_token: string | null;
+  google_access_token: string | null;
+  google_access_token_expiry: number | null;
 }
 
 export interface ProviderPreset {
@@ -286,6 +305,22 @@ export const DEFAULT_SETTINGS: Settings = {
   // shared_* tools through the LAN daemon. See
   // `docs/maxbotd-setup.md` for the full setup flow.
   maxbotd_url: "http://127.0.0.1:8443",
+  // ---- v3.7.12 — real Google OAuth ----
+  //
+  // The user pastes a Google Cloud project's Desktop
+  // OAuth client_id + client_secret into Settings →
+  // Google Account, clicks "Connect Google", and
+  // MaxBot opens a browser to the Google consent
+  // screen. The refresh token is stored in
+  // `google_refresh_token` (a hidden field — not
+  // surfaced in the UI). The other two fields are
+  // hidden too: the access token + expiry are managed
+  // by the Rust side after the user grants consent.
+  google_oauth_client_id: null,
+  google_oauth_client_secret: null,
+  google_refresh_token: null,
+  google_access_token: null,
+  google_access_token_expiry: null,
 };
 
 export interface TtsSpeakResponse {
@@ -846,4 +881,33 @@ export interface SkillRecordStart {
 /** Returned by `skill_record_stop`. */
 export interface SkillRecordStop {
   skill: Skill;
+}
+
+// ---- v3.7.12 — real Google OAuth ----
+//
+// `GoogleOauthStatus` is the shape returned by
+// `googleOauthStatus` (and the `disconnect_google_oauth_cmd`
+// post-clear status). The `SettingsPalette`'s "Google
+// Account" section reads this to render the "Connected" /
+// "Not connected" row. The `scopes` array is the list of
+// scopes the user granted at the consent screen (the
+// renderer's "permissions" line shows them on hover).
+
+/** Snapshot of the user's Google OAuth connection state.
+ *  `connected` is `true` when `Settings.google_refresh_token`
+ *  is set (i.e. the user has completed the consent
+ *  screen at least once). `email` is the user's Gmail
+ *  address, populated lazily via a `userinfo` call on
+ *  the first status read after connect — `null` if the
+ *  lookup failed or the user revoked the `email` scope.
+ *  `expires_at` is the RFC-3339 timestamp when the
+ *  cached access token expires; `null` when the flow is
+ *  idle. `scopes` is the list of OAuth scopes the
+ *  consent screen actually granted (the renderer's
+ *  "permissions" line shows them on hover). */
+export interface GoogleOauthStatus {
+  connected: boolean;
+  email: string | null;
+  expires_at: string | null;
+  scopes: string[];
 }

@@ -10,6 +10,7 @@ pub mod daemon;
 pub mod groups;
 pub mod memory;
 pub mod meta;
+pub mod oauth;
 pub mod settings;
 pub mod skills;
 pub mod tcc;

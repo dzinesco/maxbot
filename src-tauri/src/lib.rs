@@ -351,6 +351,14 @@ pub fn run() {
             // continues to work even when the daemon
             // is down.
             commands::daemon::push_settings_to_daemon,
+            // v3.7.12 — real Google OAuth. The renderer
+            // drives the flow over IPC: start → open
+            // browser → user grants consent → complete.
+            commands::oauth::start_google_oauth_cmd,
+            commands::oauth::complete_google_oauth_cmd,
+            commands::oauth::cancel_google_oauth_cmd,
+            commands::oauth::disconnect_google_oauth_cmd,
+            commands::oauth::google_oauth_status_cmd,
         ])
         .run(tauri::generate_context!())
         .expect("error while running MaxBot");

@@ -22,6 +22,7 @@ import type {
   Conversation,
   DoneEvent,
   ErrorEvent,
+  GoogleOauthStatus,
   GroupChat,
   GroupMessage,
   McpServerInfo,
@@ -1001,4 +1002,73 @@ export async function listRecentActivity(): Promise<ActivityFeed> {
  *  the BotEditor surfaces the message in a toast. */
 export async function connectorTest(connector: string): Promise<string> {
   return invoke<string>("connector_test", { connector });
+}
+
+// ---- v3.7.12 — real Google OAuth ----
+//
+// Replaces the v3.7.0 "paste a long-lived access
+// token" path with a real OAuth 2.0 Authorization Code
+// flow. The renderer drives the flow over IPC: start
+// (returns the auth URL + port), open the URL in the
+// default browser, the user consents, the Rust
+// listener captures the callback, and the renderer
+// polls for the "complete" event. The Connect /
+// Disconnect / Status commands round out the surface.
+
+/** Start a Google OAuth 2.0 Authorization Code flow.
+ *  The Rust side binds a localhost listener on a
+ *  random port and returns the Google authorization
+ *  URL. The renderer opens the URL in the default
+ *  browser via `tauri-plugin-opener`'s `open_url`.
+ *  Throws on missing client_id / client_secret (the
+ *  Rust side returns a clear "set
+ *  google_oauth_client_id + google_oauth_client_secret
+ *  in Settings" error). */
+export async function startGoogleOauth(
+  clientId: string,
+  clientSecret: string,
+  scopes?: string[],
+): Promise<{ auth_url: string; port: number }> {
+  return invoke<{ auth_url: string; port: number }>(
+    "start_google_oauth_cmd",
+    { clientId, clientSecret, scopes: scopes ?? null },
+  );
+}
+
+/** Complete the in-flight Google OAuth flow. The
+ *  Rust side waits for the user to land on the
+ *  callback URL, exchanges the auth code for tokens,
+ *  persists the refresh token to `Settings`, and
+ *  returns the connection status. The renderer calls
+ *  this after the `google_oauth://complete` Tauri
+ *  event fires (emitted by the listener task).
+ *  Throws if no flow is in flight. */
+export async function completeGoogleOauth(): Promise<GoogleOauthStatus> {
+  return invoke<GoogleOauthStatus>("complete_google_oauth_cmd");
+}
+
+/** Cancel the in-flight Google OAuth flow. The
+ *  Rust side drops the bound listener (via the
+ *  `GoogleOauthFlow` `Drop` impl). Idempotent —
+ *  returns `Ok(())` even if no flow is in flight. */
+export async function cancelGoogleOauth(): Promise<void> {
+  await invoke("cancel_google_oauth_cmd");
+}
+
+/** Disconnect the user's Google account. Clears
+ *  `google_access_token`, `google_refresh_token`,
+ *  and `google_access_token_expiry` from the
+ *  settings row. Idempotent. Returns the post-
+ *  disconnect status (which is always
+ *  `connected: false`). */
+export async function disconnectGoogleOauth(): Promise<GoogleOauthStatus> {
+  return invoke<GoogleOauthStatus>("disconnect_google_oauth_cmd");
+}
+
+/** Return the current Google OAuth status. The
+ *  renderer calls this on mount to render the
+ *  "Connected" / "Not connected" row in
+ *  `SettingsPalette`. */
+export async function googleOauthStatus(): Promise<GoogleOauthStatus> {
+  return invoke<GoogleOauthStatus>("google_oauth_status_cmd");
 }

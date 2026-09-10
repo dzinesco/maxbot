@@ -274,6 +274,49 @@ pub struct Settings {
     /// via `default_maxbotd_url()`.
     #[serde(default = "default_maxbotd_url")]
     pub maxbotd_url: String,
+
+    // ---- v3.7.12 — real Google OAuth ----
+    /// Google Cloud project's OAuth client id (a
+    /// string ending in `.apps.googleusercontent.com`).
+    /// Set by the user in Settings → Google Account
+    /// after creating a "Desktop app" OAuth client at
+    /// <https://console.cloud.google.com/apis/credentials>.
+    /// None = the Gmail / Calendar connectors report
+    /// "Google OAuth not configured" and the
+    /// `start_google_oauth` command errors with
+    /// "set google_oauth_client_id + google_oauth_client_secret
+    /// in Settings". The connector tools do not need
+    /// this field — only the OAuth bootstrap path does.
+    #[serde(default)]
+    pub google_oauth_client_id: Option<String>,
+    /// Google Cloud project's OAuth client secret. Same
+    /// Desktop-app OAuth client as `google_oauth_client_id`.
+    /// Stored plaintext in the local SQLite DB (same
+    /// threat model as the LLM API keys: per-user
+    /// Application Support directory with the default
+    /// macOS file protection class). None = same error
+    /// path as `google_oauth_client_id`.
+    #[serde(default)]
+    pub google_oauth_client_secret: Option<String>,
+    /// Long-lived Google OAuth refresh token issued by
+    /// `https://oauth2.googleapis.com/token` at the end
+    /// of a successful authorization-code exchange. This
+    /// is the durable credential — the connector tools
+    /// refresh the short-lived access token from it as
+    /// needed. None = the Gmail / Calendar connectors
+    /// return a "Google OAuth not connected" error.
+    /// v3.7.12 introduces this; v3.7.0–v3.7.11 stored
+    /// only the long-lived access token in the now-
+    /// deprecated `google_access_token` field above.
+    #[serde(default)]
+    pub google_refresh_token: Option<String>,
+    /// Unix epoch (seconds) when `google_access_token`
+    /// expires. `Some(0)` or `None` = "always treat as
+    /// expired" so the first call after a restart refreshes
+    /// the token (Google access tokens live ~1 hour; the
+    /// stored clock-based check is conservative).
+    #[serde(default)]
+    pub google_access_token_expiry: Option<i64>,
 }
 
 /// v3.7.1 — default base URL for the maxbotd daemon.

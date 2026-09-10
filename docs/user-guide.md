@@ -372,6 +372,97 @@ General → "Base URL override"). Leave blank for the built-in
 default; set to a self-hosted proxy or alternate region endpoint
 if needed. Per-provider overrides live in the Providers tab.
 
+## Google Account (v3.7.12)
+
+Real Google OAuth 2.0 — replaces the v3.7.0 "paste a
+long-lived access token" path with a one-time consent
+flow that stores a **refresh token** in
+`Settings.google_refresh_token`. The Gmail and Calendar
+connector tools (`gmail_list_messages`,
+`gmail_get_message`, `gmail_send_message`,
+`gmail_create_draft`, `calendar_list_events`,
+`calendar_get_event`, `calendar_create_event`,
+`calendar_update_event`) refresh the short-lived access
+token lazily from the refresh token as needed.
+
+### One-time setup
+
+1. Open <https://console.cloud.google.com/apis/credentials>
+   in your browser.
+2. Create a Google Cloud project (any name — "MaxBot" is
+   fine). The wizard walks you through enabling the
+   project; nothing to configure yet.
+3. Click **+ Create credentials → OAuth client ID**.
+4. Choose **Desktop app** as the application type
+   (this is the type that supports `http://127.0.0.1`
+   redirect URIs without a real domain).
+5. Click **Create**. The wizard shows the new client
+   **ID** and **client secret** — copy both. The client
+   ID looks like
+   `123456789-abc…xyz.apps.googleusercontent.com`.
+6. Back in MaxBot, press <kbd>⌘</kbd>+<kbd>K</kbd> to
+   open the settings palette. Scroll to the bottom:
+   the **Google Account** section has two inputs —
+   paste the client ID and client secret there.
+7. Click **Connect Google**. MaxBot opens a browser to
+   the Google consent screen, asks for permission to
+   view your Gmail + Calendar, and listens on
+   `http://127.0.0.1:PORT/callback` for the redirect.
+8. Click **Allow** in the browser. The section flips
+   to "Connected as you@gmail.com" with a "Disconnect"
+   button and a "Token expires in 47m" line.
+
+After step 8 the refresh token is persisted in
+`Settings.google_refresh_token` (hidden in the
+palette — MaxBot manages the OAuth flow for you). The
+Gmail + Calendar connector tools work without any
+further setup.
+
+### Revoking access
+
+Click **Disconnect** in the Google Account section to
+clear the stored refresh token. To fully revoke
+MaxBot's access to your Google account, visit
+<https://myaccount.google.com/permissions> and remove
+"MaxBot" from the list — this is what to do if you
+suspect the client secret has leaked.
+
+### Why a Desktop OAuth client, not "Web application"?
+
+Web application clients require a real HTTPS redirect
+URI; Desktop clients accept `http://127.0.0.1:PORT`
+redirects. MaxBot runs a localhost listener on a free
+port (`8765` by default, falls back to an OS-assigned
+port if 8765 is in use) for the duration of the
+consent flow.
+
+### Why does MaxBot store the refresh token, not the access token?
+
+Access tokens are short-lived (~1 hour). Storing them
+is useless after an hour, and refreshing them on
+every API call would mean re-prompting the user.
+Storing the refresh token lets the connector tools
+auto-refresh on a 401 (or pre-emptively, when the
+cached access token is past expiry) without any
+user-visible flow.
+
+### Scopes requested
+
+The default flow requests these four scopes:
+
+- `openid` + `email` — to display the user's email in
+  the Settings panel's "Connected as …" line.
+- `https://www.googleapis.com/auth/gmail.readonly` —
+  read-only access to Gmail messages. Sending +
+  drafting use the same scope per Google's docs (the
+  readonly scope covers them too, despite the name).
+- `https://www.googleapis.com/auth/calendar.events` —
+  full read/write access to events on the primary
+  calendar.
+
+The consent screen shows all four on the same page;
+MaxBot does not request any additional scopes.
+
 ## What MaxBot's per-Bot VM does and does NOT protect against (v3.5.0)
 
 A per-Bot Linux VM gives every Bot a private computer to drive

@@ -43,6 +43,7 @@ use serde_json::{json, Value};
 use tauri::Manager;
 
 use crate::AppState;
+use crate::connectors::oauth;
 use crate::storage::Settings;
 use crate::tools::registry::truncate_for_model;
 use crate::tools::tool::{Tool, ToolContext, ToolError, ToolInvocation, ToolResult};
@@ -68,18 +69,18 @@ fn require_state(context: &ToolContext) -> Result<Arc<AppState>, ToolError> {
     Ok(state.inner().clone())
 }
 
-fn require_google_token(settings: &Settings) -> Result<String, ToolError> {
-    settings
-        .google_access_token
-        .as_ref()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| {
-            ToolError::Execution(
-                "Gmail/Calendar connector not configured: set google_access_token in Settings"
-                    .to_string(),
-            )
-        })
+/// v3.7.12: resolve a Google access token via the real
+/// OAuth refresh path. See `connectors::oauth` for the
+/// full flow. The legacy `Settings.google_access_token`
+/// field is the cache; `google_refresh_token` is the
+/// durable secret.
+async fn get_google_access_token(
+    state: &AppState,
+    settings: &Settings,
+) -> Result<String, ToolError> {
+    oauth::get_google_access_token(&state.db, settings)
+        .await
+        .map_err(|e| ToolError::Execution(e.to_string()))
 }
 
 /// `calendar_list_events` — events on the primary
@@ -135,7 +136,7 @@ impl Tool for CalendarListEventsTool {
             .db
             .load_settings()
             .map_err(|e| ToolError::Execution(format!("load settings: {e}")))?;
-        let token = require_google_token(&settings)?;
+        let token = get_google_access_token(&state, &settings).await?;
         let time_min = invocation
             .arguments
             .get("time_min")
@@ -268,7 +269,7 @@ impl Tool for CalendarGetEventTool {
             .db
             .load_settings()
             .map_err(|e| ToolError::Execution(format!("load settings: {e}")))?;
-        let token = require_google_token(&settings)?;
+        let token = get_google_access_token(&state, &settings).await?;
         let client = http_client()?;
         let resp = client
             .get(format!("{CAL_BASE}/events/{id}"))
@@ -407,7 +408,7 @@ impl Tool for CalendarCreateEventTool {
             .db
             .load_settings()
             .map_err(|e| ToolError::Execution(format!("load settings: {e}")))?;
-        let token = require_google_token(&settings)?;
+        let token = get_google_access_token(&state, &settings).await?;
 
         let mut body = json!({
             "summary": summary,
@@ -501,7 +502,7 @@ impl Tool for CalendarUpdateEventTool {
             .db
             .load_settings()
             .map_err(|e| ToolError::Execution(format!("load settings: {e}")))?;
-        let token = require_google_token(&settings)?;
+        let token = get_google_access_token(&state, &settings).await?;
 
         let mut body = json!({});
         if let Some(s) = invocation.arguments.get("summary").and_then(|v| v.as_str()) {
@@ -560,8 +561,13 @@ impl Tool for CalendarUpdateEventTool {
 /// Test the Calendar connection by listing a single
 /// event from the next 24 hours. Used by the
 /// BotEditor's "Test connection" button.
-pub async fn test_connection(settings: &Settings) -> Result<String, String> {
-    let token = require_google_token(settings).map_err(|e| e.to_string())?;
+pub async fn test_connection(
+    db: &crate::storage::Database,
+    settings: &Settings,
+) -> Result<String, String> {
+    let token = oauth::get_google_access_token(db, settings)
+        .await
+        .map_err(|e| e.to_string())?;
     let client = http_client().map_err(|e| e.to_string())?;
     let now = chrono::Utc::now().to_rfc3339();
     let tomorrow = (chrono::Utc::now() + chrono::Duration::days(1)).to_rfc3339();
@@ -610,24 +616,46 @@ fn urlencoding_encode(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::Database;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
-    fn settings_with_token(tok: &str) -> Settings {
+    fn unique_temp_db() -> Database {
+        let path = std::env::temp_dir().join(format!(
+            "maxbot-calendar-test-{}.sqlite",
+            uuid::Uuid::new_v4()
+        ));
+        Database::open(&path).expect("open temp db")
+    }
+
+    fn now_epoch() -> i64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64
+    }
+
+    #[tokio::test]
+    async fn get_google_access_token_returns_cached_token_when_not_expired() {
+        let db = unique_temp_db();
         let mut s = Settings::default();
-        s.google_access_token = Some(tok.to_string());
-        s
+        s.google_access_token = Some("cached-tok".to_string());
+        s.google_access_token_expiry = Some(now_epoch() + 3600);
+        let token = oauth::get_google_access_token(&db, &s)
+            .await
+            .unwrap();
+        assert_eq!(token, "cached-tok");
     }
 
-    #[test]
-    fn require_google_token_returns_trimmed_value() {
-        let s = settings_with_token("  abc  ");
-        let t = require_google_token(&s).unwrap();
-        assert_eq!(t, "abc");
-    }
-
-    #[test]
-    fn require_google_token_errors_when_unset() {
-        let s = Settings::default();
-        assert!(require_google_token(&s).is_err());
+    #[tokio::test]
+    async fn get_google_access_token_errors_when_no_refresh_token() {
+        let db = unique_temp_db();
+        let mut s = Settings::default();
+        s.google_access_token = Some("stale".to_string());
+        s.google_access_token_expiry = Some(now_epoch() - 60);
+        let err = oauth::get_google_access_token(&db, &s)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("reconnect") || err.to_string().contains("refresh"));
     }
 
     #[test]

@@ -31,6 +31,7 @@ use serde_json::{json, Value};
 use tauri::Manager;
 
 use crate::AppState;
+use crate::connectors::oauth;
 use crate::storage::Settings;
 use crate::tools::registry::truncate_for_model;
 use crate::tools::tool::{Tool, ToolContext, ToolError, ToolInvocation, ToolResult};
@@ -64,21 +65,23 @@ fn require_state(context: &ToolContext) -> Result<Arc<AppState>, ToolError> {
     Ok(state.inner().clone())
 }
 
-/// Read the Google access token from the loaded
-/// Settings. Returns a friendly error if the field is
-/// empty / unset so the model can react.
-fn require_google_token(settings: &Settings) -> Result<String, ToolError> {
-    settings
-        .google_access_token
-        .as_ref()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| {
-            ToolError::Execution(
-                "Gmail/Calendar connector not configured: set google_access_token in Settings"
-                    .to_string(),
-            )
-        })
+/// Resolve a usable Google access token. v3.7.12:
+/// delegates to [`oauth::get_google_access_token`],
+/// which checks the cached access token against
+/// `google_access_token_expiry` and refreshes via the
+/// stored refresh token when needed. The legacy
+/// `Settings.google_access_token` field is the cache
+/// for the OAuth flow; the durable secret is
+/// `google_refresh_token`. If neither is set, the user
+/// sees a "Google OAuth not connected" error pointing
+/// them to Settings → Google Account.
+async fn get_google_access_token(
+    state: &AppState,
+    settings: &Settings,
+) -> Result<String, ToolError> {
+    oauth::get_google_access_token(&state.db, settings)
+        .await
+        .map_err(|e| ToolError::Execution(e.to_string()))
 }
 
 /// `gmail_list_messages` — list the most recent messages
@@ -129,7 +132,7 @@ impl Tool for GmailListMessagesTool {
             .db
             .load_settings()
             .map_err(|e| ToolError::Execution(format!("load settings: {e}")))?;
-        let token = require_google_token(&settings)?;
+        let token = get_google_access_token(&state, &settings).await?;
         let query = invocation
             .arguments
             .get("query")
@@ -294,7 +297,7 @@ impl Tool for GmailGetMessageTool {
             .db
             .load_settings()
             .map_err(|e| ToolError::Execution(format!("load settings: {e}")))?;
-        let token = require_google_token(&settings)?;
+        let token = get_google_access_token(&state, &settings).await?;
         let client = http_client()?;
         let url = format!("{GMAIL_BASE}/messages/{id}?format=full");
         let resp = client
@@ -453,7 +456,7 @@ impl Tool for GmailSendMessageTool {
             .db
             .load_settings()
             .map_err(|e| ToolError::Execution(format!("load settings: {e}")))?;
-        let token = require_google_token(&settings)?;
+        let token = get_google_access_token(&state, &settings).await?;
         let raw = build_rfc822(to, subject, body);
         let client = http_client()?;
         let resp = client
@@ -538,7 +541,7 @@ impl Tool for GmailDraftMessageTool {
             .db
             .load_settings()
             .map_err(|e| ToolError::Execution(format!("load settings: {e}")))?;
-        let token = require_google_token(&settings)?;
+        let token = get_google_access_token(&state, &settings).await?;
         let raw = build_rfc822(to, subject, body);
         let client = http_client()?;
         let resp = client
@@ -569,8 +572,13 @@ impl Tool for GmailDraftMessageTool {
 /// Test the Gmail connection by calling
 /// `users.getProfile`. Used by the BotEditor's
 /// "Test connection" button.
-pub async fn test_connection(settings: &Settings) -> Result<String, String> {
-    let token = require_google_token(settings).map_err(|e| e.to_string())?;
+pub async fn test_connection(
+    db: &crate::storage::Database,
+    settings: &Settings,
+) -> Result<String, String> {
+    let token = oauth::get_google_access_token(db, settings)
+        .await
+        .map_err(|e| e.to_string())?;
     let client = http_client().map_err(|e| e.to_string())?;
     let resp = client
         .get(format!("{GMAIL_BASE}/profile"))
@@ -601,33 +609,80 @@ pub async fn test_connection(settings: &Settings) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::Database;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
-    fn settings_with_token(tok: &str) -> Settings {
+    fn unique_temp_db() -> Database {
+        let path = std::env::temp_dir().join(format!(
+            "maxbot-gmail-test-{}.sqlite",
+            uuid::Uuid::new_v4()
+        ));
+        Database::open(&path).expect("open temp db")
+    }
+
+    fn now_epoch() -> i64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64
+    }
+
+    #[tokio::test]
+    async fn get_google_access_token_returns_cached_token_when_not_expired() {
+        let db = unique_temp_db();
         let mut s = Settings::default();
-        s.google_access_token = Some(tok.to_string());
-        s
+        s.google_access_token = Some("cached-tok".to_string());
+        s.google_access_token_expiry = Some(now_epoch() + 3600);
+        let token = get_google_access_token_via_helper(&db, &s).await.unwrap();
+        assert_eq!(token, "cached-tok");
     }
 
-    #[test]
-    fn require_google_token_errors_when_unset() {
-        let s = Settings::default();
-        let err = require_google_token(&s).unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("google_access_token"));
-    }
-
-    #[test]
-    fn require_google_token_errors_on_whitespace_only() {
+    #[tokio::test]
+    async fn get_google_access_token_errors_when_no_refresh_token() {
+        let db = unique_temp_db();
         let mut s = Settings::default();
-        s.google_access_token = Some("   ".to_string());
-        assert!(require_google_token(&s).is_err());
+        // Cached access token but no refresh token —
+        // we cannot refresh, so the helper should
+        // surface a "reconnect" error.
+        s.google_access_token = Some("stale".to_string());
+        s.google_access_token_expiry = Some(now_epoch() - 60);
+        let err = get_google_access_token_via_helper(&db, &s)
+            .await
+            .unwrap_err();
+        // The error message should mention the user
+        // needs to reconnect.
+        assert!(err.contains("reconnect") || err.contains("refresh"));
     }
 
-    #[test]
-    fn require_google_token_returns_trimmed_value() {
-        let s = settings_with_token("  abc  ");
-        let t = require_google_token(&s).unwrap();
-        assert_eq!(t, "abc");
+    #[tokio::test]
+    async fn get_google_access_token_treats_missing_expiry_as_expired() {
+        let db = unique_temp_db();
+        let mut s = Settings::default();
+        s.google_access_token = Some("stale-tok".to_string());
+        s.google_access_token_expiry = None;
+        // Same expectation as the no-refresh-token
+        // case: with no refresh token, the helper
+        // returns the reconnect error rather than
+        // silently using the (unknown-expiry) cached
+        // token.
+        let err = get_google_access_token_via_helper(&db, &s)
+            .await
+            .unwrap_err();
+        assert!(err.contains("reconnect") || err.contains("refresh"));
+    }
+
+    /// Call the OAuth helper with a Database + Settings
+    /// (the production call site has an AppState; the
+    /// tests construct the Database directly). This
+    /// keeps the test surface tight — we don't need to
+    /// build a full AppState for a unit test.
+    async fn get_google_access_token_via_helper(
+        db: &Database,
+        settings: &Settings,
+    ) -> Result<String, String> {
+        oauth::get_google_access_token(db, settings)
+            .await
+            .map_err(|e| e.to_string())
     }
 
     #[test]

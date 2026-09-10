@@ -3,11 +3,36 @@
 // (opens on Cmd+K semantics — i.e. when shown, filters as
 // you type, Enter selects, Esc closes, empty state copy)
 // plus a few extras that round out the contract.
+//
+// v3.7.12 — adds tests for the inline Google Account
+// section: the Connect / Disconnect buttons, the input
+// fields, and the status text. The section lives at the
+// bottom of the palette modal regardless of the search
+// query.
 
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { SettingsPalette } from "./SettingsPalette";
-import type { Bot } from "../lib/api";
+import type { Bot, GoogleOauthStatus } from "../lib/api";
+
+// Mock the tauri wrappers so the section's connect /
+// disconnect handlers can be exercised without a
+// real Rust side.
+vi.mock("../lib/tauri", () => ({
+  startGoogleOauth: vi.fn(),
+  completeGoogleOauth: vi.fn(),
+  cancelGoogleOauth: vi.fn(),
+  disconnectGoogleOauth: vi.fn(),
+  googleOauthStatus: vi.fn(),
+}));
+
+import {
+  cancelGoogleOauth,
+  completeGoogleOauth,
+  disconnectGoogleOauth,
+  googleOauthStatus,
+  startGoogleOauth,
+} from "../lib/tauri";
 
 const sampleBot: Bot = {
   id: "bot-1",
@@ -36,6 +61,29 @@ function renderPalette(
   };
   const utils = render(<SettingsPalette {...props} />);
   return { ...utils, onClose, onSelect };
+}
+
+function disconnectedStatus(): GoogleOauthStatus {
+  return {
+    connected: false,
+    email: null,
+    expires_at: null,
+    scopes: [],
+  };
+}
+
+function connectedStatus(): GoogleOauthStatus {
+  return {
+    connected: true,
+    email: "user@example.com",
+    expires_at: new Date(Date.now() + 3600_000).toISOString(),
+    scopes: [
+      "openid",
+      "email",
+      "https://www.googleapis.com/auth/gmail.readonly",
+      "https://www.googleapis.com/auth/calendar.events",
+    ],
+  };
 }
 
 describe("SettingsPalette", () => {
@@ -209,5 +257,177 @@ describe("SettingsPalette", () => {
     fireEvent.click(row);
     expect(onSelect).toHaveBeenCalledTimes(1);
     expect(onSelect.mock.calls[0][0].key).toBe("app.tts-voice");
+  });
+
+  // ---- v3.7.12 — Google Account section ----
+  //
+  // The Google Account OAuth section is rendered at the
+  // bottom of the palette modal regardless of the
+  // search query. The tests below exercise the
+  // "disconnected" path (input fields + Connect button)
+  // and the "connected" path (status text + Disconnect
+  // button).
+
+  describe("Google Account section", () => {
+    afterEach(() => {
+      vi.mocked(googleOauthStatus).mockReset();
+      vi.mocked(startGoogleOauth).mockReset();
+      vi.mocked(completeGoogleOauth).mockReset();
+      vi.mocked(cancelGoogleOauth).mockReset();
+      vi.mocked(disconnectGoogleOauth).mockReset();
+    });
+
+    // Override renderPalette so the section's mount-
+    // time `googleOauthStatus` call doesn't get
+    // clobbered by the disconnected default. Each
+    // test sets up its own mock with the right
+    // status; renderPalette is called after the
+    // mock setup so the test's mock wins.
+    function renderWithStatus(status: GoogleOauthStatus) {
+      vi.mocked(googleOauthStatus).mockReset();
+      vi.mocked(googleOauthStatus).mockResolvedValue(status);
+      return renderPalette();
+    }
+
+    it("renders the disconnected form with a disabled Connect button", async () => {
+      vi.mocked(googleOauthStatus).mockResolvedValueOnce(
+        disconnectedStatus(),
+      );
+      renderPalette();
+      // Wait for the initial status read to settle —
+      // the section flips to the "disconnected" form
+      // once the status arrives.
+      await waitFor(() => {
+        expect(
+          screen.getByTestId("settings-palette-google-status"),
+        ).toHaveTextContent("Not connected");
+      });
+      const connectBtn = screen.getByTestId(
+        "settings-palette-google-connect",
+      ) as HTMLButtonElement;
+      expect(connectBtn).toBeInTheDocument();
+      // Empty client_id / client_secret → disabled.
+      expect(connectBtn).toBeDisabled();
+    });
+
+    it("'Connect Google' is disabled when client_id is empty but client_secret is set", async () => {
+      vi.mocked(googleOauthStatus).mockResolvedValueOnce(
+        disconnectedStatus(),
+      );
+      renderPalette();
+      await waitFor(() => {
+        expect(
+          screen.getByTestId("settings-palette-google-status"),
+        ).toBeInTheDocument();
+      });
+      const idInput = screen.getByTestId(
+        "settings-palette-google-client-id",
+      ) as HTMLInputElement;
+      const secretInput = screen.getByTestId(
+        "settings-palette-google-client-secret",
+      ) as HTMLInputElement;
+      fireEvent.change(secretInput, { target: { value: "secret-1" } });
+      // idInput is still empty → button stays disabled.
+      expect(
+        screen.getByTestId("settings-palette-google-connect"),
+      ).toBeDisabled();
+      fireEvent.change(idInput, {
+        target: { value: "id.apps.googleusercontent.com" },
+      });
+      const connectBtn = screen.getByTestId(
+        "settings-palette-google-connect",
+      ) as HTMLButtonElement;
+      expect(connectBtn).not.toBeDisabled();
+    });
+
+    it("clicking 'Connect Google' calls startGoogleOauth with the right args", async () => {
+      vi.mocked(googleOauthStatus).mockResolvedValueOnce(
+        disconnectedStatus(),
+      );
+      vi.mocked(startGoogleOauth).mockResolvedValueOnce({
+        auth_url:
+          "https://accounts.google.com/o/oauth2/v2/auth?response_type=code&client_id=test&state=abc",
+        port: 8765,
+      });
+      // After the start resolves, `completeGoogleOauth`
+      // is called and returns the connected status so
+      // the section flips.
+      vi.mocked(completeGoogleOauth).mockResolvedValueOnce(
+        connectedStatus(),
+      );
+      renderPalette();
+      await waitFor(() => {
+        expect(
+          screen.getByTestId("settings-palette-google-status"),
+        ).toBeInTheDocument();
+      });
+      const idInput = screen.getByTestId(
+        "settings-palette-google-client-id",
+      );
+      const secretInput = screen.getByTestId(
+        "settings-palette-google-client-secret",
+      );
+      fireEvent.change(idInput, { target: { value: "test-client" } });
+      fireEvent.change(secretInput, { target: { value: "test-secret" } });
+      const connectBtn = screen.getByTestId(
+        "settings-palette-google-connect",
+      );
+      fireEvent.click(connectBtn);
+      await waitFor(() => {
+        expect(startGoogleOauth).toHaveBeenCalledWith(
+          "test-client",
+          "test-secret",
+        );
+      });
+    });
+
+    it("the status text reflects 'Connected' when the status reports connected", async () => {
+      renderWithStatus(connectedStatus());
+      await waitFor(() => {
+        expect(
+          screen.getByTestId("settings-palette-google-status"),
+        ).toHaveTextContent("Connected as user@example.com");
+      });
+      // The connected view exposes a Disconnect button
+      // and hides the client_id / client_secret
+      // inputs.
+      expect(
+        screen.getByTestId("settings-palette-google-disconnect"),
+      ).toBeInTheDocument();
+      expect(
+        screen.queryByTestId("settings-palette-google-client-id"),
+      ).not.toBeInTheDocument();
+    });
+
+    it("clicking 'Disconnect' clears the stored tokens and flips the status to 'Not connected'", async () => {
+      vi.mocked(disconnectGoogleOauth).mockResolvedValueOnce(
+        disconnectedStatus(),
+      );
+      renderWithStatus(connectedStatus());
+      await waitFor(() => {
+        expect(
+          screen.getByTestId("settings-palette-google-disconnect"),
+        ).toBeInTheDocument();
+      });
+      fireEvent.click(
+        screen.getByTestId("settings-palette-google-disconnect"),
+      );
+      await waitFor(() => {
+        expect(disconnectGoogleOauth).toHaveBeenCalledTimes(1);
+      });
+      await waitFor(() => {
+        expect(
+          screen.getByTestId("settings-palette-google-status"),
+        ).toHaveTextContent("Not connected");
+      });
+      // The Disconnect button is gone, the Connect
+      // form is back.
+      expect(
+        screen.queryByTestId("settings-palette-google-disconnect"),
+      ).not.toBeInTheDocument();
+      expect(
+        screen.getByTestId("settings-palette-google-connect"),
+      ).toBeInTheDocument();
+    });
   });
 });

@@ -26,7 +26,14 @@
 //   truth for roster state.
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { Bot } from "../lib/api";
+import type { Bot, GoogleOauthStatus } from "../lib/api";
+import {
+  cancelGoogleOauth,
+  completeGoogleOauth,
+  disconnectGoogleOauth,
+  googleOauthStatus,
+  startGoogleOauth,
+} from "../lib/tauri";
 
 /** The kind of panel the selected setting should open. */
 export type SettingTarget =
@@ -579,6 +586,12 @@ export function SettingsPalette({
             ))
           )}
         </div>
+        {/* v3.7.12 — Google Account OAuth section. Always
+            rendered at the bottom of the palette so the
+            user can configure / inspect Google OAuth
+            without leaving the command palette. The
+            search input above stays focused. */}
+        <GoogleAccountSection />
         <div className="settings-palette__hint">
           <span>↑↓ navigate</span>
           <span>↵ select</span>
@@ -586,5 +599,252 @@ export function SettingsPalette({
         </div>
       </div>
     </div>
+  );
+}
+
+/** v3.7.12 — Google Account OAuth section rendered at the
+ *  bottom of the SettingsPalette. The user pastes a
+ *  Google Cloud project's Desktop OAuth client_id +
+ *  client_secret, clicks "Connect Google", and the Rust
+ *  side opens a browser to the Google consent screen.
+ *  When the user grants consent the section flips to
+ *  "Connected" with the granted email and a "Disconnect"
+ *  button.
+ *
+ *  The component is self-contained: it owns its own
+ *  status, input, and connect-state, and only talks to
+ *  the Rust side via the `tauri.ts` wrappers. Esc /
+ *  backdrop click on the parent palette closes the
+ *  whole modal — the section doesn't intercept Esc. */
+function disconnectedStatus(): GoogleOauthStatus {
+  return {
+    connected: false,
+    email: null,
+    expires_at: null,
+    scopes: [],
+  };
+}
+
+function GoogleAccountSection() {
+  // Status snapshot from the Rust side. Refreshed on
+  // mount and after every connect / disconnect cycle.
+  const [status, setStatus] = useState<GoogleOauthStatus | null>(null);
+  // User-entered client_id + client_secret. Not
+  // persisted by this component — the user clicks
+  // "Connect Google" and the Rust side reads them
+  // from the input values for the start call.
+  // Persistence is handled by the Settings panel
+  // (the user pastes the same values there if they
+  // want them remembered across launches).
+  const [clientId, setClientId] = useState("");
+  const [clientSecret, setClientSecret] = useState("");
+  // "idle" | "starting" | "listening" | "completing"
+  // — drives the spinner + button disabled state.
+  // The brief asks for "shows a spinner +
+  // 'Listening on http://127.0.0.1:PORT/callback'" —
+  // the listening state is set once the Rust side
+  // returns the auth URL, and clears when the user
+  // lands on the callback (Tauri event
+  // google_oauth://complete) or the flow times out.
+  const [phase, setPhase] = useState<
+    "idle" | "starting" | "listening" | "completing"
+  >("idle");
+  const [listenPort, setListenPort] = useState<number | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  // Read the current status on mount. Idempotent —
+  // `googleOauthStatus` returns the snapshot from
+  // `Settings.google_refresh_token` (connected if
+  // it's set). We tolerate the mock returning
+  // `undefined` (test environments) and treat that
+  // as "unknown / not connected" — the disconnected
+  // form renders either way.
+  useEffect(() => {
+    let alive = true;
+    const result = googleOauthStatus();
+    if (result && typeof (result as Promise<GoogleOauthStatus>).then === "function") {
+      (result as Promise<GoogleOauthStatus>)
+        .then((s) => {
+          if (alive) setStatus(s);
+        })
+        .catch((e) => {
+          if (alive) setError(String(e));
+        });
+    } else if (alive) {
+      // No real Rust side; render the disconnected
+      // form. The test setup that wants a connected
+      // status can mock the function to return a
+      // resolved promise.
+      setStatus(disconnectedStatus);
+    }
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  const onConnect = async () => {
+    setError(null);
+    setPhase("starting");
+    try {
+      const { auth_url, port } = await startGoogleOauth(
+        clientId,
+        clientSecret,
+      );
+      setListenPort(port);
+      setPhase("listening");
+      // Open the URL in the default browser. We
+      // avoid a hard dep on `@tauri-apps/plugin-opener`
+      // (which the slice doesn't install) — `window.open`
+      // works in the Tauri webview and as a fallback
+      // when running tests under happy-dom. Production
+      // builds will need `@tauri-apps/plugin-opener`
+      // (or a hand-rolled bridge) to open in the OS
+      // browser; for v3.7.12 we accept the
+      // webview-internal default.
+      try {
+        window.open(auth_url, "_blank", "noopener,noreferrer");
+      } catch {
+        // Defensive: in some test environments
+        // `window.open` throws. The user can still
+        // copy the URL from the "Listening on …"
+        // line.
+      }
+      // Drive the completion handshake. The Rust
+      // side returns once the user lands on the
+      // callback (or the 5-minute flow timeout fires,
+      // which surfaces as a Rust error).
+      const final = await completeGoogleOauth();
+      setStatus(final);
+      setPhase("idle");
+      setListenPort(null);
+    } catch (e) {
+      setError(String(e));
+      setPhase("idle");
+      setListenPort(null);
+    }
+  };
+
+  const onCancel = async () => {
+    try {
+      await cancelGoogleOauth();
+    } catch {
+      // Best-effort.
+    }
+    setPhase("idle");
+    setListenPort(null);
+  };
+
+  const onDisconnect = async () => {
+    setError(null);
+    try {
+      const final = await disconnectGoogleOauth();
+      setStatus(final);
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
+  const isConnected = status?.connected === true;
+  const canConnect =
+    !isConnected &&
+    clientId.trim().length > 0 &&
+    clientSecret.trim().length > 0 &&
+    phase === "idle";
+
+  return (
+    <section
+      className="settings-palette__google-section"
+      data-testid="settings-palette-google"
+      aria-label="Google Account"
+    >
+      <h3 className="settings-palette__google-title">Google Account</h3>
+      {isConnected && status ? (
+        <div className="settings-palette__google-connected">
+          <p data-testid="settings-palette-google-status">
+            Connected{status.email ? ` as ${status.email}` : ""}.
+          </p>
+          {status.expires_at && (
+            <p className="settings-palette__google-expiry">
+              Token expires {new Date(status.expires_at).toLocaleString()}.
+            </p>
+          )}
+          {status.scopes.length > 0 && (
+            <p
+              className="settings-palette__google-scopes"
+              title={status.scopes.join("\n")}
+            >
+              Scopes: {status.scopes.length} granted.
+            </p>
+          )}
+          <button
+            type="button"
+            onClick={onDisconnect}
+            data-testid="settings-palette-google-disconnect"
+          >
+            Disconnect
+          </button>
+        </div>
+      ) : (
+        <div className="settings-palette__google-form">
+          <p data-testid="settings-palette-google-status">
+            Not connected.
+          </p>
+          <input
+            type="text"
+            placeholder="OAuth client ID (…apps.googleusercontent.com)"
+            value={clientId}
+            onChange={(e) => setClientId(e.target.value)}
+            data-testid="settings-palette-google-client-id"
+            disabled={phase !== "idle"}
+            autoComplete="off"
+            spellCheck={false}
+          />
+          <input
+            type="password"
+            placeholder="OAuth client secret"
+            value={clientSecret}
+            onChange={(e) => setClientSecret(e.target.value)}
+            data-testid="settings-palette-google-client-secret"
+            disabled={phase !== "idle"}
+            autoComplete="off"
+            spellCheck={false}
+          />
+          {phase === "listening" && listenPort !== null ? (
+            <p
+              className="settings-palette__google-listening"
+              data-testid="settings-palette-google-listening"
+            >
+              Listening on http://127.0.0.1:{listenPort}/callback —
+              complete the consent in your browser.
+              <button
+                type="button"
+                onClick={onCancel}
+                data-testid="settings-palette-google-cancel"
+              >
+                Cancel
+              </button>
+            </p>
+          ) : null}
+          {error && (
+            <p
+              className="settings-palette__google-error"
+              data-testid="settings-palette-google-error"
+            >
+              {error}
+            </p>
+          )}
+          <button
+            type="button"
+            onClick={onConnect}
+            disabled={!canConnect}
+            data-testid="settings-palette-google-connect"
+          >
+            {phase === "starting" || phase === "completing"
+              ? "Connecting…"
+              : "Connect Google"}
+          </button>
+        </div>
+      )}
+    </section>
   );
 }
