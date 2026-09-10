@@ -86,6 +86,36 @@ pub async fn capture_jpeg(
     vm_name: &str,
     state: &str,
 ) -> Result<Vec<u8>, ScreenshotError> {
+    // v3.7.9: delegate to `capture_jpeg_with_size` and
+    // discard the dimensions. Kept as a thin wrapper so
+    // existing callers (the v3.7.2 `ComputerManager::
+    // screenshot` and the unit test that asserts the
+    // non-running-state rejection) don't have to be
+    // reshaped for the new tuple return.
+    let (bytes, _width, _height) =
+        capture_jpeg_with_size(pool, vm_name, state).await?;
+    Ok(bytes)
+}
+
+/// v3.7.9: same as `capture_jpeg` but also returns the
+/// framebuffer's natural width/height in pixels. The
+/// renderer needs both for the click-through takeover
+/// (step 6-8): the JPEG is the `<img>` src, and the
+/// (width, height) lets the renderer map a click at
+/// `(clientX, clientY)` back to the framebuffer
+/// coordinate space xdotool expects.
+///
+/// We always read the (width, height) — even on the
+/// JPEG pass-through path, which used to skip the
+/// decoder for speed. The cost is one extra
+/// `image::load_from_memory` per frame; at the 300ms
+/// poll cadence that's ~5-10ms of CPU and is dwarfed
+/// by the SSH round-trip to the host.
+pub async fn capture_jpeg_with_size(
+    pool: &SshPool,
+    vm_name: &str,
+    state: &str,
+) -> Result<(Vec<u8>, u32, u32), ScreenshotError> {
     if state != "running" {
         return Err(ScreenshotError::BadState {
             state: state.to_string(),
@@ -152,7 +182,7 @@ pub async fn capture_jpeg(
         .await
         .map_err(|e| ScreenshotError::Ssh(e.to_string()))?;
 
-    process_screenshot_output(vm_name, out)
+    process_screenshot_output_with_size(vm_name, out)
 }
 
 /// v3.7.2 (amended): classify and decode the
@@ -175,6 +205,33 @@ fn process_screenshot_output(
     vm_name: &str,
     out: RemoteBinaryOutput,
 ) -> Result<Vec<u8>, ScreenshotError> {
+    // v3.7.9: delegate to the `_with_size` variant and
+    // discard the dimensions. The non-size path is
+    // kept as a thin wrapper so the existing unit
+    // tests (and any external callers) can still build
+    // a `Vec<u8>`-only result without reshuffling the
+    // decoder pipeline.
+    let (bytes, _w, _h) = process_screenshot_output_with_size(vm_name, out)?;
+    Ok(bytes)
+}
+
+/// v3.7.9: variant of `process_screenshot_output` that
+/// also returns the framebuffer's natural width/height
+/// in pixels. The decoder pipeline always reads the
+/// dimensions now (no more JPEG pass-through fast path
+/// for the size-aware variant) so the renderer can map
+/// pointer events to framebuffer coordinates for
+/// xdotool.
+///
+/// On the PNG/PPM paths, the size comes for free from
+/// the `DynamicImage` we already decode to re-encode.
+/// On the JPEG pass-through path, we add one
+/// `image::load_from_memory_with_format` call to read
+/// the SOF marker — ~1ms on a 1280×800 frame.
+fn process_screenshot_output_with_size(
+    vm_name: &str,
+    out: RemoteBinaryOutput,
+) -> Result<(Vec<u8>, u32, u32), ScreenshotError> {
     if !out.success {
         // v3.7.2 (amended): when the libvirt domain is
         // missing on the host, `virsh screenshot` exits
@@ -218,16 +275,24 @@ fn process_screenshot_output(
     //   - PPM:  'P' '6' (P6 binary) — older QEMU versions
     //     that honor the `.ppm` extension; decode + re-encode.
     if out.stdout.starts_with(b"\xff\xd8") {
-        // JPEG pass-through (ImageMagick fast path)
-        Ok(out.stdout)
+        // JPEG pass-through (ImageMagick fast path). The
+        // dimensions are read from the SOF marker via
+        // one extra decode — ~1ms on a 1280×800 frame.
+        let img = image::load_from_memory_with_format(
+            &out.stdout,
+            image::ImageFormat::Jpeg,
+        )
+        .map_err(|e| ScreenshotError::Decode(format!("JPEG decode: {e}")))?;
+        Ok((out.stdout, img.width(), img.height()))
     } else if out.stdout.starts_with(b"\x89PNG") {
         // PNG decode + JPEG re-encode (QEMU 9.x default).
         // The `image` crate's PNG decoder is pure-Rust, no
-        // system deps.
-        png_to_jpeg(&out.stdout)
+        // system deps. The size is read from the
+        // `DynamicImage` we already have to build.
+        png_to_jpeg_with_size(&out.stdout)
     } else if out.stdout.starts_with(b"P6") {
         // PPM (P6 binary) decode + JPEG re-encode.
-        ppm_to_jpeg(&out.stdout)
+        ppm_to_jpeg_with_size(&out.stdout)
     } else {
         // Unknown format — surface a clear error so the
         // renderer can show "unsupported framebuffer
@@ -250,9 +315,22 @@ fn process_screenshot_output(
 /// the server. This fallback exists for installs without
 /// ImageMagick (e.g. minimal Ubuntu server images).
 fn ppm_to_jpeg(ppm: &[u8]) -> Result<Vec<u8>, ScreenshotError> {
+    let (bytes, _w, _h) = ppm_to_jpeg_with_size(ppm)?;
+    Ok(bytes)
+}
+
+/// v3.7.9: PPM→JPEG that also returns the
+/// framebuffer's natural width/height. Same decode
+/// path as `ppm_to_jpeg`; the size is read from the
+/// `DynamicImage` we already build.
+fn ppm_to_jpeg_with_size(
+    ppm: &[u8],
+) -> Result<(Vec<u8>, u32, u32), ScreenshotError> {
     let img = image::load_from_memory_with_format(ppm, image::ImageFormat::Pnm)
         .map_err(|e| ScreenshotError::Decode(format!("PPM decode: {e}")))?;
-    encode_jpeg(&img)
+    let (w, h) = (img.width(), img.height());
+    let bytes = encode_jpeg(&img)?;
+    Ok((bytes, w, h))
 }
 
 /// Convert a PNG byte slice to a JPEG. PNG is the
@@ -262,9 +340,22 @@ fn ppm_to_jpeg(ppm: &[u8]) -> Result<Vec<u8>, ScreenshotError> {
 /// discovery note in the v3.7.2 commit message).
 /// Same encoding path as `ppm_to_jpeg`.
 fn png_to_jpeg(png: &[u8]) -> Result<Vec<u8>, ScreenshotError> {
+    let (bytes, _w, _h) = png_to_jpeg_with_size(png)?;
+    Ok(bytes)
+}
+
+/// v3.7.9: PNG→JPEG that also returns the
+/// framebuffer's natural width/height. Same decode
+/// path as `png_to_jpeg`; the size is read from the
+/// `DynamicImage` we already build.
+fn png_to_jpeg_with_size(
+    png: &[u8],
+) -> Result<(Vec<u8>, u32, u32), ScreenshotError> {
     let img = image::load_from_memory_with_format(png, image::ImageFormat::Png)
         .map_err(|e| ScreenshotError::Decode(format!("PNG decode: {e}")))?;
-    encode_jpeg(&img)
+    let (w, h) = (img.width(), img.height());
+    let bytes = encode_jpeg(&img)?;
+    Ok((bytes, w, h))
 }
 
 /// Shared JPEG encoder. Quality 70 matches the

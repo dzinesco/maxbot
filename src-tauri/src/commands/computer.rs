@@ -16,7 +16,7 @@
 //! Rust field names (serde default for `ComputerState`,
 //! which has `#[serde(rename_all = "snake_case")]`).
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, State};
 
 use crate::computer::provision::ProvisionOptions;
@@ -200,14 +200,72 @@ pub async fn computer_destroy(
 /// cloud-init's LightDM install. Gating on QGA would
 /// hide the exact boot phase the preview is meant to
 /// show.
+/// v3.7.9: structured screenshot response — the
+/// JPEG bytes + the framebuffer's natural width /
+/// height so the renderer can map pointer events
+/// (in `clientX` / `clientY` pixels) to the
+/// framebuffer coordinates xdotool expects. The
+/// `camelCase` rename maps to `width` / `height` on
+/// the TS side (Tauri's default JSON convention).
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ComputerScreenshotOutput {
+    pub bytes: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+}
+
 #[tauri::command]
 pub async fn computer_screenshot(
     state: State<'_, AppState>,
     bot_id: String,
-) -> Result<Vec<u8>, String> {
+) -> Result<ComputerScreenshotOutput, String> {
     let db = state.db.clone();
     let mgr = state.computer.clone();
-    mgr.screenshot(&db, &bot_id)
+    let (bytes, width, height) = mgr
+        .screenshot_with_size(&db, &bot_id)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(ComputerScreenshotOutput {
+        bytes,
+        width,
+        height,
+    })
+}
+
+#[tauri::command]
+pub async fn computer_input_open(
+    state: State<'_, AppState>,
+    bot_id: String,
+) -> Result<(), String> {
+    state
+        .computer
+        .input_open(&bot_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn computer_input_event(
+    state: State<'_, AppState>,
+    bot_id: String,
+    event: crate::computer::input::InputEvent,
+) -> Result<(), String> {
+    state
+        .computer
+        .input_event(&bot_id, &event)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn computer_input_close(
+    state: State<'_, AppState>,
+    bot_id: String,
+) -> Result<(), String> {
+    state
+        .computer
+        .input_close(&bot_id)
         .await
         .map_err(|e| e.to_string())
 }

@@ -558,6 +558,13 @@ impl ComputerManager {
     /// webview-side noVNC. Just `virsh screenshot` over
     /// the server's SSH connection.
     ///
+    /// v3.7.9: this is now a thin wrapper around
+    /// `screenshot_with_size` that discards the
+    /// dimensions. The new `computer_screenshot` Tauri
+    /// command (step 3) returns the structured shape;
+    /// this stays for any internal caller that only
+    /// wants bytes.
+    ///
     /// Gated on `computers.state == "running"`. We do
     /// NOT gate on QGA — `virsh screenshot` is the
     /// QEMU virtual VGA capture, it works during
@@ -569,6 +576,25 @@ impl ComputerManager {
         db: &Database,
         bot_id: &str,
     ) -> Result<Vec<u8>, ComputerError> {
+        let (bytes, _w, _h) = self.screenshot_with_size(db, bot_id).await?;
+        Ok(bytes)
+    }
+
+    /// v3.7.9: same as `screenshot` but also returns
+    /// the framebuffer's natural width/height in
+    /// pixels. The renderer needs both bytes and
+    /// dimensions for the click-through takeover: the
+    /// JPEG is the `<img>` src, and the (width,
+    /// height) lets the renderer map a click at
+    /// `(clientX, clientY)` to framebuffer coordinates
+    /// for xdotool. The cost is one extra
+    /// `image::load_from_memory` per frame; at the
+    /// 300ms poll cadence that's negligible.
+    pub async fn screenshot_with_size(
+        &self,
+        db: &Database,
+        bot_id: &str,
+    ) -> Result<(Vec<u8>, u32, u32), ComputerError> {
         let row = db
             .get_computer(bot_id)?
             .ok_or_else(|| ComputerError::NoComputer(bot_id.into()))?;
@@ -579,13 +605,13 @@ impl ComputerManager {
         // guard (don't talk to QGA — it isn't ready
         // during cloud-init, which is exactly the boot
         // phase we want to show).
-        let bytes = screenshot::capture_jpeg(
+        let (bytes, width, height) = screenshot::capture_jpeg_with_size(
             &*self.pool,
             &row.vm_name,
             &row.state,
         )
         .await?;
-        Ok(bytes)
+        Ok((bytes, width, height))
     }
 
     /// `computer_takeover_open(bot_id)` — open an
