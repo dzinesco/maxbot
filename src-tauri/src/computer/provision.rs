@@ -295,6 +295,26 @@ async fn poll_for_vnc_port(
             }
         }
     }
+    // v3.7.5: with `--graphics none` on the virt-install side, the
+    // domain has no libvirt-managed VNC — the only VNC server is
+    // the one QEMU started from the `<qemu:commandline>` block
+    // (`-vnc 127.0.0.1:0,password=off,to=5999`). `virsh vncdisplay`
+    // doesn't know about it because libvirt didn't define a
+    // `<graphics>` element. Fall back to port 5900 (display 0 in
+    // the 5900-5999 range, which the qemu:commandline's
+    // `127.0.0.1:0` always picks first). This is the port the
+    // no-auth VNC actually listens on for the FIRST VM. Multiple
+    // VMs would need sequential port allocation (future work;
+    // v3.7.5 is a single-VM slice per Tyler's "lets use one vm"
+    // direction 2026-09-10).
+    if last_err.is_some() {
+        eprintln!(
+            "v3.7.5: vncdisplay failed ({}); falling back to port 5900 \
+             (qemu:commandline VNC, no libvirt <graphics> element)",
+            last_err.as_ref().unwrap()
+        );
+        return Ok(5900);
+    }
     Err(ProvisionError::Libvirt(format!(
         "vncdisplay never succeeded: {last_err:?}"
     )))

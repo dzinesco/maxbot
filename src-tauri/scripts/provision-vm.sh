@@ -237,37 +237,44 @@ EOF
 genisoimage -output "$VM_DIR/seed.iso" -volid cidata -joliet -rock "$USER_DATA" "$META_DATA"
 
 # 4. Define the libvirt domain.
-#    VNC is bound to 127.0.0.1 — the Mac tunnels it via `ssh -L` in
-#    the Tauri VNC proxy (see src-tauri/src/computer/vnc.rs).
+#    NO libvirt VNC. We use `--graphics none` so QEMU does NOT start
+#    a libvirt-managed VNC server with default DES auth. The only
+#    VNC server is the one injected via `<qemu:commandline>` below
+#    (`-vnc 127.0.0.1:0,password=off,to=5999`) with no auth.
 #
-#    v3.7.5: the libvirt domain XML gets a `<qemu:commandline>` block
-#    that adds `-vnc 127.0.0.1:0,password=off,to=5999` to the QEMU
-#    command line. This disables VNC password auth so macOS Screen
-#    Sharing connects without prompting for a password.
+#    Why this matters: if BOTH libvirt's VNC and qemu:commandline's
+#    VNC run, QEMU starts two VNC servers — one on the libvirt
+#    port (default DES challenge) and one on a bumped port (no
+#    auth). `virsh vncdisplay` only knows about the libvirt one,
+#    so the Mac app's SSH tunnel goes to the wrong (auth-required)
+#    VNC. macOS Screen Sharing then prompts for a password. With
+#    `--graphics none`, only the no-auth VNC exists, and the
+#    Mac app's `poll_for_vnc_port` falls back to 5900 (the fixed
+#    port from the qemu:commandline's `127.0.0.1:0`).
 #
 #    `--noreboot` is load-bearing: virt-install's default is to
 #    define + start the VM in one step, but the qemu:commandline
 #    patch below has to land in the XML BEFORE the QEMU process
-#    starts, otherwise QEMU boots with the old args and ignores
-#    the patched config (QEMU doesn't reload VNC config on the fly).
-#    Without `--noreboot`, the new VM would provision clean, but
-#    Takeover would still prompt for a password until the next
-#    shutdown + start. With it, the first boot is the right boot.
+#    starts, otherwise QEMU boots with the old args (QEMU doesn't
+#    reload VNC config on the fly). With `--noreboot`, the
+#    `virsh start` after the patch is what actually boots the
+#    VM, with the patched XML in place.
 #
-#    Why `password=off` via qemu:commandline instead of
-#    `--graphics vnc,auth=none`:
+#    v3.7.5: the libvirt domain XML gets a `<qemu:commandline>`
+#    block with `-vnc 127.0.0.1:0,password=off,to=5999`. This
+#    disables VNC password auth so macOS Screen Sharing connects
+#    without prompting. Why `password=off` via qemu:commandline:
 #      - libvirt 11.6.0 doesn't accept `auth` as a `<graphics>`
 #        attribute (only `vnc` and `sasl` are valid).
 #      - QEMU 9.x on Ubuntu 25.10 rejects `auth=none` as an
 #        "Invalid parameter" on the `-vnc` option.
-#      - QEMU 9.x accepts `password=off` (verified: standalone
-#        QEMU binds to 127.0.0.1:0 and RFB handshake advertises
-#        VNC_AUTH_NONE only — no password needed).
+#      - QEMU 9.x accepts `password=off`. RFB handshake
+#        advertises VNC_AUTH_NONE only (verified end-to-end
+#        against maxbot-bot-8eb75d73 on 2026-09-10).
 #      - The `to=5999` lets QEMU pick any free port in 5900-5999.
 #    Trust model unchanged: SSH-gated tunnel + libvirt loopback
 #    bind is the only real gate. macOS Screen Sharing no longer
-#    prompts. Verified end-to-end against the test VM
-#    (maxbot-bot-8eb75d73) on 2026-09-10.
+#    prompts.
 #
 #    Existing VMs (provisioned before this fix) need Destroy +
 #    re-provision (or `virsh shutdown` + start) to pick up the
@@ -281,7 +288,7 @@ virt-install \
   --import \
   --os-variant ubuntu24.04 \
   --network bridge=virbr0,model=virtio \
-  --graphics vnc,listen=127.0.0.1,port=-1 \
+  --graphics none \
   --noreboot \
   --noautoconsole
 
