@@ -14,6 +14,13 @@
 //   4. "+ New Bot" button: clicking it calls
 //      `onCreateBot`.
 //
+// v3.7.6: also test the per-row destroy (×) button:
+//   5. The destroy button calls `onDestroyBot` with the
+//      right Bot id and does NOT trigger `onSelectBot`.
+//   6. When `onDestroyBot` is omitted, the destroy button
+//      is not rendered (defensive — old call sites stay
+//      clean).
+//
 // We use `@testing-library/react` for rendering and
 // `fireEvent` for user gestures. The `data-testid` attrs
 // on each interactive element make the assertions
@@ -173,5 +180,61 @@ describe("BotRoster — selected row", () => {
     );
     expect(selected).toBeTruthy();
     expect(selected!.getAttribute("data-bot-id")).toBe("beta");
+  });
+});
+
+describe("BotRoster — destroy button (v3.7.6)", () => {
+  it("renders a destroy (×) button per row when onDestroyBot is provided", () => {
+    const bots = [
+      blankBot({ id: "alpha", name: "Alpha" }),
+      blankBot({ id: "beta", name: "Beta" }),
+    ];
+    render(
+      <BotRoster
+        bots={bots}
+        selectedBotId={null}
+        onSelectBot={() => {}}
+        onCreateBot={() => {}}
+        onDestroyBot={() => {}}
+      />,
+    );
+    const destroys = screen.getAllByTestId("bot-roster-destroy");
+    expect(destroys.length).toBe(2);
+  });
+
+  it("calls onDestroyBot with the row's Bot id when the × is clicked", () => {
+    const onDestroyBot = vi.fn();
+    const onSelectBot = vi.fn();
+    const bots = [blankBot({ id: "alpha", name: "Alpha" })];
+    render(
+      <BotRoster
+        bots={bots}
+        selectedBotId={null}
+        onSelectBot={onSelectBot}
+        onCreateBot={() => {}}
+        onDestroyBot={onDestroyBot}
+      />,
+    );
+    fireEvent.click(screen.getByTestId("bot-roster-destroy"));
+    expect(onDestroyBot).toHaveBeenCalledWith("alpha");
+    // Click must NOT also trigger the row's onSelectBot —
+    // e.stopPropagation() in the handler is what guarantees
+    // this.
+    expect(onSelectBot).not.toHaveBeenCalled();
+  });
+
+  it("does not render a destroy button when onDestroyBot is omitted", () => {
+    const bots = [blankBot({ id: "alpha", name: "Alpha" })];
+    render(
+      <BotRoster
+        bots={bots}
+        selectedBotId={null}
+        onSelectBot={() => {}}
+        onCreateBot={() => {}}
+      />,
+    );
+    // queryBy returns null when not present, unlike getBy
+    // which throws.
+    expect(screen.queryByTestId("bot-roster-destroy")).toBeNull();
   });
 });

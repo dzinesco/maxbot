@@ -8,6 +8,18 @@
 //   - a small computer sub-icon (the same
 //     `sidebar__computer-chip` from Slice C), clicking it
 //     opens `ComputerPanel` for that Bot
+//   - a hover-revealed "×" destroy button (v3.7.6) that
+//     asks for confirmation, then cascades:
+//       1) `computer_destroy(botId)` (best-effort; no
+//          error if no VM is provisioned)
+//       2) `delete_bot(botId)` to drop the SQLite row
+//     The cascade is the canonical "destroy a Bot" path
+//     Tyler asked for after "i cant destroy bots, no
+//     button" — the ComputerPanel's Destroy button is
+//     hidden until you open the panel for that Bot, and
+//     the Bot editor's "Delete" button doesn't clean up
+//     the VM, so neither was a discoverable way to fully
+//     remove a Bot.
 //
 // A search box at the top filters the list by name
 // (case-insensitive substring). A `+ New Bot` button at the
@@ -46,6 +58,11 @@ export interface BotRosterProps {
   onCreateBot: () => void;
   /** Callback when a row's computer chip is clicked. */
   onOpenComputer?: (botId: string) => void;
+  /** Callback when the row's destroy (×) button is clicked.
+   *  v3.7.6: the parent is responsible for confirmation
+   *  + the cascade (`computer_destroy` then `delete_bot`).
+   *  Omit to hide the destroy button entirely. */
+  onDestroyBot?: (botId: string) => void;
 }
 
 // ---- Component ----
@@ -59,6 +76,7 @@ export function BotRoster({
   onSelectBot,
   onCreateBot,
   onOpenComputer,
+  onDestroyBot,
 }: BotRosterProps) {
   const [query, setQuery] = useState("");
 
@@ -157,6 +175,27 @@ export function BotRoster({
                         : undefined
                     }
                   />
+                  {/* v3.7.6: per-row destroy (×) button. Hover-
+                      revealed so it doesn't clutter the sidebar
+                      but is one click away. The parent's
+                      `onDestroyBot` is responsible for the
+                      confirm + the cascade (computer_destroy
+                      then delete_bot). */}
+                  {onDestroyBot && (
+                    <button
+                      type="button"
+                      className="bot-roster__destroy"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onDestroyBot(bot.id);
+                      }}
+                      title="Destroy this Bot (VM + chat history)"
+                      aria-label={`Destroy ${bot.name || "Unnamed Bot"}`}
+                      data-testid="bot-roster-destroy"
+                    >
+                      ×
+                    </button>
+                  )}
                 </button>
               </li>
             );

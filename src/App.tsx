@@ -38,6 +38,7 @@ import { SettingsPalette } from "./components/SettingsPalette";
 import type { SettingEntry } from "./components/SettingsPalette";
 import {
   createConversation,
+  computerDestroy,
   deleteBot,
   deleteConversation,
   getBot,
@@ -1394,6 +1395,69 @@ export default function App() {
     [refreshBots],
   );
 
+  // v3.7.6: per-row destroy cascade. Triggered by the
+  // hover-revealed "×" button in the BotRoster sidebar.
+  // The cascade is:
+  //   1) confirm (window.confirm — destructive, no undo)
+  //   2) computerDestroy (best-effort; tolerate NoComputer
+  //      so Bots without a VM are still destroyable)
+  //   3) deleteBot (drops the SQLite `bots` row)
+  //   4) refreshBots so the roster updates
+  // The ComputerPanel's existing Destroy button only
+  // handles step 2 — it doesn't drop the bot row, so
+  // clicking it leaves an orphan. The Bot editor's Delete
+  // button only handles step 3 — it doesn't touch the VM,
+  // so clicking it leaves the disk behind on crispy. This
+  // cascade is the one canonical "destroy a Bot" path
+  // Tyler asked for.
+  const handleDestroyBot = useCallback(
+    async (id: string) => {
+      // Look up the Bot's display name for the confirm
+      // dialog. `bots` is the cached roster from
+      // `refreshBots`; if it's stale we fall back to
+      // "this Bot".
+      const victim = bots.find((b) => b.id === id);
+      const name = victim?.name || "this Bot";
+      const confirmed = window.confirm(
+        `Destroy ${name}? This permanently removes the Bot, its VM, its disk, and its chat history. This cannot be undone.`,
+      );
+      if (!confirmed) return;
+      // best-effort VM teardown. Swallow errors so a Bot
+      // with no computer row, or one whose VM was already
+      // removed out-of-band, still gets dropped from the
+      // roster.
+      try {
+        await computerDestroy(id);
+      } catch (e) {
+        // eslint-disable-next-line no-console
+        console.warn(`computerDestroy for ${id} failed (continuing):`, e);
+      }
+      // Drop the row. If the user is currently editing
+      // this Bot, close the editor so the screen doesn't
+      // sit on a stale `editorState.botId`.
+      await deleteBot(id);
+      if (editorState.mode === "edit" && editorState.botId === id) {
+        setEditorState({ mode: "closed" });
+        setEditorDraft(null);
+      }
+      if (computerPanelBotId === id) {
+        setComputerPanelBotId(null);
+      }
+      if (selectedBotId === id) {
+        setSelectedBotId(null);
+        setActiveId(null);
+      }
+      await refreshBots();
+    },
+    [
+      bots,
+      computerPanelBotId,
+      editorState,
+      refreshBots,
+      selectedBotId,
+    ],
+  );
+
   const handleRunBot = useCallback(
     async (id: string) => {
       setRunningBotId(id);
@@ -1742,6 +1806,7 @@ export default function App() {
         onSelectBot={handleSelectBot}
         onCreateBot={handleNewBot}
         onOpenComputer={(botId) => setComputerPanelBotId(botId)}
+        onDestroyBot={handleDestroyBot}
         status={status}
         onOpenSettings={() => setSettingsOpen(true)}
         mainView={mainView === "group" ? "chat" : mainView}

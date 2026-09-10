@@ -3889,6 +3889,53 @@ button.link:hover {
   background: var(--danger);
 }
 
+/* --- v3.7.6: per-row destroy button (×) ---
+   Hover-revealed so the sidebar stays clean. The button
+   is always in the layout (so the testid is always
+   present) but fades in only on row hover, and turns red
+   on its own hover so the user sees the danger. */
+
+.bot-roster__destroy {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  margin-left: 2px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-3);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 100ms ease, color 100ms ease,
+    background 100ms ease, border-color 100ms ease;
+}
+
+.bot-roster__row:hover .bot-roster__destroy,
+.bot-roster__destroy:focus-visible {
+  opacity: 1;
+}
+
+.bot-roster__destroy:hover {
+  color: var(--danger);
+  background: var(--danger-soft, rgba(239, 68, 68, 0.1));
+  border-color: var(--danger);
+}
+
+.bot-roster__destroy:focus-visible {
+  outline: 2px solid var(--danger);
+  outline-offset: 1px;
+}
+
+.bot-roster__destroy:active {
+  transform: scale(0.94);
+}
+
 @keyframes bot-roster-chip-pulse {
   0%, 100% { opacity: 0.4; }
   50% { opacity: 1; }

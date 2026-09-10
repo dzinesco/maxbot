@@ -76,6 +76,11 @@ export interface SidebarProps {
    *  chip. Mounts the ComputerPanel for that Bot. */
   onOpenComputer?: (botId: string) => void;
 
+  /** v3.7.6: per-row destroy callback. Forwarded to
+   *  `BotRoster`. The parent owns the cascade
+   *  (confirm + computer_destroy + delete_bot). */
+  onDestroyBot?: (botId: string) => void;
+
   /**
    * The currently-active conversation id. Shown only as a
    * visual hint (e.g. for the "Viewing <Bot>'s thread"
@@ -140,6 +145,7 @@ export function Sidebar({
   onSelectBot,
   onCreateBot,
   onOpenComputer,
+  onDestroyBot,
   status,
   onOpenSettings,
   mainView,
@@ -273,6 +279,7 @@ export function Sidebar({
         onSelectBot={onSelectBot}
         onCreateBot={onCreateBot}
         onOpenComputer={onOpenComputer}
+        onDestroyBot={onDestroyBot}
       />
 
       {/* v2.4.0 — Groups section. Sits between the Bot

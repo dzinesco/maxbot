@@ -39,6 +39,8 @@ export interface BotsPanelProps {
    *  passed (defensive — callers shouldn't pass both). */
   onCreateBot?: BotRosterProps["onCreateBot"];
   onOpenComputer?: BotRosterProps["onOpenComputer"];
+  /** v3.7.6: per-row destroy callback. See BotRoster. */
+  onDestroyBot?: BotRosterProps["onDestroyBot"];
 }
 
 export function BotsPanel(props: BotsPanelProps) {
@@ -52,6 +54,7 @@ export function BotsPanel(props: BotsPanelProps) {
       onSelectBot={props.onSelectBot}
       onCreateBot={props.onCreateBot ?? props.onCreate ?? (() => {})}
       onOpenComputer={props.onOpenComputer}
+      onDestroyBot={props.onDestroyBot}
     />
   );
 }
