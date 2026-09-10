@@ -60,6 +60,7 @@ use self::screenshot::ScreenshotError;
 use self::ssh::{SshError, SshExecutor, SshPool};
 use self::vnc::{TakeoverHandle, VncError};
 
+pub mod input;
 pub mod keys;
 pub mod libvirt;
 pub mod provision;
