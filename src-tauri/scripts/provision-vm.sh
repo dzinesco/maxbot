@@ -37,12 +37,17 @@
 #       RFB handshake advertises VNC_AUTH_NONE only (verified
 #       end-to-end on maxbot-bot-8eb75d73 on 2026-09-10).
 # The qemu:commandline is appended after virt-install, via
-# `virsh dumpxml | python3 | virsh define /dev/stdin`. Trust model
-# unchanged: SSH-gated tunnel, libvirt loopback bind, only the
-# MaxBot process ever has SSH access. Removes the password prompt
-# so the 2FA walkthrough (the rest of v3.7.5) doesn't have a
-# "hunt the password" step before it can start. Existing VMs need
-# Destroy + re-provision to pick up the new auth.
+# `virsh dumpxml | python3 | virsh define /dev/stdin`. The
+# virt-install uses `--noreboot` so the VM doesn't start until
+# AFTER the patch lands — QEMU doesn't reload VNC config on the
+# fly, so if the VM started first, the new auth would be ignored
+# on first boot. The `virsh start` at the end of the patch block
+# is what actually boots the VM, with the patched XML in place.
+# Trust model unchanged: SSH-gated tunnel, libvirt loopback bind,
+# only the MaxBot process ever has SSH access. Removes the
+# password prompt so the 2FA walkthrough (the rest of v3.7.5)
+# doesn't have a "hunt the password" step before it can start.
+# Existing VMs need Destroy + re-provision to pick up the new auth.
 #
 # v2.1: ensure sshd is up + the bot user is authorized BEFORE
 # the long packages: install runs. Without this, the cold-cache
@@ -240,6 +245,15 @@ genisoimage -output "$VM_DIR/seed.iso" -volid cidata -joliet -rock "$USER_DATA" 
 #    command line. This disables VNC password auth so macOS Screen
 #    Sharing connects without prompting for a password.
 #
+#    `--noreboot` is load-bearing: virt-install's default is to
+#    define + start the VM in one step, but the qemu:commandline
+#    patch below has to land in the XML BEFORE the QEMU process
+#    starts, otherwise QEMU boots with the old args and ignores
+#    the patched config (QEMU doesn't reload VNC config on the fly).
+#    Without `--noreboot`, the new VM would provision clean, but
+#    Takeover would still prompt for a password until the next
+#    shutdown + start. With it, the first boot is the right boot.
+#
 #    Why `password=off` via qemu:commandline instead of
 #    `--graphics vnc,auth=none`:
 #      - libvirt 11.6.0 doesn't accept `auth` as a `<graphics>`
@@ -255,9 +269,9 @@ genisoimage -output "$VM_DIR/seed.iso" -volid cidata -joliet -rock "$USER_DATA" 
 #    prompts. Verified end-to-end against the test VM
 #    (maxbot-bot-8eb75d73) on 2026-09-10.
 #
-#    Existing VMs need Destroy + re-provision (or `virsh shutdown`
-#    + start) to pick up the new auth — see the v3.7.5 entry in
-#    CHANGELOG.md.
+#    Existing VMs (provisioned before this fix) need Destroy +
+#    re-provision (or `virsh shutdown` + start) to pick up the
+#    new auth — see the v3.7.5 entry in CHANGELOG.md.
 virt-install \
   --name "$VM_NAME" \
   --memory "$RAM_MB" \
@@ -268,6 +282,7 @@ virt-install \
   --os-variant ubuntu24.04 \
   --network bridge=virbr0,model=virtio \
   --graphics vnc,listen=127.0.0.1,port=-1 \
+  --noreboot \
   --noautoconsole
 
 # 4a. Patch the domain XML to inject `<qemu:commandline>` with
@@ -297,6 +312,13 @@ qemu_block = (
 x = x.replace('</domain>', qemu_block, 1)
 sys.stdout.write(x)
 " | virsh define /dev/stdin
+
+# 4b. Start the VM now that the qemu:commandline patch is in the
+#     persistent config. `--noreboot` above left it shut off; this
+#     is where it actually boots, with QEMU picking up the
+#     `-vnc 127.0.0.1:0,password=off,to=5999` arg from the
+#     qemu:commandline block.
+virsh start "$VM_NAME"
 
 # 5. Return the libvirt domain name
 echo "$VM_NAME"
