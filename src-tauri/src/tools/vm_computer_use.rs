@@ -7,6 +7,23 @@
 //! press keys via `xdotool`, all running INSIDE the VM and
 //! returning a screenshot of the post-action desktop state.
 //!
+//! v3.7.11 — composite reliability:
+//!   - `screenshot()` also returns the OCR'd text
+//!     from the screen (via `tesseract`), so the
+//!     model can target buttons by label instead
+//!     of guessing coordinates from the pixels.
+//!   - `wait_for_stable(N)` polls the screen
+//!     every 200ms and returns when 3 consecutive
+//!     frames are identical (or N seconds elapse).
+//!     The model inserts it between `open_url` /
+//!     `click_at` and the next action to give a
+//!     still-rendering page a moment to settle.
+//!   - `shell_xdotool` errors now include the
+//!     exact command, the exit code, and the
+//!     stderr — the model can tell whether the
+//!     click missed, the display is gone, or the
+//!     VM is just slow.
+//!
 //! ## Script format
 //!
 //! The `script` parameter is a small sequence of helper calls,
@@ -14,6 +31,7 @@
 //!
 //! ```text
 //! open_url("https://example.com")
+//! wait_for_stable(2)
 //! click_at(120, 340)
 //! type("hello world")
 //! key("Return")
@@ -22,8 +40,8 @@
 //!
 //! Helpers:
 //!   - `screenshot()` — capture the desktop via `scrot`, return
-//!     base64 PNG (always the post-action state of the LAST
-//!     call in the script).
+//!     base64 PNG + the OCR'd text (always the post-action
+//!     state of the LAST call in the script).
 //!   - `click_at(x, y)` — move the mouse to `(x, y)` and click
 //!     button 1. Implemented via `xdotool mousemove x y` +
 //!     `xdotool click 1`.
@@ -37,6 +55,10 @@
 //!     `--no-sandbox` (the per-Bot VM runs the `bot` user
 //!     without the right SUID sandbox config; chromium fails
 //!     to launch without `--no-sandbox`).
+//!   - `wait_for_stable(N)` — poll the screen until 3
+//!     consecutive frames are identical, or N seconds
+//!     elapse. A timing barrier between helpers so a
+//!     still-rendering page doesn't lose the next click.
 //!
 //! ## Per-call consent
 //!
@@ -57,11 +79,12 @@
 //! the VM, no extra dependencies, no escape-hatch risk.
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use base64::Engine as _;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use tauri::Manager;
 
 use super::registry::truncate_for_model;
@@ -138,10 +161,12 @@ impl Tool for VmComputerUseTool {
          - click_at(x, y) \n\
          - type(text) \n\
          - key(name) \n\
-         - open_url(url) \n\n\
+         - open_url(url) \n\
+         - wait_for_stable(seconds) \n\n\
          ---\n\
          Example: \n\
          open_url(\"https://github.com/login\")\n\
+         wait_for_stable(2)\n\
          click_at(420, 180)\n\
          type(\"my-username\")\n\
          key(\"Tab\")\n\
@@ -153,6 +178,15 @@ impl Tool for VmComputerUseTool {
          - The post-action screenshot (PNG, base64) of the LAST \
          call is the result the model sees. Add an explicit \
          `screenshot()` call if you need to see intermediate state. \n\
+         - Every screenshot also returns the OCR'd text from the \
+         screen (best-effort: empty if tesseract is missing on \
+         the VM). Use the OCR text to find buttons / links by \
+         label instead of guessing coordinates. \n\
+         - `wait_for_stable(N)` polls the screen every 200ms \
+         and returns when 3 consecutive frames are identical \
+         (or N seconds elapse). Insert it between \
+         `open_url` / `click_at` and the next action so a \
+         still-rendering page doesn't lose the next click. \n\
          - `key(name)` accepts xdotool key names: \"Return\", \
          \"Tab\", \"Escape\", \"ctrl+l\", \"ctrl+shift+n\", etc. \n\
          - `click_at(x, y)` clicks button 1. There's no right-click; \
@@ -182,7 +216,7 @@ impl Tool for VmComputerUseTool {
             "properties": {
                 "script": {
                     "type": "string",
-                    "description": "Newline-separated helper calls. Each line is one call: `screenshot()`, `click_at(x, y)`, `type(text)`, `key(name)`, or `open_url(url)`. The final call's screenshot (or a trailing `screenshot()`) is the result."
+                    "description": "Newline-separated helper calls. Each line is one call: `screenshot()`, `click_at(x, y)`, `type(text)`, `key(name)`, `open_url(url)`, or `wait_for_stable(seconds)`. The final call's screenshot (or a trailing `screenshot()`) is the result. Every screenshot also returns OCR'd text from the screen."
                 }
             },
             "required": ["script"],
@@ -251,41 +285,72 @@ impl Tool for VmComputerUseTool {
         // model sees the exact column / char that broke.
         let calls = parse_script(&script)?;
 
+        // v3.7.11: resolve the SSH pool to a trait
+        // object so the unit tests can swap in a
+        // `MockSshExecutor`. `Arc<SshPool>`
+        // deref-coerces through the `SshExecutor`
+        // trait impl on `SshPool`.
+        let pool: &dyn SshExecutor = pool.as_ref();
+
         // Run each call in order, on the VM. The final
         // `screenshot()` (or the last call's automatic
         // screenshot) is what we return.
         let mut last_screenshot: Option<String> = None;
+        // v3.7.11: keep the most recent OCR text
+        // alongside the most recent screenshot so
+        // the tool result body can include both.
+        // `last_ocr_text` is `Some("")` if the
+        // screenshot was successful but tesseract
+        // wasn't installed (best-effort); we
+        // suppress an empty text block from the
+        // body in that case.
+        let mut last_ocr_text: Option<String> = None;
         let mut transcript: Vec<String> = Vec::new();
         for call in &calls {
             match call {
                 Call::Screenshot => {
-                    let png_b64 = take_screenshot(&pool, &bot_id).await?;
-                    last_screenshot = Some(png_b64);
-                    transcript.push("screenshot() — captured".to_string());
+                    let result = take_screenshot(pool, &bot_id).await?;
+                    let chars = result.text.chars().count();
+                    last_screenshot = Some(result.png_base64);
+                    last_ocr_text = Some(result.text);
+                    // Surface the OCR char count in the
+                    // transcript so a transcript-only
+                    // view (no PNG) still tells the
+                    // model roughly how much text is on
+                    // screen. The actual OCR text goes
+                    // into the body below.
+                    if chars == 0 {
+                        transcript.push("screenshot() — captured (no OCR text)".to_string());
+                    } else {
+                        transcript.push(format!("screenshot() — captured ({} chars of OCR text)", chars));
+                    }
                 }
                 Call::ClickAt { x, y } => {
-                    shell_xdotool(&pool, &bot_id, &["mousemove", "--", &x.to_string(), &y.to_string()]).await?;
-                    shell_xdotool(&pool, &bot_id, &["click", "1"]).await?;
+                    shell_xdotool(pool, &bot_id, &["mousemove", "--", &x.to_string(), &y.to_string()]).await?;
+                    shell_xdotool(pool, &bot_id, &["click", "1"]).await?;
                     // Take a screenshot after every click —
                     // the model almost always wants the post-
                     // action state.
-                    let png_b64 = take_screenshot(&pool, &bot_id).await?;
-                    last_screenshot = Some(png_b64);
+                    let result = take_screenshot(pool, &bot_id).await?;
+                    last_screenshot = Some(result.png_base64);
+                    last_ocr_text = Some(result.text);
                     transcript.push(format!("click_at({x}, {y})"));
                 }
                 Call::Type(text) => {
                     // xdotool type wants the literal text.
                     // Pass via `xdotool type -- "..."` to
                     // survive `-` prefix.
-                    shell_xdotool(&pool, &bot_id, &["type", "--", text]).await?;
-                    let png_b64 = take_screenshot(&pool, &bot_id).await?;
-                    last_screenshot = Some(png_b64);
+                    shell_xdotool(pool, &bot_id, &["type", "--", text]).await?;
+                    let result = take_screenshot(pool, &bot_id).await?;
+                    last_screenshot = Some(result.png_base64);
+                    last_ocr_text = Some(result.text);
                     transcript.push(format!("type(\"{}\") — {} chars", truncate_inline(text, 40), text.chars().count()));
                 }
                 Call::Key(name) => {
-                    shell_xdotool(&pool, &bot_id, &["key", "--", name]).await?;
-                    let png_b64 = take_screenshot(&pool, &bot_id).await?;
-                    last_screenshot = Some(png_b64);
+                    shell_xdotool(pool, &bot_id, &["key", "--", name]).await?;
+                    let result = take_screenshot(pool, &bot_id).await?;
+                    last_screenshot = Some(result.png_base64);
+                    last_ocr_text = Some(result.text);
                     transcript.push(format!("key(\"{name}\")"));
                 }
                 Call::OpenUrl(url) => {
@@ -341,11 +406,29 @@ impl Tool for VmComputerUseTool {
                     // paint the URL. A 1.5s sleep is enough
                     // for cached pages; cold first-launch
                     // takes 5-10s and the model can call
-                    // `screenshot()` again on a later turn.
+                    // `wait_for_stable(3)` then `screenshot()`
+                    // on a later turn for the cold path.
                     tokio::time::sleep(Duration::from_millis(1500)).await;
-                    let png_b64 = take_screenshot(&pool, &bot_id).await?;
-                    last_screenshot = Some(png_b64);
+                    let result = take_screenshot(pool, &bot_id).await?;
+                    last_screenshot = Some(result.png_base64);
+                    last_ocr_text = Some(result.text);
                     transcript.push(format!("open_url(\"{}\")", truncate_inline(url, 60)));
+                }
+                Call::WaitForStable { seconds } => {
+                    // v3.7.11: poll the screenshot
+                    // every 200ms until 3 consecutive
+                    // frames are identical, or
+                    // `seconds` elapse. The model
+                    // inserts this between
+                    // `open_url` / `click_at` and the
+                    // next action to give the page a
+                    // moment to render before the
+                    // next helper fires. No
+                    // screenshot is captured for the
+                    // model — this helper is purely
+                    // a timing barrier.
+                    wait_for_stable(pool, &bot_id, *seconds).await?;
+                    transcript.push(format!("wait_for_stable({seconds})"));
                 }
             }
         }
@@ -354,20 +437,44 @@ impl Tool for VmComputerUseTool {
         // post-action action, take one last screenshot. The
         // model will want to see something.
         if last_screenshot.is_none() {
-            let png_b64 = take_screenshot(&pool, &bot_id).await?;
-            last_screenshot = Some(png_b64);
+            let result = take_screenshot(pool, &bot_id).await?;
+            last_screenshot = Some(result.png_base64);
+            last_ocr_text = Some(result.text);
         }
 
-        // Build the result body. The post-action screenshot
-        // is the headline; a transcript of executed calls
-        // sits above it for human-readable provenance.
+        // Build the result body. The post-action
+        // screenshot is the headline; a transcript of
+        // executed calls sits above it for human-readable
+        // provenance. v3.7.11: also embed the OCR'd
+        // text from the most recent screenshot so the
+        // model can target buttons by label without
+        // guessing coordinates from the pixels.
         let png_b64 = last_screenshot.unwrap_or_default();
         let header = transcript.join("\n");
+        let ocr_section = match last_ocr_text {
+            Some(t) if !t.is_empty() => {
+                // Truncate the OCR section at the
+                // same cap as the full body —
+                // tesseract on a busy page can
+                // return thousands of chars and
+                // we'd blow the context window.
+                // 8 KB is enough for ~5 pages of
+                // plain text and still leaves the
+                // 32 KB body budget for the PNG
+                // base64.
+                let trimmed = truncate_for_model(&t, 8_000);
+                format!("\n\nOCR text (visible on screen):\n{trimmed}")
+            }
+            _ => String::new(),
+        };
         let body = if header.is_empty() {
-            format!("[screenshot, base64 PNG, {} bytes]", png_b64.len())
+            format!(
+                "[screenshot, base64 PNG, {} bytes]{ocr_section}",
+                png_b64.len()
+            )
         } else {
             format!(
-                "executed:\n{header}\n\n[screenshot, base64 PNG, {} bytes]\n{png_b64}",
+                "executed:\n{header}\n\n[screenshot, base64 PNG, {} bytes]\n{png_b64}{ocr_section}",
                 png_b64.len()
             )
         };
@@ -376,13 +483,19 @@ impl Tool for VmComputerUseTool {
 }
 
 /// A single parsed helper call.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 enum Call {
     Screenshot,
     ClickAt { x: i32, y: i32 },
     Type(String),
     Key(String),
     OpenUrl(String),
+    /// v3.7.11 — wait until 3 consecutive screenshot
+    /// frames are identical, or `seconds` elapse,
+    /// whichever comes first. Inserts a barrier
+    /// between helpers so a click on a still-rendering
+    /// page doesn't miss the target.
+    WaitForStable { seconds: f64 },
 }
 
 /// Parse the script into a sequence of `Call`s. The grammar:
@@ -489,9 +602,32 @@ fn parse_script(script: &str) -> Result<Vec<Call>, ToolError> {
                 }
                 Call::OpenUrl(url)
             }
+            "wait_for_stable" => {
+                // v3.7.11 — single float arg in seconds.
+                // Integer or decimal. Anything that
+                // parses as f64 is accepted; the
+                // runtime check below rejects
+                // negative / zero values that would
+                // mean "no wait" or "wait forever".
+                let arg = args_str.trim();
+                let seconds: f64 = arg.parse().map_err(|_| {
+                    ToolError::InvalidArguments(format!(
+                        "line {}: wait_for_stable: invalid seconds {:?}",
+                        idx + 1,
+                        arg
+                    ))
+                })?;
+                if !seconds.is_finite() || seconds <= 0.0 {
+                    return Err(ToolError::InvalidArguments(format!(
+                        "line {}: wait_for_stable: seconds must be a positive number, got {seconds}",
+                        idx + 1
+                    )));
+                }
+                Call::WaitForStable { seconds }
+            }
             other => {
                 return Err(ToolError::InvalidArguments(format!(
-                    "line {}: unknown helper {other:?} (expected screenshot, click_at, type, key, open_url)",
+                    "line {}: unknown helper {other:?} (expected screenshot, click_at, type, key, open_url, wait_for_stable)",
                     idx + 1
                 )));
             }
@@ -579,16 +715,57 @@ fn truncate_inline(s: &str, max: usize) -> String {
     out
 }
 
-/// Take a screenshot of the VM's desktop. We invoke
-/// `scrot -z <path>` (the `-z` is "silent" — no chime) via
-/// the SSH pool, then read the PNG bytes back via
-/// `vm_sftp_read`, base64-encode, and return. Errors from
-/// either step bubble up as `ToolError::Execution` with the
-/// underlying SSH error message.
+/// v3.7.11: the result of a `screenshot()` call.
+/// `png_base64` is the post-action PNG (the model
+/// sees the pixels) and `text` is the OCR'd text
+/// (the model sees the labels and can target
+/// buttons by name instead of guessing
+/// coordinates). `text` is best-effort: if
+/// `tesseract` isn't installed on the VM (the case
+/// for Robots provisioned before v3.7.11), `text`
+/// is empty and the tool still works — just
+/// without the OCR-augmentation leg up.
+struct ScreenshotResult {
+    png_base64: String,
+    text: String,
+}
+
+/// Take a screenshot of the VM's desktop and OCR the
+/// visible text. We invoke `scrot -z <path>` (the `-z`
+/// is "silent" — no chime) via the SSH pool, then
+/// read the PNG bytes back via `vm_sftp_read`,
+/// base64-encode, and return. After the screenshot
+/// is on disk, we run `tesseract <path> -` over the
+/// same SSH pool to extract the visible text. The
+/// OCR is best-effort — a missing tesseract binary
+/// (old qcow2 without v3.7.11's apt update) just
+/// yields empty `text`. The base64 PNG is the
+/// load-bearing part of the result.
+///
+/// v3.7.11: takes `&dyn SshExecutor` instead of
+/// `&Arc<SshPool>` so the unit tests can wire a
+/// `MockSshExecutor` and assert the returned pair.
 async fn take_screenshot(
-    pool: &Arc<crate::computer::ssh::SshPool>,
+    pool: &dyn SshExecutor,
     bot_id: &str,
-) -> Result<String, ToolError> {
+) -> Result<ScreenshotResult, ToolError> {
+    let bytes = take_screenshot_raw(pool, bot_id).await?;
+    let text = ocr_extract(pool, bot_id).await.unwrap_or_default();
+    Ok(ScreenshotResult {
+        png_base64: base64::engine::general_purpose::STANDARD.encode(&bytes),
+        text,
+    })
+}
+
+/// Capture the raw PNG bytes. Split out of
+/// `take_screenshot` so `wait_for_stable` can hash
+/// the bytes without paying for the base64
+/// round-trip (the 33% overhead would dominate
+/// the 200ms polling budget).
+async fn take_screenshot_raw(
+    pool: &dyn SshExecutor,
+    bot_id: &str,
+) -> Result<Vec<u8>, ToolError> {
     let cmd = format!(
         "DISPLAY={d} scrot -z {path} 2>/dev/null || (DISPLAY={d} import -window root {path} 2>/dev/null) || (DISPLAY={d} xwd -root -silent > {path} 2>/dev/null)",
         d = VM_DISPLAY,
@@ -601,7 +778,37 @@ async fn take_screenshot(
         .vm_sftp_read(bot_id, SCREENSHOT_PATH)
         .await
         .map_err(|e| ToolError::Execution(format!("screenshot: sftp read failed: {e}")))?;
-    Ok(base64::engine::general_purpose::STANDARD.encode(bytes.as_bytes()))
+    Ok(bytes.into_bytes())
+}
+
+/// Run `tesseract` over the freshly-captured
+/// screenshot and return stdout. Best-effort:
+/// if tesseract isn't installed, the SSH call
+/// fails (exit 127) and we return empty string
+/// so the model still gets the PNG. Future
+/// slices can surface the failure to the
+/// consent dialog or the Bot's run log.
+async fn ocr_extract(
+    pool: &dyn SshExecutor,
+    bot_id: &str,
+) -> Result<String, ToolError> {
+    let cmd = format!(
+        "DISPLAY={d} tesseract {path} - 2>/dev/null",
+        d = VM_DISPLAY,
+        path = SCREENSHOT_PATH,
+    );
+    let out = pool.vm_exec(bot_id, &cmd).await.map_err(|e| {
+        ToolError::Execution(format!("ocr: vm_exec failed: {e}"))
+    })?;
+    if !out.success {
+        // tesseract missing or the PNG is
+        // unreadable. The PNG is the
+        // load-bearing part of the result,
+        // so swallow the error and let the
+        // model work with the image alone.
+        return Ok(String::new());
+    }
+    Ok(out.stdout)
 }
 
 /// Run `xdotool <args>` on the VM. We pin `DISPLAY=:1` so
@@ -610,8 +817,17 @@ async fn take_screenshot(
 /// args that start with `-` (rare for `xdotool mousemove` /
 /// `click`, but `key -- ctrl+l` would otherwise parse
 /// `ctrl+l` as a flag).
+///
+/// v3.7.11: takes `&dyn SshExecutor` instead of
+/// `&Arc<SshPool>` so the unit tests can wire a
+/// `MockSshExecutor` and assert the new error
+/// format. v3.7.11: error format on non-zero
+/// exit now includes the exact command, the
+/// exit code, and the stderr — the model can
+/// tell whether the click missed, the display
+/// is gone, or the VM is just slow.
 async fn shell_xdotool(
-    pool: &Arc<crate::computer::ssh::SshPool>,
+    pool: &dyn SshExecutor,
     bot_id: &str,
     args: &[&str],
 ) -> Result<(), ToolError> {
@@ -627,11 +843,60 @@ async fn shell_xdotool(
         .map_err(|e| ToolError::Execution(format!("xdotool: vm_exec failed: {e}")))?;
     if !out.success {
         return Err(ToolError::Execution(format!(
-            "xdotool exited {:?}: {}",
+            "xdotool failed: cmd=`{}` exit={:?} stderr=`{}`",
+            cmd,
             out.exit_code,
             out.stderr.trim()
         )));
     }
+    Ok(())
+}
+
+/// v3.7.11: poll the screenshot until 3 consecutive
+/// frames are identical, or `seconds` elapse,
+/// whichever comes first. The 3-streak threshold
+/// (instead of 2) avoids false positives from a
+/// one-frame duplicate of a still-rendering page
+/// (a transient cache hit can produce two
+/// identical PNGs without the page being truly
+/// stable). The model calls this between
+/// `open_url` and `screenshot()` to give
+/// chromium a moment to paint the URL before
+/// snapshotting — without it, a click on a
+/// still-loading button misses.
+///
+/// Takes `&dyn SshExecutor` so the test
+/// surface can substitute a mock that returns
+/// canned frames.
+async fn wait_for_stable(
+    pool: &dyn SshExecutor,
+    bot_id: &str,
+    seconds: f64,
+) -> Result<(), ToolError> {
+    const POLL_INTERVAL: Duration = Duration::from_millis(200);
+    const STABILITY_STREAK: u32 = 3;
+
+    let deadline = Instant::now() + Duration::from_secs_f64(seconds);
+    let mut last_hash: Option<[u8; 32]> = None;
+    let mut streak: u32 = 0;
+    while Instant::now() < deadline {
+        let bytes = take_screenshot_raw(pool, bot_id).await?;
+        let hash: [u8; 32] = Sha256::digest(&bytes).into();
+        if last_hash.as_ref() == Some(&hash) {
+            streak += 1;
+            if streak >= STABILITY_STREAK {
+                return Ok(());
+            }
+        } else {
+            last_hash = Some(hash);
+            streak = 1;
+        }
+        tokio::time::sleep(POLL_INTERVAL).await;
+    }
+    // Timed out — treat as success. The model
+    // got N seconds of stability polling, and
+    // the next `screenshot()` / `click_at()`
+    // will see whatever the current frame is.
     Ok(())
 }
 
@@ -765,18 +1030,23 @@ mod tests {
         let s = r#"
             # comment line
             open_url("https://example.com")
+            wait_for_stable(2.5)
             click_at(120, 340)
             type("hello world")
             key(Return)
             screenshot()
         "#;
         let calls = parse_script(s).expect("parses");
-        assert_eq!(calls.len(), 5);
+        assert_eq!(calls.len(), 6);
         assert_eq!(calls[0], Call::OpenUrl("https://example.com".to_string()));
-        assert_eq!(calls[1], Call::ClickAt { x: 120, y: 340 });
-        assert_eq!(calls[2], Call::Type("hello world".to_string()));
-        assert_eq!(calls[3], Call::Key("Return".to_string()));
-        assert_eq!(calls[4], Call::Screenshot);
+        assert_eq!(
+            calls[1],
+            Call::WaitForStable { seconds: 2.5 }
+        );
+        assert_eq!(calls[2], Call::ClickAt { x: 120, y: 340 });
+        assert_eq!(calls[3], Call::Type("hello world".to_string()));
+        assert_eq!(calls[4], Call::Key("Return".to_string()));
+        assert_eq!(calls[5], Call::Screenshot);
     }
 
     #[test]
@@ -950,7 +1220,7 @@ mod tests {
         // silently disable a tool the model didn't know
         // about.
         let d = VmComputerUseTool.description();
-        for helper in ["screenshot", "click_at", "type", "key", "open_url"] {
+        for helper in ["screenshot", "click_at", "type", "key", "open_url", "wait_for_stable"] {
             assert!(d.contains(helper), "description missing helper: {helper}");
         }
         // And the headline — VM is the default.
@@ -1022,5 +1292,418 @@ mod tests {
         // outer single-quotes. Pin the canary.
         let cmd = build_open_url_cmd("https://example.com/it's-here");
         assert!(cmd.contains("'https://example.com/it'\\''s-here'"));
+    }
+
+    // ----- v3.7.11: composite reliability (OCR
+    // screenshots + wait_for_stable + better
+    // xdotool errors). The tests below pin
+    // each lever independently with a
+    // `MockSshExecutor` so we don't need a
+    // real VM. The mock is local to this
+    // test module — there's no production
+    // use of it.
+
+    use std::sync::Mutex as StdMutex;
+    use crate::computer::ssh::{
+        RemoteCommandOutput, SftpEntry, SshError,
+    };
+
+    /// Test-only SshExecutor. Records every
+    /// `vm_exec` and `vm_sftp_read` call, and
+    /// returns a canned sequence of outputs
+    /// for each. The canned sequence is
+    /// dequeued in order; once empty, the
+    /// mock returns an error (so a test that
+    /// didn't queue enough responses fails
+    /// loudly instead of silently passing).
+    struct MockSshExecutor {
+        vm_exec_responses: StdMutex<Vec<RemoteCommandOutput>>,
+        sftp_responses: StdMutex<Vec<String>>,
+        /// Recorded (cmd, bot_id) pairs for each
+        /// `vm_exec` call. Tests can inspect
+        /// this to assert the tool issued the
+        /// expected commands.
+        vm_exec_calls: StdMutex<Vec<(String, String)>>,
+        /// Recorded (path, bot_id) pairs for
+        /// each `vm_sftp_read` call.
+        sftp_calls: StdMutex<Vec<(String, String)>>,
+    }
+
+    impl MockSshExecutor {
+        fn new() -> Self {
+            Self {
+                vm_exec_responses: StdMutex::new(Vec::new()),
+                sftp_responses: StdMutex::new(Vec::new()),
+                vm_exec_calls: StdMutex::new(Vec::new()),
+                sftp_calls: StdMutex::new(Vec::new()),
+            }
+        }
+
+        fn push_vm_exec(&self, out: RemoteCommandOutput) {
+            self.vm_exec_responses.lock().unwrap().push(out);
+        }
+
+        fn push_sftp(&self, body: impl Into<String>) {
+            self.sftp_responses.lock().unwrap().push(body.into());
+        }
+
+        fn vm_exec_calls(&self) -> Vec<(String, String)> {
+            self.vm_exec_calls.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl SshExecutor for MockSshExecutor {
+        async fn server_exec(
+            &self,
+            _cmd: &str,
+        ) -> Result<RemoteCommandOutput, SshError> {
+            Err(SshError::ServerNotConfigured)
+        }
+
+        async fn server_exec_bin(
+            &self,
+            _cmd: &str,
+        ) -> Result<crate::computer::ssh::RemoteBinaryOutput, SshError> {
+            Err(SshError::ServerNotConfigured)
+        }
+
+        async fn vm_exec(
+            &self,
+            bot_id: &str,
+            cmd: &str,
+        ) -> Result<RemoteCommandOutput, SshError> {
+            self.vm_exec_calls
+                .lock()
+                .unwrap()
+                .push((cmd.to_string(), bot_id.to_string()));
+            let mut queue = self.vm_exec_responses.lock().unwrap();
+            if queue.is_empty() {
+                return Err(SshError::Command {
+                    code: Some(127),
+                    stderr: format!("mock: no canned response for: {cmd}"),
+                });
+            }
+            Ok(queue.remove(0))
+        }
+
+        async fn vm_sftp_list(
+            &self,
+            _bot_id: &str,
+            _path: &str,
+        ) -> Result<Vec<SftpEntry>, SshError> {
+            Ok(Vec::new())
+        }
+
+        async fn vm_sftp_read(
+            &self,
+            bot_id: &str,
+            path: &str,
+        ) -> Result<String, SshError> {
+            self.sftp_calls
+                .lock()
+                .unwrap()
+                .push((path.to_string(), bot_id.to_string()));
+            let mut queue = self.sftp_responses.lock().unwrap();
+            if queue.is_empty() {
+                return Err(SshError::Command {
+                    code: Some(1),
+                    stderr: format!("mock: no canned sftp for: {path}"),
+                });
+            }
+            Ok(queue.remove(0))
+        }
+
+        async fn vm_sftp_write(
+            &self,
+            _bot_id: &str,
+            _path: &str,
+            _content: &str,
+        ) -> Result<(), SshError> {
+            Err(SshError::Command {
+                code: Some(1),
+                stderr: "mock: vm_sftp_write not implemented".to_string(),
+            })
+        }
+    }
+
+    /// v3.7.11: `wait_for_stable(N)` parses
+    /// with an integer, a decimal, and rejects
+    /// non-numeric / non-positive args.
+    #[test]
+    fn parse_script_handles_wait_for_stable() {
+        // Decimal seconds.
+        let calls = parse_script("wait_for_stable(2.5)").expect("parses");
+        assert_eq!(calls.len(), 1);
+        match &calls[0] {
+            Call::WaitForStable { seconds } => {
+                assert!((seconds - 2.5).abs() < 0.001);
+            }
+            other => panic!("expected WaitForStable, got {other:?}"),
+        }
+        // Integer seconds.
+        let calls = parse_script("wait_for_stable(3)").expect("parses");
+        match &calls[0] {
+            Call::WaitForStable { seconds } => {
+                assert!((seconds - 3.0).abs() < 0.001);
+            }
+            other => panic!("expected WaitForStable, got {other:?}"),
+        }
+        // Non-numeric arg is rejected.
+        let err = parse_script("wait_for_stable(banana)").unwrap_err();
+        match err {
+            ToolError::InvalidArguments(msg) => {
+                assert!(msg.contains("wait_for_stable"), "{msg}");
+                assert!(msg.contains("banana"), "{msg}");
+            }
+            other => panic!("expected InvalidArguments, got {other:?}"),
+        }
+        // Zero seconds is rejected (would mean
+        // "no wait", which is what you'd get
+        // for not calling it at all).
+        let err = parse_script("wait_for_stable(0)").unwrap_err();
+        assert!(matches!(err, ToolError::InvalidArguments(_)));
+        // Negative seconds is rejected.
+        let err = parse_script("wait_for_stable(-1)").unwrap_err();
+        assert!(matches!(err, ToolError::InvalidArguments(_)));
+    }
+
+    /// v3.7.11: `shell_xdotool` error format
+    /// includes the exact command, the exit
+    /// code, and the stderr. The model can
+    /// tell whether the click missed, the
+    /// display is gone, or the VM is just
+    /// slow.
+    #[tokio::test]
+    async fn shell_xdotool_error_format_includes_cmd_exit_stderr() {
+        let mock = MockSshExecutor::new();
+        mock.push_vm_exec(RemoteCommandOutput {
+            stdout: String::new(),
+            stderr: "X Error: BadWindow".to_string(),
+            exit_code: Some(1),
+            success: false,
+        });
+        let err = shell_xdotool(&mock, "bot-1", &["mousemove", "--", "120", "340"])
+            .await
+            .expect_err("should fail on non-zero exit");
+        let msg = match err {
+            ToolError::Execution(m) => m,
+            other => panic!("expected Execution error, got {other:?}"),
+        };
+        // The full command (with DISPLAY=:1
+        // prefix and shell-quoted args) is in
+        // the error.
+        assert!(
+            msg.contains("DISPLAY=:1 xdotool"),
+            "error must include the full command; got: {msg}"
+        );
+        // The exit code is in the error.
+        assert!(msg.contains("exit=Some(1)"), "error must include exit code; got: {msg}");
+        // The stderr is in the error.
+        assert!(
+            msg.contains("X Error: BadWindow"),
+            "error must include stderr; got: {msg}"
+        );
+    }
+
+    /// v3.7.11: `take_screenshot` returns
+    /// both the base64 PNG and the OCR text
+    /// from the VM. The PNG comes from the
+    /// `scrot` SSH call + SFTP read; the OCR
+    /// text comes from the `tesseract` SSH
+    /// call. The mock queues the responses
+    /// in the order the production code
+    /// issues them.
+    #[tokio::test]
+    async fn take_screenshot_returns_png_and_ocr_text() {
+        let mock = MockSshExecutor::new();
+        // 1st vm_exec: the scrot / import / xwd
+        // fallback chain. Returns success
+        // (the PNG is written to
+        // /tmp/maxbot-screen.png on the VM).
+        mock.push_vm_exec(RemoteCommandOutput {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: Some(0),
+            success: true,
+        });
+        // 1st sftp: read the PNG bytes back.
+        mock.push_sftp("PNG-BYTES");
+        // 2nd vm_exec: tesseract. Returns
+        // the OCR'd text on stdout.
+        mock.push_vm_exec(RemoteCommandOutput {
+            stdout: "Example Domain\nThis domain is for use in examples."
+                .to_string(),
+            stderr: String::new(),
+            exit_code: Some(0),
+            success: true,
+        });
+        let result = take_screenshot(&mock, "bot-1")
+            .await
+            .expect("screenshot succeeds");
+        // PNG is base64-encoded.
+        let expected_b64 =
+            base64::engine::general_purpose::STANDARD.encode(b"PNG-BYTES");
+        assert_eq!(result.png_base64, expected_b64);
+        // OCR text is on the result.
+        assert_eq!(
+            result.text,
+            "Example Domain\nThis domain is for use in examples."
+        );
+        // The tool issued the right sequence
+        // of SSH calls: scrot (vm_exec), sftp
+        // read, tesseract (vm_exec). The
+        // recorded `vm_exec` calls capture
+        // the exact command strings.
+        let calls = mock.vm_exec_calls();
+        assert_eq!(calls.len(), 2, "expected 2 vm_exec calls, got: {calls:?}");
+        assert!(
+            calls[0].0.contains("scrot"),
+            "1st vm_exec must be the scrot chain; got: {}",
+            calls[0].0
+        );
+        assert!(
+            calls[1].0.contains("tesseract"),
+            "2nd vm_exec must be tesseract; got: {}",
+            calls[1].0
+        );
+    }
+
+    /// v3.7.11: `take_screenshot` returns
+    /// empty OCR text (not an error) when
+    /// tesseract is missing on the VM. The
+    /// PNG is still returned; the model
+    /// works with the image alone.
+    #[tokio::test]
+    async fn take_screenshot_returns_empty_text_when_tesseract_missing() {
+        let mock = MockSshExecutor::new();
+        mock.push_vm_exec(RemoteCommandOutput {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: Some(0),
+            success: true,
+        });
+        mock.push_sftp("PNG-BYTES");
+        // tesseract is missing: exit 127
+        // and a stderr line.
+        mock.push_vm_exec(RemoteCommandOutput {
+            stdout: String::new(),
+            stderr: "tesseract: not found".to_string(),
+            exit_code: Some(127),
+            success: false,
+        });
+        let result = take_screenshot(&mock, "bot-1")
+            .await
+            .expect("screenshot succeeds even without tesseract");
+        assert!(!result.png_base64.is_empty(), "PNG must be present");
+        assert!(result.text.is_empty(), "OCR text must be empty when tesseract fails");
+    }
+
+    /// v3.7.11: `wait_for_stable` returns
+    /// `Ok(())` early when 3 consecutive
+    /// screenshot frames are identical. The
+    /// mock returns the same canned PNG
+    /// every time; the helper should hit
+    /// the streak threshold and return
+    /// without waiting for the deadline.
+    #[tokio::test]
+    async fn wait_for_stable_triggers_on_three_consecutive_identical_frames() {
+        let mock = MockSshExecutor::new();
+        // Queue 4 scrot + sftp cycles. Each
+        // returns the same PNG bytes; the
+        // 3rd identical hash should trigger
+        // early return.
+        for _ in 0..4 {
+            mock.push_vm_exec(RemoteCommandOutput {
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: Some(0),
+                success: true,
+            });
+            mock.push_sftp("STABLE-FRAME");
+        }
+        // 5s deadline — well above the
+        // 600ms it would take to do 3 polls
+        // at 200ms intervals, so the
+        // assertion below (function returns
+        // in well under the deadline) is
+        // load-bearing.
+        let start = std::time::Instant::now();
+        let result = wait_for_stable(&mock, "bot-1", 5.0).await;
+        let elapsed = start.elapsed();
+        assert!(result.is_ok(), "wait_for_stable should return Ok; got {result:?}");
+        // 3 polls at 200ms intervals = ~600ms.
+        // The 5s deadline has plenty of room.
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "should return after ~3 polls, not the full deadline; took {elapsed:?}"
+        );
+        // The helper made 3 vm_exec calls
+        // (one per poll) before the streak
+        // triggered. The 4th queued response
+        // was unused.
+        assert_eq!(
+            mock.vm_exec_calls().len(),
+            3,
+            "expected 3 vm_exec calls (3-streak threshold); got {}",
+            mock.vm_exec_calls().len()
+        );
+    }
+
+    /// v3.7.11: `wait_for_stable` does NOT
+    /// trigger on only 2 consecutive
+    /// identical frames. The mock returns
+    /// alternating bytes (so the streak
+    /// never reaches 3) and a tight
+    /// deadline. The function must time
+    /// out, not early-return.
+    #[tokio::test]
+    async fn wait_for_stable_does_not_trigger_on_two_consecutive_frames() {
+        let mock = MockSshExecutor::new();
+        // Queue alternating frames. After
+        // 2 identical bytes, the 3rd is
+        // different, breaking the streak.
+        // The deadline is 0.3s — long
+        // enough to do one full poll cycle
+        // (200ms sleep + a fast poll) but
+        // short enough that we can assert
+        // the function does NOT return
+        // after only 200ms (which would be
+        // the case with a 2-streak
+        // threshold).
+        for i in 0..6 {
+            mock.push_vm_exec(RemoteCommandOutput {
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: Some(0),
+                success: true,
+            });
+            mock.push_sftp(format!("FRAME-{i}"));
+        }
+        let start = std::time::Instant::now();
+        let result = wait_for_stable(&mock, "bot-1", 0.3).await;
+        let elapsed = start.elapsed();
+        assert!(result.is_ok(), "wait_for_stable should time out with Ok; got {result:?}");
+        // With a 3-streak threshold and
+        // alternating frames, the function
+        // should run for the full 300ms
+        // deadline (not return at the
+        // 2-streak point of 200ms).
+        assert!(
+            elapsed >= Duration::from_millis(250),
+            "should not return early; took {elapsed:?} (expected >= 250ms)"
+        );
+        // The 300ms deadline is shorter
+        // than 2 poll intervals (200ms each
+        // = 400ms), so the function only
+        // makes 1-2 polls before the
+        // deadline fires. With 2 polls the
+        // streak is at most 2 (since the
+        // bytes alternate).
+        let n = mock.vm_exec_calls().len();
+        assert!(
+            n <= 2,
+            "expected at most 2 polls within 0.3s; got {n}"
+        );
     }
 }

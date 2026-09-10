@@ -199,6 +199,24 @@ packages:
   - chromium-browser
   - xdotool
   - scrot
+  # v3.7.11 — OCR-augmented screenshots. After every
+  # `screenshot()` call, the tool runs
+  # `tesseract /tmp/maxbot-screen.png -` over the same
+  # SSH pool to extract the visible text. The model
+  # then gets both the PNG and the OCR text in the
+  # tool result, so it can target buttons / links by
+  # label instead of guessing coordinates from pixels.
+  # `tesseract-ocr` is the engine; `tesseract-ocr-eng`
+  # (the English language data) is a recommended
+  # dependency and gets pulled in automatically — the
+  # Bot's UI is overwhelmingly English-language so
+  # that's sufficient for v3.7.11. Adding other
+  # languages (e.g. `tesseract-ocr-spa`) is a
+  # future slice if Tyler starts running Bots against
+  # non-English pages. Re-provision existing VMs
+  # to pick this up (cloud-init only runs once per VM
+  # at first boot).
+  - tesseract-ocr
 runcmd:
   # v3.7.2: lightdm + xfce autologin. The noble cloud
   # image doesn't ship a display manager — without
