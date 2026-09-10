@@ -342,52 +342,78 @@ export async function computerDestroy(botId: string): Promise<void> {
   await invoke("computer_destroy", { botId });
 }
 
-/** v3.7.2: capture a single JPEG frame from the VM's
- * QEMU virtual framebuffer via `virsh screenshot` on the
- * host. The renderer polls this every 300ms to paint the
- * in-app preview; the returned bytes are wrapped in a
- * `Blob` and rendered as an `<img>`.
- *
- * The Tauri side is intentionally NOT gated on QGA. The
- * QEMU virtual VGA is always available while the domain
- * is `running`, including during cloud-init's LightDM
- * install. Gating on QGA would hide the exact boot
- * phase the preview is meant to show.
- */
-export async function computerScreenshot(botId: string): Promise<Uint8Array> {
-  const bytes = await invoke<number[] | Uint8Array>("computer_screenshot", {
-    botId,
-  });
-  // Tauri serializes `Vec<u8>` as a JSON array of
-  // numbers by default. Convert to `Uint8Array` so the
-  // renderer can wrap in a `Blob` without an extra
-  // hop. If the backend ever switches to binary
-  // transport, the cast below handles that too.
-  return bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+/** v3.7.9: screenshot now returns the natural
+ *  framebuffer dimensions alongside the JPEG bytes,
+ *  so the renderer can map pointer events to
+ *  framebuffer coordinates. */
+export interface ComputerScreenshotOutput {
+  bytes: Uint8Array;
+  width: number;
+  height: number;
 }
 
-/** v3.7.2: open an `ssh -L` tunnel from a free local
- * port in the configured VNC range to the VM's VNC
- * port on the server, then `open vnc://127.0.0.1:<port>`
- * to launch macOS `Screen Sharing`. Returns the local
- * port so the renderer's "Stop takeover" button can
- * kill the tunnel child.
+/** v3.7.2 / v3.7.9: capture a single JPEG frame from
+ *  the VM's QEMU virtual framebuffer via `virsh
+ *  screenshot` on the host. The renderer polls this
+ *  every 300ms to paint the in-app preview; the returned
+ *  bytes are wrapped in a `Blob` and rendered as an
+ *  `<img>`.
  *
- * Idempotent: returns the existing local port if a
- * tunnel is already open for this Bot. The local port
- * is allocated from `Settings.computer_vnc_local_port_range`
- * (default `5900-5999`); two Bots never collide on
- * `:5901`.
+ *  v3.7.9: the IPC contract now returns
+ *  `{bytes, width, height}`. The `Computer` type
+ *  coming from `computerGet` does NOT carry
+ *  `framebufferWidth`/`Height`; the renderer reads
+ *  them off the screenshot payload.
+ *
+ *  The Tauri side is intentionally NOT gated on QGA.
+ *  The QEMU virtual VGA is always available while the
+ *  domain is `running`, including during cloud-init's
+ *  LightDM install. Gating on QGA would hide the
+ *  exact boot phase the preview is meant to show.
  */
-export async function computerTakeoverOpen(botId: string): Promise<number> {
-  return invoke<number>("computer_takeover_open", { botId });
+export async function computerScreenshot(
+  botId: string,
+): Promise<ComputerScreenshotOutput> {
+  return invoke<ComputerScreenshotOutput>("computer_screenshot", { botId });
 }
 
-/** v3.7.2: kill the SSH tunnel child and free the
- * local port. Idempotent. macOS `Screen Sharing` will
- * lose its connection the next time it polls. */
-export async function computerTakeoverClose(botId: string): Promise<void> {
-  await invoke("computer_takeover_close", { botId });
+/** v3.7.9: the renderer calls this when the user
+ *  clicks "Drive" in the Computer panel. Sets the
+ *  per-Bot driving flag; the bot's `vm_computer_use`
+ *  tool refuses while it's true. */
+export async function computerInputOpen(
+  botId: string,
+): Promise<void> {
+  await invoke("computer_input_open", { botId });
+}
+
+/** v3.7.9: forward a single pointer / key / wheel /
+ *  type event to the VM. The Rust side renders the
+ *  event to an xdotool command and runs it on the
+ *  Bot's X11 session. */
+export type InputEvent =
+  | { type: "pointer_move"; x: number; y: number }
+  | { type: "pointer_down"; x: number; y: number; button: number }
+  | { type: "pointer_up"; x: number; y: number; button: number }
+  | { type: "wheel"; x: number; y: number; deltaY: number }
+  | { type: "key_down"; name: string }
+  | { type: "key_up"; name: string }
+  | { type: "type"; text: string };
+
+export async function computerInputEvent(
+  botId: string,
+  event: InputEvent,
+): Promise<void> {
+  await invoke("computer_input_event", { botId, event });
+}
+
+/** v3.7.9: clear the driving flag. Idempotent —
+ *  safe to call even if the panel was closed without
+ *  an explicit "Hand back". */
+export async function computerInputClose(
+  botId: string,
+): Promise<void> {
+  await invoke("computer_input_close", { botId });
 }
 
 /** Smoke-test the libvirt connection. Returns the number of
