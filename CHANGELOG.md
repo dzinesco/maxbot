@@ -4,6 +4,35 @@ All notable changes to MaxBot are documented in this file. The format
 follows [Keep a Changelog](https://keepachangelog.com/) and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## v3.0.4 — 2026-09-09
+
+### Added
+- **Console end-to-end integration test against
+  `crispy`.** A new `#[ignore]`-gated Rust integration
+  test, `console_e2e_against_crispy`, in
+  `src-tauri/src/computer/mod.rs` (sibling to
+  `provision_e2e_against_crispy`). The test provisions a
+  fresh per-Bot VM on Tyler's libvirt host
+  (192.168.0.49), waits for `running` + DHCP, then calls
+  `console_url(bot_id)` to exercise the v3.0.3 auto-
+  recover path end-to-end: it asserts the returned
+  WebSocket URL is a `ws://localhost:<port>/` and TCP-
+  probes the port to prove the proxy is actually
+  listening. This is the load-bearing CI gate that proves
+  the v3.0.3 "Console just works on first click" fix
+  holds against a real VM, not just in unit-test
+  isolation. Marked `#[ignore]` so `cargo test --lib`
+  stays fast; run on demand with:
+  ```
+  cargo test --lib console_e2e_against_crispy -- --ignored --nocapture
+  ```
+  No production code, no frontend, no daemon changes —
+  pure test infrastructure.
+
+### Changed
+- **Bumped to 3.0.4** in `package.json`,
+  `src-tauri/Cargo.toml`, and `src-tauri/tauri.conf.json`.
+
 ## v3.0.3 — 2026-09-09
 
 ### Fixed

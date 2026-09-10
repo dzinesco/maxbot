@@ -1050,11 +1050,222 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    // ----- v3.0.4: end-to-end Console smoke test against
+    // the real Linux server (Tyler's `crispy` at
+    // 192.168.0.49). This is the load-bearing CI gate that
+    // proves the v3.0.3 auto-recover fix works end-to-end —
+    // not just in unit-test isolation.
+    //
+    // This test:
+    //   1. Builds a fresh SQLite DB in a temp dir
+    //   2. Inserts a Bot row + Settings (server host, SSH user,
+    //      passphrase, default disk/RAM)
+    //   3. Constructs a ComputerManager pointed at the real server
+    //   4. Calls `provision(bot_id, opts)` and waits for the VM
+    //      to be `running` with an IP + VNC port
+    //   5. Calls `console_url(bot_id)` — exercises the
+    //      `TunnelAuthFailed` → `install_default_key_via_qga` →
+    //      retry-tunnel path that v3.0.3 added
+    //   6. Asserts the returned URL is a localhost WebSocket
+    //      (`ws://localhost:<port>/`) — never a remote host
+    //   7. TCP-probes the port to prove the WebSocket is
+    //      actually listening, not just a string the function
+    //      returned
+    //   8. Tears down the libvirt domain so the test can run
+    //      again without manual cleanup
+    //
+    // Marked `#[ignore]` so `cargo test` doesn't hit the real
+    // server in CI. Run with:
+    //
+    //   cargo test --lib console_e2e_against_crispy -- --ignored --nocapture
+    //
+    // Prereqs on the test machine:
+    //   - ssh-agent running with Tyler's `~/.ssh/id_ed25519`
+    //   - the key is authorized on `tyler@192.168.0.49`
+    //   - the server has libvirt + `/opt/maxbot/provision-vm.sh`
+    //   - passwordless sudo for tyler on the server
+    //   - the user's default pubkey (`~/.ssh/id_ed25519.pub` or
+    //     `id_rsa.pub` / `id_ecdsa.pub`) must NOT yet be in the
+    //     VM's authorized_keys — that's what triggers the
+    //     auto-recover path. Each fresh provision uses a
+    //     throwaway VM, so this is naturally the case.
+    #[tokio::test]
+    #[ignore]
+    async fn console_e2e_against_crispy() {
+        use super::libvirt::LibvirtClient;
+        use tokio::net::TcpStream;
+
+        let started = std::time::Instant::now();
+
+        // 1. Fresh DB
+        let dir = std::env::temp_dir().join(format!(
+            "maxbot-console-smoke-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("test.sqlite");
+        let db = crate::storage::db::Database::open(&path).expect("open test db");
+
+        // 2. Bot + settings. Same shape as
+        //    `provision_e2e_against_crispy`.
+        let bot_id = format!("console-smoke-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+        let now = chrono::Utc::now();
+        let bot = crate::bots::Bot {
+            id: bot_id.clone(),
+            name: "console-smoke".to_string(),
+            description: "".to_string(),
+            system_prompt: "".to_string(),
+            default_model: "MiniMax-M3".to_string(),
+            allowed_tools: vec![],
+            icon: "".to_string(),
+            color: "".to_string(),
+            avatar_color: "".to_string(),
+            last_active_at: None,
+            state: crate::bots::BotState::Idle,
+            created_at: now,
+            updated_at: now,
+        };
+        db.upsert_bot(&bot).expect("upsert bot");
+
+        let mut s = crate::storage::db::Settings::default();
+        s.computer_server_host =
+            std::env::var("MAXBOT_TEST_SERVER_HOST")
+                .unwrap_or_else(|_| "192.168.0.49".to_string());
+        s.computer_server_ssh_user =
+            std::env::var("MAXBOT_TEST_SERVER_SSH_USER")
+                .unwrap_or_else(|_| "tyler".to_string());
+        s.computer_server_ssh_key_id = "".to_string(); // OS keychain
+        s.computer_vnc_local_port_range = "5900-5999".to_string();
+        s.computer_passphrase = std::env::var("MAXBOT_TEST_PASSPHRASE")
+            .unwrap_or_else(|_| "smoke-test-passphrase-2026".to_string());
+        s.computer_default_disk_gb = 5;
+        s.computer_default_ram_mb = 1024;
+        db.save_settings(&s).expect("save settings");
+
+        // 3. Manager
+        let mgr = ComputerManager::new(&s);
+
+        // 4. Provision (~1-2 min for cloud-init + xfce +
+        //    x11vnc + qemu-guest-agent, then IP/VNC poll).
+        //    Provision polls internally and returns once
+        //    state == "running" and the IP is leased.
+        eprintln!(
+            "[smoke] provisioning bot {bot_id} on {host} (this takes 1-2 min)...",
+            host = s.computer_server_host
+        );
+        let opts = ProvisionOptions {
+            disk_gb: 5,
+            ram_mb: 1024,
+        };
+        let result = mgr.provision(&db, &bot_id, opts).await;
+        if let Err(ref e) = result {
+            eprintln!("[smoke] provision failed: {e}");
+        }
+        assert!(
+            result.is_ok(),
+            "provision failed: {:?}",
+            result.err()
+        );
+
+        // 5. DB row should be `running` with IP + VNC.
+        let row = db.get_computer(&bot_id).unwrap().expect("row exists");
+        assert_eq!(row.state, "running");
+        assert!(row.vm_ip.is_some(), "vm_ip should be set");
+        assert!(row.vnc_port.is_some(), "vnc_port should be set");
+        let domain = row.vm_name.clone();
+        let vm_ip = row.vm_ip.clone().unwrap();
+        let vnc_port = row.vnc_port.unwrap();
+        eprintln!(
+            "[smoke] provisioned: domain={domain} vm_ip={vm_ip} vnc_port={vnc_port}"
+        );
+
+        // 6. Call console_url. The VM was just provisioned
+        //    and does NOT have the user's default pubkey
+        //    authorized yet, so the first tunnel attempt
+        //    will fail with TunnelAuthFailed. v3.0.3's
+        //    auto-recover path installs the default key
+        //    via QGA and retries. The user-facing contract
+        //    is that this returns a working ws:// URL on
+        //    success — that's the v3.0.3 fix.
+        eprintln!("[smoke] calling console_url (auto-recover expected)...");
+        let url = mgr
+            .console_url(&db, &bot_id)
+            .await
+            .expect("console_url should succeed via auto-recover");
+        eprintln!("[smoke] console_url returned: {url}");
+
+        // 7. URL format. The brief specified
+        //    `ws://127.0.0.1:`, but the v3.0.3
+        //    implementation emits `ws://localhost:<port>/`
+        //    (see `VncProxy::console_url` in
+        //    `src-tauri/src/computer/vnc.rs`). The
+        //    load-bearing security property is "never a
+        //    remote host" — assert on the actual format
+        //    the code produces.
+        assert!(
+            url.starts_with("ws://localhost:"),
+            "console_url should be a localhost WebSocket, got: {url}"
+        );
+        // Strip the `ws://localhost:` prefix and the
+        // trailing `/` to extract the port.
+        let port_str = url
+            .trim_start_matches("ws://localhost:")
+            .trim_end_matches('/');
+        let port: u16 = port_str
+            .parse()
+            .expect("port should be a valid u16");
+        assert!(port > 0, "port should be non-zero, got: {port}");
+        eprintln!("[smoke] parsed WebSocket port: {port}");
+
+        // 8. TCP-probe the port. The proxy is bound on
+        //    127.0.0.1 — connecting via either the literal
+        //    IP or `localhost` works on macOS. Drop the
+        //    stream immediately; we only need to prove
+        //    the listener is up. A successful connect
+        //    against the auto-recovered tunnel is the
+        //    v3.0.3 fix proven end-to-end.
+        let stream = TcpStream::connect(("127.0.0.1", port))
+            .await
+            .expect("console port should be accepting TCP");
+        let peer = stream
+            .peer_addr()
+            .ok()
+            .map(|a| a.to_string())
+            .unwrap_or_default();
+        drop(stream);
+        eprintln!("[smoke] TCP probe to 127.0.0.1:{port} succeeded (peer={peer})");
+
+        let elapsed = started.elapsed();
+        eprintln!("[smoke] console_e2e_against_crispy passed in {elapsed:?}");
+
+        // 9. Tear down. Destroy the libvirt domain so the
+        //    test can run again without manual cleanup.
+        //    The ssh pool is wrapped in Arc; we use a
+        //    throwaway handle so we don't disturb the
+        //    manager's own pool.
+        let server = SshPool::server_config_from_settings(&s);
+        let cleanup_pool = std::sync::Arc::new(SshPool::new(server));
+        let libvirt = LibvirtClient::new();
+        let _ = libvirt
+            .destroy(&cleanup_pool, &domain)
+            .await
+            .map_err(|e| eprintln!("[smoke] destroy: {e}"));
+        let _ = libvirt
+            .undefine(&cleanup_pool, &domain)
+            .await
+            .map_err(|e| eprintln!("[smoke] undefine: {e}"));
+        eprintln!("[smoke] tore down {domain}");
+
+        drop(db);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     // ----- v3.0.3: install_default_key refactor + console_url
     // auto-recover. The QGA success path is covered by
-    // `provision_e2e_against_crispy` (which exercises the real
-    // SSH tunnel → QGA → libvirt flow); the unit tests below
-    // pin the refactor and the error paths.
+    // `provision_e2e_against_crispy` + the v3.0.4
+    // `console_e2e_against_crispy` (which exercise the
+    // real SSH tunnel → QGA → libvirt flow); the unit
+    // tests below pin the refactor and the error paths.
 
     /// v3.0.3: the helper and the public wrapper both
     /// read `$HOME` to find the user's default SSH pubkey.
