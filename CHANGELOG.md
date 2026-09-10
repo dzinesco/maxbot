@@ -4,6 +4,117 @@ All notable changes to MaxBot are documented in this file. The format
 follows [Keep a Changelog](https://keepachangelog.com/) and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## v3.7.1 — 2026-09-10
+
+### Added — Cross-machine shared_fs routing + maxbotd CORS gap (deferred follow-up)
+
+This is the **first slice after the 8-phase Grok-Bot
+roadmap closed at v3.7.0** — open-ended MaxBot work
+begins. Two related `maxbotd` follow-ups that
+were deferred from the 8-phase plan ship here as
+a single, tightly-scoped release.
+
+#### Cross-machine shared_* routing (deferred from v3.5.0)
+
+The Mac app's `shared_write` / `shared_read` /
+`shared_list` tools now route their filesystem
+ops through the daemon's new `POST /shared` route,
+so writes from the Mac app land on the daemon's
+host-side `~/bots/_shared/` (the canonical owner
+per the v3.5.0 decision) and are visible to every
+other Bot in the group — including Bots that
+happen to be running on the daemon. Before this
+slice, two Bots running on the Mac saw a local
+Mac folder while a Bot running on the daemon
+saw a different folder on `crispy`; a silent
+half-functional multi-Bot pod.
+
+- **`POST /shared` on `maxbotd`** — bearer-token
+  auth (same as the webhook + recent-runs
+  routes); body is
+  `{ verb: "read" | "write" | "list", path, content? }`
+  with `?bot_id=<bot_id>` as a query param.
+  Handler delegates to the existing
+  `shared_fs::resolve_safe_path` and shared
+  read/write/list logic — the path-safety guard
+  is identical on both sides (no re-implementation
+  in the daemon, no weakening).
+- **`Settings.maxbotd_url`** — new field on the
+  existing `Settings` struct. Default
+  `http://127.0.0.1:8443` (local-only dev path);
+  Tyler sets this to `http://crispy:8443` to
+  route through the LAN daemon. The Mac app's
+  **Settings → General → maxbotd URL** input
+  field wires it to the renderer.
+- **Daemon-unreachable fallback** — when the
+  daemon is down, the Mac app's `shared_*`
+  tools fall back to the local filesystem with
+  a `warn!` log + the `resolve_safe_path` guard
+  still applied. The user gets a clear error in
+  the chat, never a silent filesystem-divergence.
+
+#### maxbotd CORS gap (deferred from v3.1.0)
+
+The Tauri webview's `fetch()` to
+`http://crispy:8443/hooks/<bot_id>` (the Test-
+webhook button in `BotEditor.tsx`) is no longer
+blocked by the browser. The daemon now sends
+`Access-Control-Allow-Origin: *` on every
+response (including 401s and error JSONs) via a
+custom middleware on the outer `Router`. The
+manual header approach keeps the dep tree
+unchanged — no `tower-http` — and the
+middleware is wired at the outer level so the
+auth path's 401s also carry the header.
+
+#### Test coverage
+
+- `cargo test --lib`: 293/0/4 (matches actual,
+  brief stated 292 — a +1 drift from a pre-existing
+  test the brief author didn't count, not a
+  regression). New tests:
+  - `daemon_call_sends_post_with_bearer` — client
+    builds the right request, parses the response.
+  - `daemon_call_handles_non_2xx` — 4xx surfaces
+    as a clear error, no panic.
+  - `daemon_call_handles_connection_failure` —
+    daemon-down surfaces as "daemon unreachable",
+    not a panic.
+  - `daemon_client_normalizes_trailing_slash` —
+    `Settings.maxbotd_url` with a trailing slash
+    is normalized before the URL build.
+- `cargo test --bin maxbotd`: 2/2/1 (matches
+  baseline) plus new daemon-side tests:
+  - `shared_route_cors_header_present` —
+    CORS header on `/health` and on a 401.
+  - `shared_route_rejects_missing_token` — same
+    auth shape as the existing webhook test.
+  - `shared_route_write_read_list_round_trip` —
+    end-to-end: HTTP → auth → body → guard → fs.
+  - `shared_route_path_safety_guard_rejects_traversal` —
+    `..`, absolute paths, Windows drive
+    letters, backslashes all 400.
+  - `shared_route_invalid_verb` — unknown verbs
+    + write-without-content are 400, not 500.
+- `npm test`: 147 (matches baseline; no UI
+  changes that need new vitest cases).
+
+#### What this slice does NOT do
+
+- **Weaken the path-safety guard.** A future
+  slice that wants to shortcut the guard on
+  the daemon side will be loudly rejected —
+  the guard is the only thing standing between
+  a Bot's LLM and the host filesystem.
+- **Add TLS.** The daemon is still plain HTTP
+  on 8443, bearer-token auth only. Reverse-
+  proxy with TLS is documented but not
+  required.
+- **Add a webhook-style fanout.** `/shared` is
+  request/response only.
+- **Migrate to a shared-VM model.** Per-Bot VM
+  is permanent.
+
 ## v3.7.0 — 2026-09-10
 
 ### Added — Phase 8 (Connectors: Gmail / Calendar / GitHub)

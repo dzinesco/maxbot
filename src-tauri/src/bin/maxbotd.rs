@@ -47,14 +47,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::{
-    extract::{Path, Query, State as AxumState},
+    extract::{Path, Query, Request, State as AxumState},
     http::{HeaderMap, StatusCode},
-    response::IntoResponse,
+    middleware::{self, Next},
+    response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
 use chrono::Utc;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
@@ -63,6 +64,7 @@ use maxbot_lib::bots::executor::run_bot_once;
 use maxbot_lib::bots::Bot;
 use maxbot_lib::mcp::McpRegistry;
 use maxbot_lib::storage::Database;
+use maxbot_lib::tools::shared_fs::{self, SharedEntry};
 use maxbot_lib::AppState;
 
 const DEFAULT_BIND: &str = "0.0.0.0:8443";
@@ -142,7 +144,11 @@ fn print_help() {
          ROUTES:\n  \
              GET  /health                              Liveness probe (no auth)\n  \
              POST /hooks/<bot_id>                      Auth: Authorization: Bearer <token>\n  \
-             GET  /bots/<bot_id>/recent_runs?limit=N   Auth: Authorization: Bearer <token>"
+             GET  /bots/<bot_id>/recent_runs?limit=N   Auth: Authorization: Bearer <token>\n  \
+             POST /shared?bot_id=<bot_id>              Auth: Authorization: Bearer <token>\n  \
+                                                     Body: {{verb: read|write|list, path?, content?}}\n  \
+                                                     Routes the Mac app's shared_* tools to the\n  \
+                                                     daemon's ~/bots/_shared/ (v3.7.1)"
     );
 }
 
@@ -193,11 +199,20 @@ async fn main() {
     spawn_scheduler(db.clone());
 
     // HTTP server: webhook (POST) + liveness (GET /health,
-    // no auth) + per-Bot recent-runs (GET, bearer auth).
+    // no auth) + per-Bot recent-runs (GET, bearer auth) +
+    // v3.7.1 shared-folder (POST /shared, bearer auth,
+    // body-driven verb). The CORS layer is added at the
+    // outer level so every response (including 401s and
+    // error JSONs) carries `Access-Control-Allow-Origin: *`,
+    // unblocking the in-app Test-webhook button in
+    // `BotEditor.tsx` (v3.1.0) and the in-app shared_*
+    // tool calls (v3.7.1) from the same-origin webview.
     let app = Router::new()
         .route("/health", get(handle_health))
         .route("/hooks/:bot_id", post(handle_webhook))
         .route("/bots/:bot_id/recent_runs", get(handle_recent_runs))
+        .route("/shared", post(handle_shared))
+        .layer(middleware::from_fn(cors_layer))
         .with_state(state);
 
     let listener = match tokio::net::TcpListener::bind(args.bind).await {
@@ -229,6 +244,437 @@ async fn handle_health() -> impl IntoResponse {
             "version": env!("CARGO_PKG_VERSION"),
         })),
     )
+}
+
+/// v3.7.1 — CORS middleware. Adds
+/// `Access-Control-Allow-Origin: *` to every response
+/// so the Mac app's Tauri webview (a same-origin but
+/// different-port origin) and a curl / external
+/// client on the LAN can both hit the daemon routes
+/// without the browser blocking the response.
+///
+/// Why the manual header instead of `tower-http`:
+/// the daemon has a single-purpose dep tree and the
+/// only CORS concern is "let any origin through" —
+/// `tower_http::cors::CorsLayer` would pull in a
+/// new crate, a wildcard configuration, and an
+/// extra surface area for a self-hosted personal
+/// tool. A future slice can swap in a stricter
+/// origin list if the daemon is exposed beyond
+/// Tyler's LAN.
+///
+/// The middleware is wired at the outer Router
+/// level (not per-route) so 401s and error JSONs
+/// also carry the header — the browser checks the
+/// header on every response, including the ones
+/// the auth path returns.
+async fn cors_layer(req: Request, next: Next) -> Response {
+    let mut resp = next.run(req).await;
+    resp.headers_mut().insert(
+        axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN,
+        axum::http::HeaderValue::from_static("*"),
+    );
+    resp
+}
+
+// =====================================================================
+//  v3.7.1 — Shared-folder route (POST /shared)
+// =====================================================================
+//
+// Body shape (JSON):
+//   {
+//     "verb":    "read" | "write" | "list",
+//     "path":    "relative/path/under/shared/",  // string, optional for list
+//     "content": "..."                           // required for "write"
+//   }
+//
+// Auth: same `Authorization: Bearer <token>` as the
+// webhook + recent-runs routes. The token is verified
+// against the per-Bot `daemon_tokens.bot_id` row.
+//
+// The route delegates to the same `resolve_safe_path`
+// + read/write/list code that the in-app
+// `tools::shared_fs` tool uses today. The guard is
+// the load-bearing piece — it refuses absolute paths,
+// `..`, Windows drive letters, UNC shares,
+// backslashes, and symlink escapes. A single
+// re-implementation in the daemon would be a
+// second source of truth and a path to "weakened in
+// one place" regressions; instead, the daemon
+// calls the same public functions the tool uses.
+//
+// The path-safety guard's job is the only thing
+// standing between a Bot's LLM and the host
+// filesystem, so a future slice that wants to
+// shortcut the guard on the daemon side will be
+// loudly rejected. The guard is non-negotiable.
+
+/// v3.7.1 — Body for `POST /shared`. `verb` picks the
+/// operation; `path` is the relative path under the
+/// shared root; `content` is the new file body for
+/// `write`. The `bot_id` is sent as a query param so
+/// the same token-lookup machinery the other
+/// authenticated routes use can find the per-Bot
+/// token row without parsing it out of the JSON body.
+#[derive(Deserialize)]
+struct SharedRequest {
+    verb: String,
+    #[serde(default)]
+    path: String,
+    #[serde(default)]
+    content: Option<String>,
+}
+
+/// v3.7.1 — Query string for `POST /shared`. `bot_id`
+/// pins the token lookup (one Bot per route call).
+#[derive(Deserialize)]
+struct SharedParams {
+    bot_id: String,
+}
+
+/// v3.7.1 — `POST /shared` handler. The verb in the
+/// body picks `read`, `write`, or `list`. The auth
+/// path mirrors `handle_recent_runs` exactly — a
+/// missing token, a wrong token, and a missing
+/// `daemon_tokens` row all surface as 401 with a
+/// JSON body so the renderer can show a meaningful
+/// error.
+async fn handle_shared(
+    AxumState(state): AxumState<Arc<DaemonState>>,
+    headers: HeaderMap,
+    Query(params): Query<SharedParams>,
+    Json(body): Json<SharedRequest>,
+) -> Response {
+    // 1. Bearer auth. Same shape as the other
+    //    authenticated routes; we don't re-implement
+    //    the verification loop here.
+    let token = match extract_bearer(&headers) {
+        Some(t) => t,
+        None => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({ "error": "missing or malformed Authorization header" })),
+            )
+                .into_response();
+        }
+    };
+    let db = state.db.clone();
+    let bot_id_for_auth = params.bot_id.clone();
+    let stored = match tokio::task::spawn_blocking(move || {
+        db.get_daemon_token(&bot_id_for_auth)
+    })
+    .await
+    {
+        Ok(Ok(Some(t))) if t == token => t,
+        Ok(Ok(Some(_))) => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({ "error": "invalid token" })),
+            )
+                .into_response();
+        }
+        Ok(Ok(None)) => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({ "error": "no daemon token configured for this bot" })),
+            )
+                .into_response();
+        }
+        Ok(Err(e)) => {
+            log::error!("maxbotd: shared token lookup db error: {e}");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": "db error" })),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            log::error!("maxbotd: shared token lookup task panicked: {e}");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": "internal error" })),
+            )
+                .into_response();
+        }
+    };
+    drop(stored);
+
+    // 2. Dispatch on the verb. The shared root is
+    //    resolved here so the same `MAXBOT_SHARED_DIR`
+    //    override used by the in-app tool is honored.
+    let root = shared_fs::shared_root();
+    match body.verb.as_str() {
+        "list" => handle_shared_list(&root, &body.path).await,
+        "read" => handle_shared_read(&root, &body.path).await,
+        "write" => match body.content.as_deref() {
+            Some(c) => handle_shared_write(&root, &body.path, c).await,
+            None => (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "write requires `content` in body" })),
+            )
+                .into_response(),
+        },
+        other => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": format!("unknown verb: {other}") })),
+        )
+            .into_response(),
+    }
+}
+
+/// v3.7.1 — `POST /shared` `list` verb. Resolves
+/// `path` through the path-safety guard and returns
+/// the directory listing as `[{ name, is_file, size,
+/// modified_at }]`. Mirrors the in-app
+/// `SharedListTool::execute` body but with the
+/// daemon's response shape (the in-app tool
+/// pretty-prints JSON; the daemon returns the raw
+/// entries array so the Mac app can render its own
+/// UI).
+async fn handle_shared_list(root: &std::path::Path, path: &str) -> Response {
+    // v3.7.1 — treat an empty path as "list the
+    // shared root itself". The in-app tool uses an
+    // empty `prefix` for the same purpose, but
+    // `resolve_safe_path` rejects empty input to
+    // keep the security surface tight. The list
+    // verb is read-only, so accepting the empty
+    // path here can't widen the attack surface
+    // beyond what the user already has via the
+    // Mac app's local-fs fallback.
+    let resolved = if path.trim().is_empty() {
+        // Canonicalize the root so the readdir
+        // call uses the same path the on-disk
+        // check below will compare against (the
+        // macOS `/var → /private/var` symlink).
+        root.canonicalize().unwrap_or_else(|_| root.to_path_buf())
+    } else {
+        match shared_fs::resolve_safe_path(root, path) {
+            Ok(p) => p,
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({ "error": format!("shared_list refused: {e}") })),
+                )
+                    .into_response();
+            }
+        }
+    };
+    let dir = match tokio::fs::metadata(&resolved).await {
+        Ok(m) if m.is_dir() => resolved,
+        Ok(_) => match resolved.parent() {
+            Some(p) => p.to_path_buf(),
+            None => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({ "error": "path has no parent" })),
+                )
+                    .into_response();
+            }
+        },
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": format!("stat failed: {e}") })),
+            )
+                .into_response();
+        }
+    };
+    let mut entries: Vec<SharedEntry> = Vec::new();
+    let mut read_dir = match tokio::fs::read_dir(&dir).await {
+        Ok(rd) => rd,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": format!("readdir failed: {e}") })),
+            )
+                .into_response();
+        }
+    };
+    while let Some(entry) = match read_dir.next_entry().await {
+        Ok(e) => e,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": format!("readdir entry: {e}") })),
+            )
+                .into_response();
+        }
+    } {
+        let name = entry.file_name().to_string_lossy().to_string();
+        let m = entry.metadata().await.ok();
+        let (is_file, size, modified_at) = match m {
+            Some(md) => {
+                let mtime = md
+                    .modified()
+                    .ok()
+                    .and_then(|t| {
+                        let dt: chrono::DateTime<chrono::Utc> = t.into();
+                        Some(dt.to_rfc3339())
+                    })
+                    .unwrap_or_default();
+                (md.is_file(), md.len(), mtime)
+            }
+            None => (false, 0, String::new()),
+        };
+        entries.push(SharedEntry {
+            name,
+            is_file,
+            size,
+            modified_at,
+        });
+    }
+    // Stable ordering: directories first, then files,
+    // both alphabetically. Same ordering the in-app
+    // tool uses so the Mac app sees the same shape
+    // whether the request landed on the daemon or the
+    // local fallback.
+    entries.sort_by(|a, b| {
+        b.is_file
+            .cmp(&a.is_file)
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    (StatusCode::OK, Json(json!({ "entries": entries }))).into_response()
+}
+
+/// v3.7.1 — `POST /shared` `read` verb. Resolves
+/// `path` through the path-safety guard, then reads
+/// the file as a UTF-8 string. Mirrors the in-app
+/// `SharedReadTool::execute` body for the regular
+/// file case (directories are not reachable through
+/// `read` on the daemon — `list` is the verb for
+/// that). A 1 MB read cap mirrors the in-app tool.
+async fn handle_shared_read(root: &std::path::Path, path: &str) -> Response {
+    let resolved = match shared_fs::resolve_safe_path(root, path) {
+        Ok(p) => p,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": format!("shared_read refused: {e}") })),
+            )
+                .into_response();
+        }
+    };
+    let meta = match tokio::fs::metadata(&resolved).await {
+        Ok(m) => m,
+        Err(e) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "error": format!("stat failed: {e}") })),
+            )
+                .into_response();
+        }
+    };
+    if meta.is_dir() {
+        // The daemon's `read` verb is for files; the
+        // Mac app's `shared_read` tool also handles
+        // directories (by listing them). We return
+        // a clear 400 here so a client that POSTs
+        // `verb: "read"` against a directory gets a
+        // useful error instead of a confusing 200
+        // with directory metadata.
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "path is a directory; use `list`" })),
+        )
+            .into_response();
+    }
+    if !meta.is_file() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "path is not a regular file" })),
+        )
+            .into_response();
+    }
+    if meta.len() > 1_048_576 {
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(json!({
+                "error": format!(
+                    "file is {} bytes (over 1 MB); refusing to read fully",
+                    meta.len()
+                )
+            })),
+        )
+            .into_response();
+    }
+    match tokio::fs::read_to_string(&resolved).await {
+        Ok(body) => (
+            StatusCode::OK,
+            Json(json!({ "content": body, "size": body.len() })),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": format!("read failed: {e}") })),
+        )
+            .into_response(),
+    }
+}
+
+/// v3.7.1 — `POST /shared` `write` verb. Resolves
+/// `path` through the path-safety guard, creates
+/// the parent directory if needed, then writes
+/// `content` as UTF-8. Mirrors the in-app
+/// `SharedWriteTool::execute` body exactly so the
+/// on-disk shape is identical whether the request
+/// landed on the daemon or the local fallback.
+async fn handle_shared_write(
+    root: &std::path::Path,
+    path: &str,
+    content: &str,
+) -> Response {
+    let resolved = match shared_fs::resolve_safe_path(root, path) {
+        Ok(p) => p,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": format!("shared_write refused: {e}") })),
+            )
+                .into_response();
+        }
+    };
+    // Canonicalize the root before the prefix check
+    // — on macOS the tempdir lives under
+    // `/var/folders/...` which is a symlink to
+    // `/private/var/folders/...`. The `resolved`
+    // path above is already canonicalized; the raw
+    // `root` from `shared_root()` is not, so a
+    // component-wise `starts_with` would fail to
+    // recognize `/private/var/.../detective` as
+    // under `/var/...`.
+    let canonical_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    if let Some(parent) = resolved.parent() {
+        if !parent.starts_with(&canonical_root) {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "parent escapes the shared folder" })),
+            )
+                .into_response();
+        }
+        if let Err(e) = tokio::fs::create_dir_all(parent).await {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": format!("mkdir failed: {e}") })),
+            )
+                .into_response();
+        }
+    }
+    if let Err(e) = tokio::fs::write(&resolved, content.as_bytes()).await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": format!("write failed: {e}") })),
+        )
+            .into_response();
+    }
+    (
+        StatusCode::OK,
+        Json(json!({
+            "ok": true,
+            "bytes_written": content.len(),
+            "path": resolved.display().to_string(),
+        })),
+    )
+        .into_response()
 }
 
 /// v3.1.0 — Per-Bot recent-runs. Bearer-authenticated like
@@ -946,6 +1392,424 @@ mod tests {
         assert!(persisted, "bot_runs row was not persisted within 30s");
 
         server.abort();
+    }
+
+    // =====================================================================
+    //  v3.7.1 — Shared-folder (POST /shared) tests
+    // =====================================================================
+    //
+    // These tests exercise the new `/shared` route
+    // end-to-end: HTTP layer, auth, body parsing,
+    // path-safety guard, and the on-disk write/read/
+    // list round-trip. The shared root is pointed at
+    // a tempdir via `MAXBOT_SHARED_DIR` so the tests
+    // don't touch the real `~/bots/_shared/`.
+
+    /// v3.7.1 — Serialize env-var manipulations
+    /// across the shared-folder tests.
+    /// `MAXBOT_SHARED_DIR` is process-global, and the
+    /// daemon reads it on every request via
+    /// `shared_fs::shared_root()`. If two tests run
+    /// in parallel, the second test's `set_var` can
+    /// land while the first test's spawned server is
+    /// still serving a request, and the first test's
+    /// request then sees the second test's tempdir.
+    /// A static `Mutex` around `set_var` + the
+    /// matching `restore_shared_dir` serializes the
+    /// per-test window cleanly. The existing
+    /// `tests` (token round-trip, webhook) don't
+    /// touch this env var so they're unaffected.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Helper: hold the env lock for the duration
+    /// of the calling test. Acquired once at the
+    /// top of each shared-folder test; released
+    /// when the returned guard is dropped at the
+    /// end of the test function.
+    fn lock_env() -> std::sync::MutexGuard<'static, ()> {
+        ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Build a daemon router pinned to a tempdir
+    /// shared root. Caller spawns the listener + server
+    /// and aborts the server on drop.
+    async fn spawn_test_daemon(
+        db: Arc<Database>,
+    ) -> (
+        std::net::SocketAddr,
+        tokio::task::JoinHandle<()>,
+        tempfile::TempDir,
+    ) {
+        // Each test gets its own tempdir so parallel
+        // runs don't collide. `MAXBOT_SHARED_DIR` is
+        // read by `shared_fs::shared_root()` at call
+        // time, not at startup, so swapping it here
+        // works without a daemon restart.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        // SAFETY: tests are single-threaded for env
+        // mutations; the surrounding tokio test runs
+        // to completion before another test sets the
+        // env. The cleanup at the end of each test
+        // restores the saved value.
+        unsafe {
+            std::env::set_var("MAXBOT_SHARED_DIR", tmp.path());
+        }
+        let state = Arc::new(DaemonState { db: db.clone() });
+        let app = Router::new()
+            .route("/health", get(handle_health))
+            .route("/hooks/:bot_id", post(handle_webhook))
+            .route("/bots/:bot_id/recent_runs", get(handle_recent_runs))
+            .route("/shared", post(handle_shared))
+            .layer(middleware::from_fn(cors_layer))
+            .with_state(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("local_addr");
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        (addr, server, tmp)
+    }
+
+    /// Restore the previous `MAXBOT_SHARED_DIR` (or
+    /// unset it) at the end of a test so a follow-up
+    /// test starts from a clean slate.
+    fn restore_shared_dir(saved: Option<String>) {
+        // SAFETY: see above.
+        unsafe {
+            match saved {
+                Some(v) => std::env::set_var("MAXBOT_SHARED_DIR", v),
+                None => std::env::remove_var("MAXBOT_SHARED_DIR"),
+            }
+        }
+    }
+
+    /// v3.7.1 — Insert a minimal test bot so the
+    /// `daemon_tokens` FK constraint is satisfied
+    /// (a Bot row must exist before a token row
+    /// can be inserted for it). Mirrors the
+    /// `Bot { ... }` literal the existing token
+    /// tests use. Idempotent — calling with an
+    /// existing id overwrites the row.
+    fn seed_test_bot(db: &Database, bot_id: &str) {
+        use maxbot_lib::bots::{Bot, BotState};
+        let now = chrono::Utc::now();
+        let bot = Bot {
+            id: bot_id.to_string(),
+            name: format!("test-{bot_id}"),
+            description: String::new(),
+            system_prompt: String::new(),
+            default_model: "minimax-m3".to_string(),
+            allowed_tools: vec![],
+            icon: String::new(),
+            color: String::new(),
+            avatar_color: String::new(),
+            created_at: now,
+            updated_at: now,
+            state: BotState::Idle,
+            last_active_at: None,
+            computer_use: "vm".to_string(),
+            connectors_enabled: String::new(),
+        };
+        db.upsert_bot(&bot).expect("upsert test bot");
+    }
+
+    /// `shared_route_cors_header_present` — every
+    /// response (including 401s) carries
+    /// `Access-Control-Allow-Origin: *` so the
+    /// in-app webview doesn't block the request.
+    #[tokio::test]
+    async fn shared_route_cors_header_present() {
+        let _env_guard = lock_env();
+        let saved = std::env::var_os("MAXBOT_SHARED_DIR").map(|s| s.to_string_lossy().to_string());
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("cors.db");
+        let db = Arc::new(Database::open(&path).expect("open"));
+        let (addr, server, _root) = spawn_test_daemon(db).await;
+
+        let client = reqwest::Client::new();
+        // /health has no auth — even a successful
+        // response should carry the CORS header.
+        let resp = client
+            .get(format!("http://{addr}/health"))
+            .send()
+            .await
+            .expect("send health");
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers()
+                .get(axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                .map(|v| v.to_str().unwrap_or("")),
+            Some("*"),
+            "CORS header missing on /health"
+        );
+        // /shared with no Authorization header —
+        // 401 path, and the CORS header is still
+        // present.
+        let resp = client
+            .post(format!("http://{addr}/shared?bot_id=any"))
+            .json(&json!({ "verb": "list", "path": "" }))
+            .send()
+            .await
+            .expect("send shared no-auth");
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            resp.headers()
+                .get(axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                .map(|v| v.to_str().unwrap_or("")),
+            Some("*"),
+            "CORS header missing on 401"
+        );
+
+        server.abort();
+        restore_shared_dir(saved);
+    }
+
+    /// `shared_route_rejects_missing_token` — same
+    /// shape as `webhook_auth_rejects_missing_token`,
+    /// applied to the new route.
+    #[tokio::test]
+    async fn shared_route_rejects_missing_token() {
+        let _env_guard = lock_env();
+        let saved = std::env::var_os("MAXBOT_SHARED_DIR").map(|s| s.to_string_lossy().to_string());
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("shared-401.db");
+        let db = Arc::new(Database::open(&path).expect("open"));
+        let (addr, server, _root) = spawn_test_daemon(db).await;
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("http://{addr}/shared?bot_id=any"))
+            .json(&json!({ "verb": "list", "path": "" }))
+            .send()
+            .await
+            .expect("send");
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+        // Malformed Authorization header → 401.
+        let resp = client
+            .post(format!("http://{addr}/shared?bot_id=any"))
+            .header("Authorization", "Basic abc")
+            .json(&json!({ "verb": "list", "path": "" }))
+            .send()
+            .await
+            .expect("send malformed");
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+        server.abort();
+        restore_shared_dir(saved);
+    }
+
+    /// `shared_route_write_read_list_round_trip` —
+    /// end-to-end happy path. `shared_write` puts a
+    /// file in the tempdir shared root; `shared_list`
+    /// sees it; `shared_read` returns the body. All
+    /// three calls authenticate with the per-Bot
+    /// token and dispatch on the verb.
+    #[tokio::test]
+    async fn shared_route_write_read_list_round_trip() {
+        let _env_guard = lock_env();
+        let saved = std::env::var_os("MAXBOT_SHARED_DIR").map(|s| s.to_string_lossy().to_string());
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("shared-rrt.db");
+        let db = Arc::new(Database::open(&path).expect("open"));
+        // Seed a Bot row first so the daemon_tokens
+        // FK constraint is satisfied.
+        seed_test_bot(&db, "bot-shared");
+        // Then seed a token for the test bot.
+        db.set_daemon_token("bot-shared", "tok-shared")
+            .expect("set token");
+        let (addr, server, root) = spawn_test_daemon(db.clone()).await;
+
+        let client = reqwest::Client::new();
+
+        // 1. Write a file under the shared root.
+        let body = json!({
+            "verb": "write",
+            "path": "detective/findings.json",
+            "content": "{\"answer\": 42}"
+        });
+        let resp = client
+            .post(format!("http://{addr}/shared?bot_id=bot-shared"))
+            .header("Authorization", "Bearer tok-shared")
+            .json(&body)
+            .send()
+            .await
+            .expect("send write");
+        let status = resp.status();
+        let body_text = resp.text().await.unwrap_or_default();
+        if status != StatusCode::OK {
+            panic!("write failed: status={status} body={body_text}");
+        }
+        let json: serde_json::Value = serde_json::from_str(&body_text)
+            .expect("parse write body as json");
+        assert_eq!(json.get("ok").and_then(|v| v.as_bool()), Some(true));
+
+        // 2. Confirm the file landed on disk. We
+        //    canonicalize the on-disk path so the
+        //    macOS `/var → /private/var` symlink
+        //    doesn't trip the test (the daemon
+        //    canonicalizes its side via
+        //    `resolve_safe_path`; the test reads
+        //    from the uncanonicalized tempdir).
+        let on_disk = root.path().join("detective").join("findings.json");
+        let on_disk_canon = on_disk
+            .canonicalize()
+            .unwrap_or_else(|e| panic!("canonicalize {} failed: {e}", on_disk.display()));
+        let s = std::fs::read_to_string(&on_disk_canon).expect("read on disk");
+        assert_eq!(s, "{\"answer\": 42}");
+
+        // 3. List the root and confirm the new
+        //    directory (`detective`) shows up.
+        //    The in-app tool's behavior: an empty
+        //    `prefix` lists the root, a non-empty
+        //    `prefix` lists a subdirectory. The
+        //    daemon's `/shared` route mirrors both.
+        let resp = client
+            .post(format!("http://{addr}/shared?bot_id=bot-shared"))
+            .header("Authorization", "Bearer tok-shared")
+            .json(&json!({ "verb": "list", "path": "" }))
+            .send()
+            .await
+            .expect("send list");
+        assert_eq!(resp.status(), StatusCode::OK);
+        let list_json: serde_json::Value = resp.json().await.expect("json");
+        let entries = list_json
+            .get("entries")
+            .and_then(|v| v.as_array())
+            .expect("entries array");
+        let names: Vec<&str> = entries
+            .iter()
+            .filter_map(|e| e.get("name").and_then(|n| n.as_str()))
+            .collect();
+        assert!(
+            names.contains(&"detective"),
+            "expected `detective` in root listing, got: {names:?}"
+        );
+
+        // 4. Read the file back. We use `read` to
+        //    verify the file is readable as a
+        //    regular file (not as a directory) and
+        //    contains the right body. We avoid the
+        //    in-app tool's `path: "detective"` list
+        //    form here because the macOS
+        //    canonicalize/uncanny-canonicalize dance
+        //    in the test's read path can mask
+        //    issues; the `read` verb uses the same
+        //    `resolve_safe_path` machinery and is
+        //    sufficient for the end-to-end test.
+        let resp = client
+            .post(format!("http://{addr}/shared?bot_id=bot-shared"))
+            .header("Authorization", "Bearer tok-shared")
+            .json(&json!({ "verb": "read", "path": "detective/findings.json" }))
+            .send()
+            .await
+            .expect("send read");
+        assert_eq!(resp.status(), StatusCode::OK);
+        let read_json: serde_json::Value = resp.json().await.expect("json");
+        assert_eq!(
+            read_json.get("content").and_then(|v| v.as_str()),
+            Some("{\"answer\": 42}")
+        );
+
+        server.abort();
+        restore_shared_dir(saved);
+    }
+
+    /// `shared_route_path_safety_guard_rejects_traversal` —
+    /// the load-bearing path-safety guard is identical
+    /// to the in-app tool's guard. `..` and absolute
+    /// paths must be rejected with 400. A regression
+    /// here is a host-filesystem read/write primitive
+    /// for any Bot.
+    #[tokio::test]
+    async fn shared_route_path_safety_guard_rejects_traversal() {
+        let _env_guard = lock_env();
+        let saved = std::env::var_os("MAXBOT_SHARED_DIR").map(|s| s.to_string_lossy().to_string());
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("shared-trav.db");
+        let db = Arc::new(Database::open(&path).expect("open"));
+        seed_test_bot(&db, "bot-guard");
+        db.set_daemon_token("bot-guard", "tok-guard")
+            .expect("set token");
+        let (addr, server, _root) = spawn_test_daemon(db.clone()).await;
+
+        let client = reqwest::Client::new();
+        for bad_path in [
+            "../escape.txt",
+            "/etc/passwd",
+            "C:\\Windows\\System32",
+            "..\\backslash",
+        ] {
+            let resp = client
+                .post(format!("http://{addr}/shared?bot_id=bot-guard"))
+                .header("Authorization", "Bearer tok-guard")
+                .json(&json!({
+                    "verb": "write",
+                    "path": bad_path,
+                    "content": "nope"
+                }))
+                .send()
+                .await
+                .expect("send");
+            assert_eq!(
+                resp.status(),
+                StatusCode::BAD_REQUEST,
+                "expected 400 for {bad_path}, got {}",
+                resp.status()
+            );
+            let body: serde_json::Value = resp.json().await.expect("json");
+            let err = body
+                .get("error")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            assert!(
+                err.contains("refused") || err.contains("absolute") || err.contains("backslash") || err.contains("traversal"),
+                "expected refusal for {bad_path}, got: {err}"
+            );
+        }
+
+        server.abort();
+        restore_shared_dir(saved);
+    }
+
+    /// `shared_route_invalid_verb` — unknown verbs
+    /// return 400 instead of crashing the daemon.
+    #[tokio::test]
+    async fn shared_route_invalid_verb() {
+        let _env_guard = lock_env();
+        let saved = std::env::var_os("MAXBOT_SHARED_DIR").map(|s| s.to_string_lossy().to_string());
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("shared-verb.db");
+        let db = Arc::new(Database::open(&path).expect("open"));
+        seed_test_bot(&db, "bot-verb");
+        db.set_daemon_token("bot-verb", "tok-verb")
+            .expect("set token");
+        let (addr, server, _root) = spawn_test_daemon(db.clone()).await;
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("http://{addr}/shared?bot_id=bot-verb"))
+            .header("Authorization", "Bearer tok-verb")
+            .json(&json!({ "verb": "delete", "path": "foo" }))
+            .send()
+            .await
+            .expect("send");
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // Write without `content` is also a 400.
+        let resp = client
+            .post(format!("http://{addr}/shared?bot_id=bot-verb"))
+            .header("Authorization", "Bearer tok-verb")
+            .json(&json!({ "verb": "write", "path": "foo.txt" }))
+            .send()
+            .await
+            .expect("send no-content");
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        server.abort();
+        restore_shared_dir(saved);
     }
 }
 

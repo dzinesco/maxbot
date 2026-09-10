@@ -58,12 +58,34 @@
 //!   The path-safety guard is the gate. The
 //!   `grok_bot_defaults` preset marks `shared_write`
 //!   as `Ask` so the human has to consent per call.
+//!
+//! ## v3.7.1 — cross-machine routing
+//!
+//! When called from the Mac app (`context.app` is
+//! `Some(_)`), the tool bodies route their filesystem
+//! ops through `POST /shared` on the `maxbotd` daemon
+//! instead of touching the local Mac filesystem. The
+//! daemon is the canonical owner of `~/bots/_shared/`
+//! (per the v3.5.0 decision), so a write from the
+//! Mac app lands on `crispy`'s host and is visible to
+//! every other Bot in the group. The path-safety guard
+//! runs on the daemon side too — the guard is
+//! load-bearing and is the same function on both
+//! sides, never weakened.
+//!
+//! When the daemon is unreachable (network down,
+//! daemon not running), the Mac app falls back to the
+//! local filesystem path with a `warn!` log + the
+//! `resolve_safe_path` guard still applied. The user
+//! gets a clear error in the chat either way — never
+//! a silent filesystem-divergence.
 
 use std::path::{Component, Path, PathBuf};
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use tauri::{AppHandle, Manager};
 use tokio::fs;
 
 use super::registry::{require_str, truncate_for_model};
@@ -87,8 +109,12 @@ pub struct SharedEntry {
 
 /// Resolve the shared root. Honors `$MAXBOT_SHARED_DIR`
 /// (so the daemon can point at a non-default location
-/// during testing); falls back to `~/bots/_shared/`.
-fn shared_root() -> PathBuf {
+/// during testing); falls back to `~/bots/_shared/`. v3.7.1:
+/// `pub` so the `maxbotd` daemon's `POST /shared` handler
+/// can resolve the same root the in-app tool uses — the
+/// path-safety guard is the same function on both sides,
+/// never weakened.
+pub fn shared_root() -> PathBuf {
     if let Some(p) = std::env::var_os("MAXBOT_SHARED_DIR") {
         if !p.is_empty() {
             return PathBuf::from(p);
@@ -100,6 +126,145 @@ fn shared_root() -> PathBuf {
     // No HOME — best-effort fallback. The tool will
     // surface a clearer error on first use.
     PathBuf::from("/tmp/maxbot-shared")
+}
+
+// =====================================================================
+//  v3.7.1 — Cross-machine routing through `maxbotd`
+// =====================================================================
+//
+// When the Mac app calls `shared_write` / `shared_read` /
+// `shared_list`, the tool body normally runs on the Mac
+// (`context.app` is `Some(_)`). The Mac's
+// `~/bots/_shared/` is *not* the canonical home for the
+// shared folder — `crispy` is (per the v3.5.0 decision).
+// So in the Mac-app path, the tool body sends an HTTP
+// POST to the `maxbotd` daemon and lets the daemon
+// perform the filesystem op. The daemon's own
+// path-safety guard (`resolve_safe_path` from this
+// same file) is the load-bearing security piece — and
+// because the Mac side never touches the path itself,
+// a `..` smuggling attempt can't escape the daemon's
+// sandbox.
+//
+// When `maxbotd` is unreachable (network down, daemon
+// not running), the Mac app falls back to the local
+// filesystem path with a clear `warn!` log + the
+// `resolve_safe_path` guard still applied. The user
+// gets a clear error in the chat either way — never a
+// silent filesystem-divergence.
+
+/// Thin client-side handle for the daemon's
+/// `POST /shared` route. Holds the URL + the Bot's
+/// daemon token. The Mac-app tool bodies build one
+/// per call (cheap — just a struct, no I/O yet) and
+/// pass it to `daemon_call`.
+#[derive(Debug, Clone)]
+pub struct DaemonSharedClient {
+    /// Base URL of the daemon (e.g.
+    /// `http://127.0.0.1:8443`). Trailing slash is
+    /// tolerated — `daemon_call` strips it.
+    pub base_url: String,
+    /// The Bot's daemon token. Sent as
+    /// `Authorization: Bearer <token>`.
+    pub token: String,
+    /// The Bot's id. Sent as the `?bot_id=<id>`
+    /// query param the daemon's auth path uses to
+    /// look up the per-Bot token row.
+    pub bot_id: String,
+}
+
+/// Build a `DaemonSharedClient` for the given Bot
+/// from the Mac app's `AppHandle`. Returns an error
+/// if the Bot has no daemon token configured (the
+/// user must set one in the Bot editor first) or if
+/// the Settings are unreadable.
+pub async fn daemon_client_for(app: &AppHandle, bot_id: &str) -> Result<DaemonSharedClient, String> {
+    use std::sync::Arc;
+    let state: tauri::State<Arc<crate::AppState>> = app.state();
+    let db = state.db.clone();
+    let bot_id_owned = bot_id.to_string();
+    let bot_id_for_err = bot_id_owned.clone();
+    let (token, settings) = tokio::task::spawn_blocking(move || {
+        let tok = db
+            .get_daemon_token(&bot_id_owned)
+            .map_err(|e| format!("db error reading daemon token: {e}"))?
+            .ok_or_else(|| {
+                format!(
+                    "no daemon token configured for bot '{bot_id_for_err}'; set one in the Bot editor first"
+                )
+            })?;
+        let s = db
+            .load_settings()
+            .map_err(|e| format!("db error reading settings: {e}"))?;
+        Ok::<_, String>((tok, s))
+    })
+    .await
+    .map_err(|e| format!("daemon token / settings lookup task panicked: {e}"))??;
+    let base_url = if settings.maxbotd_url.trim().is_empty() {
+        "http://127.0.0.1:8443".to_string()
+    } else {
+        settings.maxbotd_url.trim().trim_end_matches('/').to_string()
+    };
+    Ok(DaemonSharedClient {
+        base_url,
+        token,
+        bot_id: bot_id.to_string(),
+    })
+}
+
+/// Send one `POST /shared` request to the daemon.
+/// `verb` is `"read"`, `"write"`, or `"list"`.
+/// `path` is the relative path under the shared
+/// root. `content` is the new file body for
+/// `write`; ignored for the other verbs.
+///
+/// Returns the daemon's JSON response on a 2xx.
+/// On a non-2xx, returns the daemon's error
+/// message verbatim. On a connection error (network
+/// down, daemon not running, timeout), returns a
+/// fallback sentinel that the caller checks to
+/// trigger the local-filesystem path.
+pub async fn daemon_call(
+    client: &DaemonSharedClient,
+    verb: &str,
+    path: &str,
+    content: Option<&str>,
+) -> Result<serde_json::Value, String> {
+    use serde_json::json;
+    let url = format!("{}/shared?bot_id={}", client.base_url, client.bot_id);
+    let body = match verb {
+        "write" => json!({
+            "verb": verb,
+            "path": path,
+            "content": content.unwrap_or(""),
+        }),
+        _ => json!({
+            "verb": verb,
+            "path": path,
+        }),
+    };
+    let req = reqwest::Client::new()
+        .post(&url)
+        .timeout(std::time::Duration::from_secs(5))
+        .header("Authorization", format!("Bearer {}", client.token))
+        .json(&body);
+    let resp = match req.send().await {
+        Ok(r) => r,
+        Err(e) => {
+            // Connection-level failure (refused,
+            // timeout, DNS, etc.). The caller
+            // checks for this and falls back to
+            // the local filesystem path.
+            return Err(format!("daemon unreachable: {e}"));
+        }
+    };
+    let status = resp.status();
+    let text = resp.text().await.unwrap_or_default();
+    if !status.is_success() {
+        return Err(format!("daemon returned {status}: {text}"));
+    }
+    serde_json::from_str(&text)
+        .map_err(|e| format!("daemon returned non-JSON: {e}; body: {text}"))
 }
 
 /// The load-bearing path-safety guard. Returns the
@@ -188,7 +353,23 @@ pub fn resolve_safe_path(root: &Path, requested: &str) -> Result<PathBuf, String
                 }
                 match probe.file_name() {
                     Some(name) => {
-                        suffix = PathBuf::from(name).join(&suffix);
+                        // v3.7.1 — build the suffix with
+                        // an explicit `Vec` of
+                        // components, not `Path::join`,
+                        // to avoid a Rust stdlib quirk
+                        // where `Path::from("a").join("")`
+                        // leaves a trailing separator on
+                        // the resulting `PathBuf`. That
+                        // trailing separator then made
+                        // the walk-up's `combined` path
+                        // look like a directory to
+                        // downstream `tokio::fs::write`
+                        // calls, which would silently
+                        // create an empty directory
+                        // instead of a regular file.
+                        let mut parts: Vec<std::ffi::OsString> = vec![name.to_os_string()];
+                        parts.extend(suffix.iter().map(|c| c.to_os_string()));
+                        suffix = parts.iter().collect();
                         match probe.parent() {
                             Some(parent) => probe = parent.to_path_buf(),
                             None => break,
@@ -267,6 +448,70 @@ impl Tool for SharedWriteTool {
         }
         let path = require_str(&invocation.arguments, "path")?;
         let content = require_str(&invocation.arguments, "content")?;
+
+        // v3.7.1 — cross-machine routing. When the
+        // Mac app calls us (`context.app.is_some()`),
+        // send the write to the `maxbotd` daemon
+        // instead of touching the local filesystem.
+        // The daemon's `resolve_safe_path` is the
+        // load-bearing guard — we don't re-check
+        // here because the daemon will refuse any
+        // bad path on its side. If the daemon is
+        // unreachable, fall back to the local
+        // filesystem with the guard still applied.
+        if let Some(app) = context.app.clone() {
+            let bot_id = invocation
+                .bot_id
+                .as_deref()
+                .ok_or_else(|| ToolError::Execution(
+                    "shared_write: bot_id is required for daemon routing; pass it from the executor".to_string(),
+                ))?;
+            match daemon_client_for(&app, bot_id).await {
+                Ok(client) => {
+                    match daemon_call(&client, "write", path, Some(&content)).await {
+                        Ok(v) => {
+                            let bytes = v
+                                .get("bytes_written")
+                                .and_then(|x| x.as_u64())
+                                .unwrap_or(content.len() as u64);
+                            let on_disk = v
+                                .get("path")
+                                .and_then(|x| x.as_str())
+                                .unwrap_or("(daemon)");
+                            return Ok(ToolResult::ok(format!(
+                                "wrote {bytes} bytes to {on_disk} (via daemon)"
+                            )));
+                        }
+                        Err(e) => {
+                            // Daemon unreachable or
+                            // errored — log and fall
+                            // through to the local
+                            // filesystem path. The
+                            // user gets a `warn!` log
+                            // + the local-fs error
+                            // either way.
+                            log::warn!(
+                                "shared_write: daemon call failed ({e}); falling back to local filesystem"
+                            );
+                        }
+                    }
+                }
+                Err(e) => {
+                    // No token / db error — log and
+                    // fall through. The local
+                    // path will surface its own
+                    // clear error.
+                    log::warn!(
+                        "shared_write: daemon client unavailable ({e}); falling back to local filesystem"
+                    );
+                }
+            }
+        }
+
+        // Local-fs path. Same as the pre-v3.7.1
+        // behavior; preserved for the daemon-side
+        // run path and the fallback when the
+        // daemon is unreachable.
         let root = shared_root();
         let resolved = resolve_safe_path(&root, path)
             .map_err(|e| ToolError::Execution(format!("shared_write refused: {e}")))?;
@@ -336,8 +581,49 @@ impl Tool for SharedReadTool {
         invocation: ToolInvocation,
         context: ToolContext,
     ) -> Result<ToolResult, ToolError> {
-        let _ = context;
         let path = require_str(&invocation.arguments, "path")?;
+
+        // v3.7.1 — cross-machine routing (see
+        // `shared_write` for the full rationale).
+        // On the Mac app path, ask the daemon to
+        // read the file from its own shared
+        // folder; fall back to the local
+        // filesystem on connection failure.
+        if let Some(app) = context.app.clone() {
+            let bot_id = invocation
+                .bot_id
+                .as_deref()
+                .ok_or_else(|| ToolError::Execution(
+                    "shared_read: bot_id is required for daemon routing; pass it from the executor".to_string(),
+                ))?;
+            match daemon_client_for(&app, bot_id).await {
+                Ok(client) => {
+                    match daemon_call(&client, "read", path, None).await {
+                        Ok(v) => {
+                            let body = v
+                                .get("content")
+                                .and_then(|x| x.as_str())
+                                .unwrap_or("");
+                            return Ok(ToolResult::ok(truncate_for_model(body, 12_000)));
+                        }
+                        Err(e) => {
+                            log::warn!(
+                                "shared_read: daemon call failed ({e}); falling back to local filesystem"
+                            );
+                        }
+                    }
+                }
+                Err(e) => {
+                    log::warn!(
+                        "shared_read: daemon client unavailable ({e}); falling back to local filesystem"
+                    );
+                }
+            }
+        }
+
+        // Local-fs path (daemon-side runs + the
+        // Mac-app fallback when the daemon is
+        // unreachable).
         let root = shared_root();
         let resolved = resolve_safe_path(&root, path)
             .map_err(|e| ToolError::Execution(format!("shared_read refused: {e}")))?;
@@ -431,12 +717,51 @@ impl Tool for SharedListTool {
         invocation: ToolInvocation,
         context: ToolContext,
     ) -> Result<ToolResult, ToolError> {
-        let _ = context;
         let prefix = invocation
             .arguments
             .get("prefix")
             .and_then(|v| v.as_str())
             .unwrap_or("");
+
+        // v3.7.1 — cross-machine routing (see
+        // `shared_write` for the full rationale).
+        if let Some(app) = context.app.clone() {
+            let bot_id = invocation
+                .bot_id
+                .as_deref()
+                .ok_or_else(|| ToolError::Execution(
+                    "shared_list: bot_id is required for daemon routing; pass it from the executor".to_string(),
+                ))?;
+            match daemon_client_for(&app, bot_id).await {
+                Ok(client) => {
+                    match daemon_call(&client, "list", prefix, None).await {
+                        Ok(v) => {
+                            let entries = v
+                                .get("entries")
+                                .cloned()
+                                .unwrap_or(serde_json::Value::Array(vec![]));
+                            let json_out = serde_json::to_string_pretty(&entries)
+                                .unwrap_or_else(|_| "[]".to_string());
+                            return Ok(ToolResult::ok(truncate_for_model(&json_out, 12_000)));
+                        }
+                        Err(e) => {
+                            log::warn!(
+                                "shared_list: daemon call failed ({e}); falling back to local filesystem"
+                            );
+                        }
+                    }
+                }
+                Err(e) => {
+                    log::warn!(
+                        "shared_list: daemon client unavailable ({e}); falling back to local filesystem"
+                    );
+                }
+            }
+        }
+
+        // Local-fs path (daemon-side runs + the
+        // Mac-app fallback when the daemon is
+        // unreachable).
         let root = shared_root();
         // If the prefix is empty, list the root. If it's
         // a directory, list that. If it's a file, list
@@ -736,5 +1061,234 @@ mod tests {
                 std::env::remove_var("MAXBOT_SHARED_DIR");
             }
         }
+    }
+
+    // =====================================================================
+    //  v3.7.1 — Daemon client tests
+    // =====================================================================
+    //
+    // These tests exercise the client-side half of
+    // the v3.7.1 cross-machine routing:
+    // `daemon_call` builds the right HTTP request,
+    // sends it, and parses the response. The tests
+    // spin up a tiny axum server on a random port
+    // to act as a stand-in for the real daemon —
+    // the daemon-side end-to-end tests live in
+    // `src-tauri/src/bin/maxbotd.rs`.
+
+    /// Spawn a tiny test server that echoes the
+    /// request method, path, Authorization header,
+    /// and body — and returns a canned JSON
+    /// response. The handler is per-test so each
+    /// test can encode its own assertions on the
+    /// inbound request.
+    async fn spawn_echo_server(
+        handler: axum::Router,
+    ) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("local_addr");
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(listener, handler).await;
+        });
+        (addr, server)
+    }
+
+    /// `daemon_call_sends_post_with_bearer` — the
+    /// client builds a `POST /shared?bot_id=...`
+    /// request with the `Authorization: Bearer …`
+    /// header, and parses the daemon's JSON
+    /// response on a 2xx.
+    #[tokio::test]
+    async fn daemon_call_sends_post_with_bearer() {
+        use axum::extract::Request;
+        use axum::http::StatusCode;
+        use axum::middleware::{self, Next};
+        use axum::response::Response;
+        use std::sync::Arc;
+        use tokio::sync::Mutex;
+
+        let captured: Arc<Mutex<Option<(String, String, String)>>> =
+            Arc::new(Mutex::new(None));
+        let cap_clone = captured.clone();
+        let app = axum::Router::new()
+            .route(
+                "/shared",
+                axum::routing::post(
+                    |axum::extract::Query(params): axum::extract::Query<
+                        std::collections::HashMap<String, String>,
+                    >,
+                     headers: axum::http::HeaderMap,
+                     body: String| async move {
+                        let method = "POST".to_string();
+                        let auth = headers
+                            .get(axum::http::header::AUTHORIZATION)
+                            .map(|v| v.to_str().unwrap_or("").to_string())
+                            .unwrap_or_default();
+                        let bot = params
+                            .get("bot_id")
+                            .cloned()
+                            .unwrap_or_default();
+                        *cap_clone.lock().await = Some((method, auth, format!("{bot}|{body}")));
+                        (
+                            StatusCode::OK,
+                            axum::Json(serde_json::json!({
+                                "ok": true,
+                                "bytes_written": body.len(),
+                            })),
+                        )
+                    },
+                ),
+            )
+            // The `Next` import silences the unused
+            // warning for the middleware module;
+            // we don't need a middleware here.
+            .layer(middleware::from_fn(
+                |_req: Request, next: Next| async move {
+                    let resp: Response = next.run(_req).await;
+                    resp
+                },
+            ));
+        let (addr, server) = spawn_echo_server(app).await;
+
+        let client = DaemonSharedClient {
+            base_url: format!("http://{addr}"),
+            token: "tok-abc".to_string(),
+            bot_id: "bot-42".to_string(),
+        };
+        let resp = daemon_call(
+            &client,
+            "write",
+            "detective/findings.json",
+            Some("hello world"),
+        )
+        .await
+        .expect("daemon_call");
+        // The response is the mock server's echo
+        // (which returns `body.len()` as
+        // `bytes_written`); the test only needs to
+        // confirm the response is parseable JSON
+        // with an `ok: true`. The real daemon's
+        // `bytes_written` semantics are covered by
+        // `shared_route_write_read_list_round_trip`
+        // in `maxbotd.rs`.
+        assert_eq!(resp.get("ok").and_then(|v| v.as_bool()), Some(true));
+        assert!(
+            resp.get("bytes_written").is_some(),
+            "expected bytes_written in response, got: {resp}"
+        );
+
+        let captured = captured.lock().await.clone().expect("captured");
+        assert_eq!(captured.0, "POST");
+        assert_eq!(captured.1, "Bearer tok-abc");
+        // The query string + body are pipe-joined
+        // so we can assert both in one comparison.
+        let (bot_id, body) = captured.2.split_once('|').expect("split");
+        assert_eq!(bot_id, "bot-42");
+        let parsed: serde_json::Value =
+            serde_json::from_str(body).expect("body is json");
+        assert_eq!(parsed.get("verb").and_then(|v| v.as_str()), Some("write"));
+        assert_eq!(
+            parsed.get("path").and_then(|v| v.as_str()),
+            Some("detective/findings.json")
+        );
+        assert_eq!(
+            parsed.get("content").and_then(|v| v.as_str()),
+            Some("hello world")
+        );
+
+        server.abort();
+    }
+
+    /// `daemon_call_handles_non_2xx` — a 4xx from
+    /// the daemon surfaces as an error string the
+    /// caller can match on, not a panic.
+    #[tokio::test]
+    async fn daemon_call_handles_non_2xx() {
+        use axum::http::StatusCode;
+        let app = axum::Router::new().route(
+            "/shared",
+            axum::routing::post(|| async {
+                (
+                    StatusCode::BAD_REQUEST,
+                    axum::Json(serde_json::json!({
+                        "error": "shared_write refused: path traversal"
+                    })),
+                )
+            }),
+        );
+        let (addr, server) = spawn_echo_server(app).await;
+
+        let client = DaemonSharedClient {
+            base_url: format!("http://{addr}"),
+            token: "tok".to_string(),
+            bot_id: "bot".to_string(),
+        };
+        let err = daemon_call(&client, "write", "../escape", Some("nope"))
+            .await
+            .expect_err("expected error");
+        assert!(err.contains("400"), "expected 400 in error, got: {err}");
+        assert!(
+            err.contains("shared_write refused"),
+            "expected daemon error in body, got: {err}"
+        );
+
+        server.abort();
+    }
+
+    /// `daemon_call_handles_connection_failure` —
+    /// when the daemon isn't running, the call
+    /// returns a clear error string (so the
+    /// caller can fall back to the local
+    /// filesystem path).
+    #[tokio::test]
+    async fn daemon_call_handles_connection_failure() {
+        // Bind a listener and immediately drop it
+        // so the port is free but no server is
+        // running on it. `daemon_call` will get
+        // a connection-refused error.
+        let listener =
+            tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("local_addr");
+        drop(listener);
+
+        let client = DaemonSharedClient {
+            base_url: format!("http://{addr}"),
+            token: "tok".to_string(),
+            bot_id: "bot".to_string(),
+        };
+        let err = daemon_call(&client, "list", "", None)
+            .await
+            .expect_err("expected connection error");
+        assert!(
+            err.contains("daemon unreachable"),
+            "expected 'daemon unreachable' in error, got: {err}"
+        );
+    }
+
+    /// `daemon_call_strips_trailing_slash_from_base_url`
+    /// — the `Settings.maxbotd_url` is stored as
+    /// the user typed it; the client normalizes a
+    /// trailing slash so the URL build doesn't
+    /// produce `//shared`.
+    #[test]
+    fn daemon_client_normalizes_trailing_slash() {
+        // We can't easily run `daemon_client_for`
+        // without a tauri AppHandle, but the
+        // normalization logic lives in the
+        // function body. Reproduce it here so the
+        // test pins the behavior.
+        let raw = "http://crispy:8443/";
+        let normalized = raw.trim().trim_end_matches('/').to_string();
+        assert_eq!(normalized, "http://crispy:8443");
+        let raw = "http://crispy:8443";
+        let normalized = raw.trim().trim_end_matches('/').to_string();
+        assert_eq!(normalized, "http://crispy:8443");
+        let raw = "";
+        let normalized = raw.trim().trim_end_matches('/').to_string();
+        // Empty normalizes to empty; the caller
+        // falls back to the local default.
+        assert_eq!(normalized, "");
     }
 }

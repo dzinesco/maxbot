@@ -159,6 +159,16 @@ export function Settings({ initial, onClose, onSave, initialTab }: SettingsProps
   const [voiceModeEnabled, setVoiceModeEnabled] = useState<boolean>(
     base.voice_mode_enabled ?? false,
   );
+  // v3.7.1 — maxbotd URL. The base URL of the
+  // always-on daemon that the Mac app's `shared_*`
+  // tools route through. Default
+  // `http://127.0.0.1:8443` (local-only); set to
+  // `http://crispy:8443` to route through the LAN
+  // daemon. The Rust side defaults to the same
+  // value via `default_maxbotd_url()`.
+  const [maxbotdUrl, setMaxbotdUrl] = useState<string>(
+    base.maxbotd_url ?? "http://127.0.0.1:8443",
+  );
   // Test-connection state: `null` = idle, `{ kind: "ok", count }` =
   // last call succeeded, `{ kind: "err", message }` = failed. The
   // banner shows up while `kind` is set and is dismissable.
@@ -267,6 +277,13 @@ export function Settings({ initial, onClose, onSave, initialTab }: SettingsProps
         // Settings.voice_mode_enabled field. See
         // `src-tauri/src/storage/db.rs`.
         voice_mode_enabled: voiceModeEnabled,
+        // v3.7.1 — maxbotd base URL. Shared_* tools
+        // route their filesystem ops through the
+        // daemon's `POST /shared` endpoint; the
+        // `maxbotd_url` field tells the Mac app where
+        // to send those calls. Empty falls back to
+        // `http://127.0.0.1:8443` on the Rust side.
+        maxbotd_url: maxbotdUrl.trim() || "http://127.0.0.1:8443",
       };
       await onSave(merged);
       onClose();
@@ -344,6 +361,11 @@ export function Settings({ initial, onClose, onSave, initialTab }: SettingsProps
           Math.floor(computerRamMb || 2048),
         ),
         voice_mode_enabled: voiceModeEnabled,
+        // v3.7.1 — see note in `submit()`. Persisted
+        // before the test-connection so a freshly-saved
+        // URL is visible to the Rust side if any future
+        // command keys off it.
+        maxbotd_url: maxbotdUrl.trim() || "http://127.0.0.1:8443",
       };
       await onSave(merged);
       const count = await computerTestConnection();
@@ -563,6 +585,52 @@ export function Settings({ initial, onClose, onSave, initialTab }: SettingsProps
                   reply out loud and then arms the mic for your next turn
                   (push-to-talk). Requires a working `say` (TTS) and
                   `transcribe_audio` (Whisper) — both surface errors as toasts.
+                </div>
+              </div>
+
+              <hr
+                style={{
+                  border: 0,
+                  borderTop: "1px solid var(--border)",
+                  margin: "6px 0",
+                }}
+              />
+
+              <div className="field">
+                {/* v3.7.1 — maxbotd daemon base URL. The Mac
+                 * app's `shared_write` / `shared_read` /
+                 * `shared_list` tools route their filesystem
+                 * ops through `POST /shared` on this URL so
+                 * the writes land on the daemon's host
+                 * (the canonical owner of `~/bots/_shared/`)
+                 * rather than the Mac's local filesystem.
+                 * Default `http://127.0.0.1:8443` (local
+                 * dev path). Tyler sets this to
+                 * `http://crispy:8443` to route through
+                 * the LAN daemon. See `docs/maxbotd-setup.md`
+                 * for the full setup flow. When the daemon
+                 * is unreachable, the Mac app falls back
+                 * to the local filesystem with the
+                 * `resolve_safe_path` guard still applied. */}
+                <label>maxbotd URL</label>
+                <input
+                  type="text"
+                  value={maxbotdUrl}
+                  onChange={(e) => setMaxbotdUrl(e.target.value)}
+                  placeholder="http://127.0.0.1:8443"
+                  data-testid="settings-maxbotd-url"
+                  data-setting-key="app.maxbotd-url"
+                />
+                <div className="hint">
+                  Base URL of the always-on <code>maxbotd</code> daemon.
+                  The Mac app's <code>shared_*</code> tools send their
+                  writes/reads to <code>POST /shared</code> on this URL,
+                  authenticated with the Bot's daemon token. Default
+                  <code> http://127.0.0.1:8443</code> works when the
+                  daemon runs on the Mac (dev). Set to
+                  <code> http://crispy:8443</code> to route through the
+                  LAN daemon — the canonical owner of
+                  <code> ~/bots/_shared/</code>.
                 </div>
               </div>
 

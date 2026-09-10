@@ -122,6 +122,10 @@ const defaultSettings: Settings = {
   // v2.7.0 — voice mode flag. Tests that don't
   // exercise voice don't care; default to off.
   voice_mode_enabled: false,
+  // v3.7.1 — maxbotd URL. Tests that don't
+  // exercise shared_* routing don't care; default
+  // to the local-only URL.
+  maxbotd_url: "http://127.0.0.1:8443",
 };
 
 beforeEach(() => {

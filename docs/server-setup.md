@@ -168,6 +168,22 @@ inside any per-Bot VM — it lives on the libvirt host
 so the daemon can write and any user with shell on
 the host can read for debugging.
 
+> **v3.7.1 — daemon-routed.** The Mac app's
+> `shared_write` / `shared_read` / `shared_list`
+> tools now route through the daemon's new
+> `POST /shared` route, so the writes land here on
+> `crispy` regardless of whether the calling Bot
+> runs on the Mac or the daemon. The Mac's local
+> `~/bots/_shared/` is a fallback only — it is
+> read/written when the daemon is unreachable,
+> with a `warn!` log and the `resolve_safe_path`
+> guard still applied. Configure the Mac app's
+> **Settings → General → maxbotd URL** to
+> `http://crispy:8443` so the routed path is the
+> default. See [`maxbotd-setup.md`](maxbotd-setup.md#v371--mac-app-routes-through-the-daemon)
+> for the full setup flow and the manual `curl`
+> smoke test.
+
 ## Step 4 — Deploy the `provision-vm.sh` script
 
 MaxBot's Tauri side calls `/opt/maxbot/provision-vm.sh` on the server

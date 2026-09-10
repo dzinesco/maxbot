@@ -257,6 +257,32 @@ pub struct Settings {
     /// OAuth Apps are out of scope for v3.7.0.
     #[serde(default)]
     pub github_pat: Option<String>,
+
+    // ---- v3.7.1 — maxbotd HTTP URL ----
+    /// Base URL of the always-on `maxbotd` daemon
+    /// (plain HTTP on port 8443, bearer-token auth).
+    /// The Mac app's `shared_write` / `shared_read` /
+    /// `shared_list` tools route their filesystem
+    /// ops through `POST /shared` on this URL so
+    /// the writes land on the daemon's host (the
+    /// canonical owner of `~/bots/_shared/`) rather
+    /// than the Mac's local filesystem. Default
+    /// `http://127.0.0.1:8443` — the local-only
+    /// dev path. Tyler sets this to
+    /// `http://crispy:8443` to route through the
+    /// LAN daemon. Empty falls back to the default
+    /// via `default_maxbotd_url()`.
+    #[serde(default = "default_maxbotd_url")]
+    pub maxbotd_url: String,
+}
+
+/// v3.7.1 — default base URL for the maxbotd daemon.
+/// Pinned so a freshly-installed Mac app talks to
+/// the local daemon first; the user can override
+/// to `http://crispy:8443` in Settings → General to
+/// route to the LAN daemon.
+fn default_maxbotd_url() -> String {
+    "http://127.0.0.1:8443".to_string()
 }
 
 fn default_computer_disk() -> u32 {

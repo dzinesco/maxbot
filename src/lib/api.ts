@@ -128,6 +128,18 @@ export interface Settings {
   // the auto-play + auto-record loop. Default false so a fresh
   // install doesn't talk at the user.
   voice_mode_enabled: boolean;
+
+  // ---- v3.7.1 — maxbotd URL ----
+  //
+  // Base URL of the always-on `maxbotd` daemon. The Mac app's
+  // `shared_write` / `shared_read` / `shared_list` tools
+  // route their filesystem ops through `POST /shared` on
+  // this URL so the writes land on the daemon's host (the
+  // canonical owner of `~/bots/_shared/`) rather than the
+  // Mac's local filesystem. Default `http://127.0.0.1:8443`
+  // (local-only dev path). Tyler sets this to
+  // `http://crispy:8443` to route through the LAN daemon.
+  maxbotd_url: string;
 }
 
 export interface ProviderPreset {
@@ -265,6 +277,15 @@ export const DEFAULT_SETTINGS: Settings = {
   // v2.7.0 — voice mode off by default. The user opts in
   // via the new "Voice mode" toggle in Settings → General.
   voice_mode_enabled: false,
+
+  // ---- v3.7.1 — maxbotd URL ----
+  //
+  // Base URL of the always-on `maxbotd` daemon. Default
+  // is the local-only `http://127.0.0.1:8443`; set this
+  // to `http://crispy:8443` in Settings → General to route
+  // shared_* tools through the LAN daemon. See
+  // `docs/maxbotd-setup.md` for the full setup flow.
+  maxbotd_url: "http://127.0.0.1:8443",
 };
 
 export interface TtsSpeakResponse {

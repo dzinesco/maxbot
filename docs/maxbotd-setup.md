@@ -200,9 +200,12 @@ with a blue `via webhook` badge. If it doesn't:
 
 - **No status appears** — the Mac app's webview blocked the
   `fetch()` (the daemon is plain HTTP and sends no CORS headers).
-  Workaround: use the `curl` example above from a terminal
-  instead. Adding `Access-Control-Allow-Origin` headers to
-  `maxbotd` is on the v3.2 roadmap.
+  As of v3.7.1 the daemon sends
+  `Access-Control-Allow-Origin: *` on every response, so the
+  Test-webhook button works end-to-end from the renderer. If
+  the button still fails after v3.7.1, open the DevTools
+  network panel and check the actual response — a 4xx / 5xx
+  is a real auth or route issue, not CORS.
 - **`401 invalid token`** — click **Rotate** in the Mac app to
   generate a fresh token; the old one is invalidated immediately.
 
@@ -253,7 +256,7 @@ If the run doesn't appear after ~90 s:
 | `500 db error` | The SQLite file at `--db <path>` is not writable by the `maxbotd` user, or it's a directory, or it doesn't exist and the parent dir isn't writable. | `ls -l /var/lib/maxbot/maxbot.db` and `ls -ld /var/lib/maxbot`. The `maxbot` user needs `rw` on the file and `rwx` on the dir. |
 | Scheduler ticks fire but the bot errors with `set your MiniMax API key` | The shared SQLite file's `settings` row is on the Mac, not on `crispy`. The Mac's `Settings` panel writes the API key to its local DB; `crispy` has the schema but not the row. | Either: (a) seed `crispy`'s DB with the same settings row via the Mac app's "Export settings" (future), or (b) set the API key via a one-time `INSERT` on `crispy` directly, or (c) move the API-key storage to an env file the daemon reads at boot. Tracked as v3.1.1 polish. |
 | QGA not ready (Bot VM hasn't booted yet) | A scheduled run fires before the per-Bot VM has finished provisioning. | The first run after a fresh Bot creation is allowed to fail; the next tick (≤30 s later) succeeds. If it keeps failing, check the VM state in **Computer** panel. |
-| Test-webhook button shows `request failed: TypeError` | Tauri webview CORS — the daemon is plain HTTP, no `Access-Control-Allow-Origin` header. | Use `curl` from a terminal instead; the run still lands in Activity. CORS fix is v3.2. |
+| Test-webhook button shows `request failed: TypeError` | Tauri webview CORS — fixed in v3.7.1; the daemon now sends `Access-Control-Allow-Origin: *` on every response. If the button still fails after v3.7.1, check the browser network panel for a 4xx / 5xx and look at `journalctl -u maxbotd`. | No action needed; the CORS gap is closed as of v3.7.1. |
 
 ## Reference
 
@@ -283,4 +286,114 @@ security-wall rule, see
 [`user-guide.md`](user-guide.md#what-maxbots-per-bot-vm-does-and-does-not-protect-against-v350)
 and [`grok-bot-reference.md`](grok-bot-reference.md#maxbot-vs-grok-bots-shared-vm-v350).
 The path itself is documented in
+
+## v3.7.1 — Mac-app routes through the daemon
+
+The Mac app's `shared_write` / `shared_read` /
+`shared_list` tools now route through the daemon
+(via the new `POST /shared` route), so a write from
+the Mac app lands on the daemon's host-side
+`~/bots/_shared/` and is visible to every other Bot
+in the group. Without this, two Bots running on the
+Mac saw a local Mac folder while a Bot running on
+the daemon saw a different folder on `crispy` —
+a silent half-functional multi-Bot pod.
+
+### The `maxbotd_url` setting
+
+The Mac app's **Settings → General → maxbotd URL**
+field tells the Mac app where to send the
+`POST /shared` calls. Default
+`http://127.0.0.1:8443` (local-only — the daemon
+runs on the Mac for dev). Set to
+`http://crispy:8443` to route through the LAN
+daemon. Field name in code: `Settings.maxbotd_url`
+in `src-tauri/src/storage/db.rs`. The Mac app
+trims a trailing slash and falls back to the
+default if the field is empty.
+
+### The `POST /shared` route
+
+Auth: same `Authorization: Bearer <token>` as the
+webhook + recent-runs routes. The token is verified
+against the per-Bot `daemon_tokens.bot_id` row. The
+Bot id is sent as `?bot_id=<bot_id>` so the daemon
+can look up the right token row.
+
+Body shape (JSON):
+
+```json
+{
+  "verb":    "read" | "write" | "list",
+  "path":    "relative/path/under/shared/",
+  "content": "..."                 // required for "write"
+}
+```
+
+Responses:
+
+- `write` → `200 { "ok": true, "bytes_written": N, "path": "..." }`
+- `read`  → `200 { "content": "...", "size": N }` (or `400` for
+  directories; `413` for files over 1 MB)
+- `list`  → `200 { "entries": [{ "name", "is_file", "size", "modified_at" }] }`
+
+The path-safety guard (`resolve_safe_path` in
+`src-tauri/src/tools/shared_fs.rs`) is the same
+function the in-app tool uses — the daemon is the
+second line of defense, and the guard refuses
+absolute paths, `..` segments, Windows drive
+letters, UNC shares, backslashes, and symlink
+escapes.
+
+### CORS
+
+Every daemon response (including 401s and 4xx
+errors) now carries
+`Access-Control-Allow-Origin: *` via a
+middleware on the outer `Router`. The Mac app's
+Tauri webview no longer blocks the **Test
+webhook** button in the Bot editor or the
+`POST /shared` calls from the in-app
+`shared_*` tools. The header is added manually
+(no `tower-http` dep) — Tyler's LAN is the only
+client surface, and a future slice can lock it
+down if the daemon is exposed beyond the LAN.
+
+### Manual smoke test
+
+```bash
+TOKEN="<paste from Bot editor → Daemon → Copy>"
+# List the root
+curl -s -X POST -H "Authorization: Bearer $TOKEN" \
+    -H "Content-Type: application/json" \
+    -d '{"verb":"list","path":""}' \
+    "http://crispy:8443/shared?bot_id=<bot_id>" | jq
+# → { "entries": [ ... ] }
+
+# Write a file
+curl -s -X POST -H "Authorization: Bearer $TOKEN" \
+    -H "Content-Type: application/json" \
+    -d '{"verb":"write","path":"hello.txt","content":"hi from the docs"}' \
+    "http://crispy:8443/shared?bot_id=<bot_id>"
+# → { "ok": true, "bytes_written": 19, "path": "..." }
+
+# Confirm it landed on disk
+ssh tyler@crispy 'ls ~/bots/_shared/'
+# → hello.txt
+```
+
+### Fallback behavior
+
+When the daemon is unreachable (network down,
+daemon not running, `maxbotd_url` misconfigured),
+the Mac app's `shared_*` tools fall back to the
+local Mac filesystem with a `warn!` log + the
+`resolve_safe_path` guard still applied. The
+Bot's daemon token isn't required for the
+fallback — the user just gets the local-fs view
+of `~/bots/_shared/`, which may diverge from
+the daemon's view. The chat shows a clear error
+in the read / list case; writes succeed
+locally and surface a `warn!` in the log.
+
 [`server-setup.md`](server-setup.md#step-35--create-the-shared-folder-v350).
