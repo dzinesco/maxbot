@@ -1,4 +1,5 @@
-//! v3.4.0 (Phase 5) — Grok Bot default rule preset.
+//! v3.4.0 (Phase 5) + v3.5.0 (Phase 6) — Grok Bot
+//! default rule preset.
 //!
 //! When a new Bot is created, its starting `approval_rules`
 //! set comes from `grok_bot_defaults()`. The user can
@@ -94,6 +95,14 @@ pub const GROK_BOT_DEFAULTS: &[PresetRow] = &[
     // Skill execution is a derived call; ask the human
     // before letting one Bot invoke another's Skill.
     ("run_skill", Rule::Ask),
+    // v3.5.0 (Phase 6) — Server-side shared folder.
+    // `shared_read` / `shared_list` are read-only
+    // (auto); `shared_write` is mutating (ask). The
+    // path-safety guard is the security gate; the
+    // approval rule is the human gate.
+    ("shared_read", Rule::Auto),
+    ("shared_list", Rule::Auto),
+    ("shared_write", Rule::Ask),
 ];
 
 /// Apply the Grok Bot preset to a Bot, replacing any
@@ -159,6 +168,23 @@ mod tests {
     }
 
     #[test]
+    fn read_only_fs_tools_default_to_auto() {
+        // v3.5.0 (Phase 6) — the shared folder's
+        // read tools. Matches the Phase 5 read-only
+        // pattern (screenshot / vm_browser_open):
+        // the human shouldn't be interrupted for a
+        // pure read.
+        let m = preset_map();
+        for tool in ["shared_read", "shared_list"] {
+            assert_eq!(
+                m.get(tool).copied(),
+                Some(Rule::Auto),
+                "Phase 6 spec: {tool} must be auto in the Grok Bot preset",
+            );
+        }
+    }
+
+    #[test]
     fn outbound_mutating_tools_default_to_ask() {
         let m = preset_map();
         for tool in [
@@ -176,6 +202,22 @@ mod tests {
                 m.get(tool).copied(),
                 Some(Rule::Ask),
                 "Phase 5 spec: {tool} must be ask in the Grok Bot preset",
+            );
+        }
+    }
+
+    #[test]
+    fn mutating_fs_tools_default_to_ask() {
+        // v3.5.0 (Phase 6) — the shared folder's
+        // mutating tool. Matches the Phase 5 mutating
+        // pattern (file_write / shell_run): the human
+        // gets a single confirmation per call.
+        let m = preset_map();
+        for tool in ["shared_write"] {
+            assert_eq!(
+                m.get(tool).copied(),
+                Some(Rule::Ask),
+                "Phase 6 spec: {tool} must be ask in the Grok Bot preset",
             );
         }
     }

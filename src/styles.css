@@ -5591,3 +5591,73 @@ button.link:hover {
   letter-spacing: 0.01em;
 }
 
+
+/* ---------- v3.5.0 (Phase 6) — CreateGroupDialog template chips ---------- */
+.create-group-template-chips {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.create-group-template-chip {
+  display: grid;
+  grid-template-columns: 28px 1fr;
+  grid-template-rows: auto auto;
+  grid-template-areas:
+    "icon label"
+    "icon hint";
+  column-gap: 10px;
+  row-gap: 2px;
+  align-items: start;
+  text-align: left;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 12px;
+  cursor: pointer;
+  color: var(--text-1);
+  transition: background 80ms ease, border-color 80ms ease;
+}
+
+.create-group-template-chip:hover {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+}
+
+.create-group-template-chip:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+
+.create-group-template-chip--checked {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+}
+
+.create-group-template-chip__icon {
+  grid-area: icon;
+  font-size: 20px;
+  line-height: 1;
+  padding-top: 1px;
+}
+
+.create-group-template-chip__label {
+  grid-area: label;
+  font-weight: 600;
+  font-size: 13px;
+}
+
+.create-group-template-chip__hint {
+  grid-area: hint;
+  font-size: 11px;
+  color: var(--text-3, #71717a);
+  line-height: 1.4;
+}
+
+.create-group-template-summary {
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: var(--text-2, #52525b);
+}

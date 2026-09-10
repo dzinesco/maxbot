@@ -311,6 +311,96 @@ General → "Base URL override"). Leave blank for the built-in
 default; set to a self-hosted proxy or alternate region endpoint
 if needed. Per-provider overrides live in the Providers tab.
 
+## What MaxBot's per-Bot VM does and does NOT protect against (v3.5.0)
+
+A per-Bot Linux VM gives every Bot a private computer to drive
+— its own filesystem, its own shell history, its own cookies
+and logins. That is a real isolation boundary **between the Bot
+and the rest of your Mac**, and between a Bot and the rest of
+the host. It is **not** a security boundary between two Bots in
+the same group.
+
+**What the per-Bot VM does protect against:**
+
+- One Bot's runaway shell command or compromised browser
+  session can NOT touch the host filesystem, your Mac's
+  `~/Library`, or another Bot's VM.
+- A Bot can't read your `~/.ssh`, your `~/.aws`, your macOS
+  keychain, or any other Mac-local secret (the Bot's tools
+  run on its own VM, not on your Mac).
+- A Bot's `apt install` / `systemctl` / `cron` only affect
+  its own VM.
+
+**What the per-Bot VM does NOT protect against:**
+
+- **Two Bots in a group can read each other's stuff.** Both
+  Bots can reach the server-side paths that hold their
+  per-Bot data (`~/bots/<bot_id>/` on the host) and the
+  shared folder (`~/bots/_shared/`, see
+  [Shared folder](#shared-folder-v350) below). If a
+  Detective and a Mailroom are in the same group, Mailroom
+  can `shared_read` every handoff Detective left in
+  `shared/`, and Detective can `shared_read` every draft
+  Mailroom wrote.
+- **The shared folder is intentionally not isolated.** It's
+  the whole point — Bots in a group need to leave artifacts
+  for each other. If you put credentials in `shared/`,
+  every Bot in the group can read them.
+- **The host is shared by all Bots on the same server.** The
+  libvirt host (`crispy` in this guide) is a real Linux box;
+  any Bot that can run shell on the host through a quirk
+  sees the whole host filesystem. Today, no Bot tool
+  reaches the host shell directly — all Bot-to-host access
+  is mediated by the `maxbotd` daemon. The path-safety
+  guard in `shared_*` is the second line of defense; the
+  daemon is the first.
+- **Per-Bot VM is per-Bot domain on the host, not per-Bot
+  user.** The libvirt domain is the isolation unit, NOT a
+  Linux user account. A per-Bot Linux user account would be
+  a real security boundary (separate UIDs, separate file
+  permissions, separate `sudo`). MaxBot doesn't ship that
+  today. If a Bot needs true credential isolation, the
+  workaround is to run it on a separate server entirely
+  (see the [Grok Bot reference](grok-bot-reference.md) for
+  why MaxBot hasn't migrated to a shared-VM model and what
+  the per-Bot-VM model does and doesn't give you).
+
+**The rule of thumb:** per-Bot VM = "my Bot can't trash my
+Mac." It is NOT "my Bot can't see what my other Bot is
+doing." If a Bot needs to handle a credential that should
+not be readable by any other Bot in the group, that Bot
+belongs on its own server (or you manually sandbox it
+with a separate Linux user — out of scope for MaxBot
+today).
+
+## Shared folder (v3.5.0)
+
+A single host-side directory at `~/bots/_shared/` on the
+server is the cross-Bot handoff surface. The `maxbotd`
+daemon owns the path; the Mac app's `shared_read`,
+`shared_write`, and `shared_list` tools are the only
+sanctioned way for a Bot to leave or pick up artifacts for
+another Bot in the same group without going through the
+per-Bot VM. Three rules:
+
+- **Read is `Auto` in the Grok Bot defaults preset.** A
+  Bot can pick up a handoff note without asking.
+- **Write is `Ask` in the Grok Bot defaults preset.**
+  Every `shared_write` is gated on a single human
+  confirmation.
+- **The path-safety guard is load-bearing.** The tool
+  refuses absolute paths, `..` segments, and symlinks that
+  resolve outside `~/bots/_shared/`. Without that guard,
+  `shared_write` would be a host-filesystem write primitive
+  for any Bot's LLM. See
+  `src-tauri/src/tools/shared_fs.rs` for the implementation
+  and tests.
+
+This folder is the closest thing MaxBot ships to Grok
+Bot's "shared VM" model. See
+[grok-bot-reference.md](grok-bot-reference.md) for the
+mapping.
+
 ## Keyboard shortcuts
 
 | Shortcut | Action |

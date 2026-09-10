@@ -4,6 +4,76 @@ All notable changes to MaxBot are documented in this file. The format
 follows [Keep a Changelog](https://keepachangelog.com/) and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## v3.5.0 — 2026-09-10
+
+### Added — Phase 6 (Multi-bot pattern + shared folder + Detective/Mailroom/Coordinator template)
+
+Per-Bot VM is permanent. The new piece is a single
+host-side handoff folder, `~/bots/_shared/` on
+`crispy`, owned by the `maxbotd` daemon, plus three
+new tools and the canonical 3-Bot template chips
+(Detective / Mailroom / Coordinator) so a user can
+stand up a multi-Bot pod in two clicks. Per Tyler's
+spec, this is intentionally *not* a migration to
+Grok Bot's shared-VM model — per-Bot VM stays 1:1
+on libvirt.
+
+- **Server-side shared folder (`~/bots/_shared/` on
+  `crispy`).** A real host-side directory (not in
+  any per-Bot VM, not a libvirt mount). The
+  `maxbotd` daemon is the canonical owner; the path
+  is created once during the `docs/server-setup.md`
+  Step 3.5 walkthrough (idempotent; can re-run
+  safely). A future systemd `ExecStartPre=-` line in
+  the `maxbotd.service` unit will own the path on
+  first install.
+- **Three new tools:
+  `shared_write` / `shared_read` / `shared_list`
+  (`src-tauri/src/tools/shared_fs.rs`, new).** The
+  only sanctioned way for a Bot to leave or pick up
+  artifacts for another Bot in the same group
+  without going through the per-Bot VM. The
+  path-safety guard refuses absolute paths, `..`
+  segments, and symlinks that resolve outside
+  `~/bots/_shared/`. Without that guard,
+  `shared_write` would be a host-filesystem write
+  primitive for any Bot's LLM.
+- **Grok Bot defaults preset extended
+  (`src-tauri/src/approvals/defaults.rs`).**
+  `shared_read` and `shared_list` → `auto` (matching
+  the read-only `screenshot` / `vm_browser_open`
+  pattern from v3.4.0); `shared_write` → `ask`
+  (matching the mutating `file_write` / `shell_run`
+  pattern). New tests
+  `read_only_fs_tools_default_to_auto` and
+  `mutating_fs_tools_default_to_ask` pin the spec
+  intent.
+- **Detective / Mailroom / Coordinator template
+  chips in `CreateGroupDialog.tsx`.** A new "Start
+  from a template (optional)" step before the
+  Members step. Each chip pre-creates a Bot with a
+  sensible system prompt and the Grok Bot defaults
+  approval preset (v3.4.0), so a user can stand up
+  the canonical 3-Bot pod in two clicks. Single Bot,
+  single template, or all three at once.
+- **Security caveat in `docs/user-guide.md`.** A new
+  "What MaxBot's per-Bot VM does and does NOT
+  protect against (v3.5.0)" section documents the
+  per-Bot-VM-is-not-a-security-wall rule: two Bots
+  in a group can read each other's `~/bots/_shared/`
+  and per-Bot paths via the server-side daemon. If a
+  Bot needs true credential isolation, the
+  workaround is a separate server, not a second Bot.
+- **`docs/grok-bot-reference.md` mapping.** A new
+  "MaxBot vs Grok Bot's shared VM (v3.5.0)" section
+  lays out the design tradeoff: per-Bot VM is
+  MaxBot's "my Bot can't trash my Mac" answer;
+  `~/bots/_shared/` is the smallest handoff surface
+  that works without giving up that isolation.
+  Migration to a shared-VM model is deferred until
+  at least one Bot's per-Bot VM has been trustworthy
+  for weeks.
+
 ## v3.4.0 — 2026-09-10
 
 ### Added — Phase 5 (Approvals only at judgment points)

@@ -31,6 +31,7 @@ use super::memory::{MemoryForgetTool, MemoryRememberTool, MemorySearchTool};
 use super::notes::{NotesCreateTool, NotesReadTool, NotesSearchTool};
 use super::reminders::{RemindersAddTool, RemindersCompleteTool, RemindersListTool};
 use super::run_skill::RunSkillTool;
+use super::shared_fs::{SharedListTool, SharedReadTool, SharedWriteTool};
 use super::shell_run::ShellRunTool;
 use super::system::{
     SystemDarkModeGetTool, SystemDarkModeSetTool, SystemFrontAppTool, SystemNotifyTool,
@@ -165,6 +166,24 @@ impl ToolRegistry {
             // LLM can also call it directly when it just
             // wants "navigate and snapshot."
             Arc::new(VmBrowserOpenTool),
+            // v3.5.0 (Phase 6) — Server-side shared
+            // folder. The `maxbotd` daemon owns the path
+            // (`~/bots/_shared/`) on the host. These three
+            // tools are the only sanctioned way for a Bot
+            // to leave artifacts for another Bot in the
+            // same group without going through the per-Bot
+            // VM. The path-safety guard inside
+            // `tools::shared_fs` is the load-bearing
+            // security piece: it refuses absolute paths,
+            // `..` segments, and symlinks that resolve
+            // outside the shared root.
+            // `shared_write` requires consent (mutating);
+            // `shared_read` / `shared_list` do not
+            // (read-only). The Grok Bot defaults preset
+            // matches the same read-only/mutating split.
+            Arc::new(SharedWriteTool),
+            Arc::new(SharedReadTool),
+            Arc::new(SharedListTool),
         ];
         tools.extend(extra);
         let mut by_name: HashMap<String, Arc<dyn Tool>> = HashMap::new();

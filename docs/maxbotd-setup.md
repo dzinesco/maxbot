@@ -260,3 +260,27 @@ If the run doesn't appear after ~90 s:
 - Source: `src-tauri/src/bin/maxbotd.rs` (v3.1.0, ~840 lines)
 - Phase 2 plan: `~/.minimax/v2/sessions/2026/09/08/22-30-26-309-session_bXZzXzVhN2U2ODJkNGVmOTQzMzY5NTZhYjI2MzBlODk1MjQx/artifacts/plan.md`
 - v3 grand tour: `docs/v3-grand-tour.md`
+
+## v3.5.0 — Cross-Bot shared folder
+
+The daemon is the canonical owner of
+`~/bots/_shared/` on the host — the host-side
+directory Bots in a group use to hand work to each
+other via the Mac app's `shared_read` / `shared_write`
+/ `shared_list` tools. The path-safety guard inside
+`src-tauri/src/tools/shared_fs.rs` is the load-bearing
+security piece; the daemon is the second line of
+defense.
+
+Create the directory once on `crispy` (idempotent):
+
+```bash
+ssh crispy 'mkdir -p ~/bots/_shared && chmod 0775 ~/bots/_shared'
+```
+
+For the full rationale + the per-Bot-VM-is-not-a-
+security-wall rule, see
+[`user-guide.md`](user-guide.md#what-maxbots-per-bot-vm-does-and-does-not-protect-against-v350)
+and [`grok-bot-reference.md`](grok-bot-reference.md#maxbot-vs-grok-bots-shared-vm-v350).
+The path itself is documented in
+[`server-setup.md`](server-setup.md#step-35--create-the-shared-folder-v350).

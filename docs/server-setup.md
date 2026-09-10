@@ -127,6 +127,47 @@ ssh $SERVER_USER@$SERVER 'ls -lh /var/lib/maxbot/base/ubuntu-24.04-cloud.img'
 
 Expect: ~600 MB, owned by root, world-readable.
 
+## Step 3.5 — Create the shared folder (v3.5.0)
+
+The `maxbotd` daemon owns the cross-Bot handoff folder at
+`~/bots/_shared/`. This is a real host-side directory
+(no overlay FS, no per-Bot VM mount) — three Mac-app
+tools (`shared_read`, `shared_write`, `shared_list`)
+read and write it on behalf of the Bots, mediated by the
+daemon. The path-safety guard inside `tools::shared_fs`
+rejects absolute paths, `..` segments, and symlinks that
+resolve outside this folder.
+
+Create it once on the server, owned by the user
+`maxbotd` runs as (default: `tyler` if you ran the v3.1.0
+`maxbotd-setup.md` walkthrough; the systemd unit's
+`User=` is the source of truth):
+
+```bash
+SERVER=<your-server-ip>
+SERVER_USER=<your-ssh-user>
+ssh $SERVER_USER@$SERVER 'mkdir -p ~/bots/_shared && chmod 0775 ~/bots/_shared'
+```
+
+Verify (idempotent — re-runs are no-ops):
+
+```bash
+ssh $SERVER_USER@$SERVER 'ls -ld ~/bots/_shared'
+# Expect: drwxrwxr-x ... <SERVER_USER> <SERVER_GROUP> ... bots/_shared
+```
+
+> **Future: a systemd `ExecStartPre=-` line in the
+> `maxbotd.service` unit will own this path on first
+> install** so the manual step above goes away. For
+> v3.5.0, run the manual step once. Re-running is safe.
+
+This is the directory the Mac app's `shared_write` tool
+will land artifacts in (via the daemon). It is **not**
+inside any per-Bot VM — it lives on the libvirt host
+(`crispy`), owned by the daemon's user, with `0775`
+so the daemon can write and any user with shell on
+the host can read for debugging.
+
 ## Step 4 — Deploy the `provision-vm.sh` script
 
 MaxBot's Tauri side calls `/opt/maxbot/provision-vm.sh` on the server

@@ -265,6 +265,60 @@ Grok Bot to operate your stack overnight.
 
 ---
 
+## MaxBot vs Grok Bot's shared VM (v3.5.0)
+
+Grok Bot gives every account **one** cloud VM, and every Bot
+on that account shares it. Logins, files, browser sessions —
+all in one place. That makes "Bot A finishes research, hands
+to Bot B who drafts an email in your voice" trivial: the
+draft just sits on the shared filesystem.
+
+MaxBot's data model is intentionally different. Every Bot
+has **its own** per-Bot Linux VM (one libvirt domain per
+Bot, 1:1 on the libvirt host — see
+[`server-setup.md`](server-setup.md)). Two Bots in a group
+do **not** share a computer; they share a single host-side
+folder, `~/bots/_shared/`, owned by the `maxbotd` daemon.
+
+**Why the difference:**
+
+- **Per-Bot VM = "my Bot can't trash my Mac."** A
+  compromised Bot in MaxBot can't reach the host shell or
+  the user's `~/.ssh` / `~/.aws`. The libvirt domain is
+  the isolation unit.
+- **Grok Bot's shared VM = "my Bots can hand work to each
+  other in real apps."** Shared logins, shared browser
+  sessions, shared filesystem. The price is shared
+  credentials.
+- **MaxBot's `~/bots/_shared/` is the smallest handoff
+  surface that works without giving up the per-Bot
+  isolation.** Three tools (`shared_read`, `shared_write`,
+  `shared_list`) cover the "leave a handoff note" use case
+  without making `shared/` a real shared computer.
+
+**Mapping:**
+
+| Grok Bot's shared VM | MaxBot |
+| --- | --- |
+| One cloud VM per account | One libvirt VM per Bot (1:1) |
+| Bots share filesystem | Bots share `~/bots/_shared/` (host-side) |
+| Bots share browser sessions | Each Bot has its own Chromium / `vm_computer_use` |
+| Bots share logins | Each Bot has its own cookies; you sign in once per Bot |
+| Shared credentials (no isolation) | Per-Bot VM isolation; no per-Bot Linux user account (out of scope) |
+| Group handoffs = "drop file in the shared folder" | Group handoffs = "drop file in `~/bots/_shared/`" via `shared_write` |
+
+**When to consider migrating to a shared-VM model in
+MaxBot:** when at least one Bot's per-Bot VM has been
+trustworthy enough — i.e. it has been running for weeks
+without a runaway shell command, a compromised browser
+session, or a credential leak — that you'd be comfortable
+letting a different Bot reach into its filesystem. The
+v3.5.0 design assumes that bar isn't met yet, so
+`~/bots/_shared/` is intentionally narrow: no shell, no
+browser, just three file primitives. See
+[`user-guide.md`](user-guide.md) for the security caveat
+and the per-Bot-VM-is-not-a-security-wall rule.
+
 ## Access (as of the current docs)
 
 **Grok:** free to start; SuperGrok / SuperGrok Heavy raise weekly
