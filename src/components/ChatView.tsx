@@ -57,10 +57,12 @@ interface ChatViewProps {
   onNewConversation?: () => void;
   /** v3.7.13 — UX-7. The active Bot's Computer
    *  Use VM, if one exists. The chat header
-   *  surfaces a "PC" pill when the VM is
-   *  provisioning / stopped / errored, and the
-   *  pill click target opens the Computer panel.
-   *  `null` means "no VM yet" — no pill. */
+   *  surfaces a "PC · running" pill when the VM
+   *  is running; non-running states (provisioning /
+   *  stopped / errored) hide the pill (the user
+   *  can still click the Computer chip in the
+   *  sidebar). `null` means "no VM yet" — no
+   *  pill. */
   activeComputer?: Computer | null;
   /** v3.7.13 — UX-7. Fires when the user
    *  clicks the "PC" pill. The parent opens
@@ -129,20 +131,21 @@ export function ChatView({
             </div>
           </div>
           {/*
-            v3.7.13 — UX-7. Computer pill. The pill
-            is hidden when the VM is running (the
-            user can already see the Bot is up —
-            surfacing the chip would be visual
-            noise). When the VM is provisioning /
-            stopped / errored, the pill shows the
-            state and a single click target that
-            opens the Computer panel. The click
-            target is the same one the sidebar
-            uses; ChatView delegates to the
-            parent's `onOpenComputer(botId)`.
+            v3.7.13 follow-up — Computer pill. The
+            pill is visible only when the VM is
+            running, showing "PC · running" with a
+            single click target that opens the
+            Computer panel. The click target is
+            the same one the sidebar uses; ChatView
+            delegates to the parent's
+            `onOpenComputer(botId)`. Non-running
+            states (provisioning / stopped / errored)
+            and the absent-VM case hide the pill;
+            the user can still reach the Computer
+            via the sidebar chip.
           */}
           {activeComputer &&
-            activeComputer.state !== "running" &&
+            activeComputer.state === "running" &&
             onOpenComputer && (
               <button
                 type="button"
@@ -150,12 +153,10 @@ export function ChatView({
                 data-testid="chat-view-pc-pill"
                 data-state={activeComputer.state}
                 onClick={() => onOpenComputer(activeBot.id)}
-                title={`Open the Computer panel (${activeComputer.state})`}
+                title="Open the Computer panel"
               >
                 <span className="chat-view__pc-pill-dot" aria-hidden />
-                <span>
-                  PC · {stateLabelForComputer(activeComputer.state)}
-                </span>
+                <span>PC · running</span>
               </button>
             )}
           {scopedConversations && scopedConversations.length > 0 && (
@@ -276,26 +277,5 @@ function stateLabel(state: Bot["state"]): string {
     case "idle":
     default:
       return "Idle";
-  }
-}
-
-// v3.7.13 — UX-7. Computer-state verb for the
-// chat-view PC pill. The pill surfaces
-// non-running states (provisioning / stopped /
-// error); the "running" case is hidden entirely
-// so the pill doesn't add visual noise when
-// everything is fine.
-function stateLabelForComputer(state: string): string {
-  switch (state) {
-    case "provisioning":
-      return "provisioning";
-    case "stopped":
-      return "stopped";
-    case "error":
-      return "errored";
-    case "running":
-      return "running";
-    default:
-      return state;
   }
 }
