@@ -29,6 +29,7 @@ import type {
   MemEntry,
   MemKind,
   Message,
+  OpenAITranscribeResponse,
   SendMessageResponse,
   Settings,
   Skill,
@@ -504,6 +505,29 @@ export async function transcribeAudio(
 ): Promise<string> {
   return invoke<string>("transcribe_audio", {
     audioBytes: Array.from(audioBytes),
+    mimeType,
+  });
+}
+
+/**
+ * v3.7.14 — Click-to-start/stop Speech-to-Text for the
+ * chat-header VoiceToolbar. Takes the base64-encoded
+ * audio bytes (a `btoa(...)` string of the recorded
+ * MediaRecorder output) and the MIME type, returns the
+ * transcript wrapped in `OpenAITranscribeResponse`. The
+ * base64 path is preferred over the raw-bytes path because
+ * Tauri only carries JSON across the IPC boundary — the
+ * decode on the Rust side is symmetric and cheap.
+ *
+ * Errors are returned as plain strings; the caller
+ * (VoiceToolbar) surfaces them in a toast / alert.
+ */
+export async function audioToText(
+  audioBase64: string,
+  mimeType: string,
+): Promise<OpenAITranscribeResponse> {
+  return invoke<OpenAITranscribeResponse>("audio_to_text", {
+    audioBase64,
     mimeType,
   });
 }

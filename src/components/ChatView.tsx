@@ -24,6 +24,7 @@ import {
   mostRecentAssistantMessage,
 } from "./MessageBubble";
 import { BotAvatar } from "./BotAvatar";
+import { VoiceToolbar } from "./VoiceToolbar";
 
 interface ChatViewProps {
   messages: Message[];
@@ -68,6 +69,17 @@ interface ChatViewProps {
    *  clicks the "PC" pill. The parent opens
    *  the Computer panel for `activeBot.id`. */
   onOpenComputer?: (botId: string) => void;
+  /** v3.7.14 — VoiceMode. The VoiceToolbar auto-dispatches
+   *  its transcript as a user message via this callback
+   *  (the parent's `handleSend` already handles the full
+   *  requestId / state pipeline). The toolbar sits next to
+   *  the TTSToolbar at the top of the message list so the
+   *  user can speak + read in the same surface. */
+  onSend?: (text: string) => void;
+  /** v3.7.14 — VoiceMode. Optional error sink for the
+   *  VoiceToolbar (e.g. STT failure, mic permission
+   *  denied). When omitted, errors are silently dropped. */
+  onVoiceError?: (message: string) => void;
 }
 
 export function ChatView({
@@ -81,6 +93,8 @@ export function ChatView({
   onNewConversation,
   activeComputer,
   onOpenComputer,
+  onSend,
+  onVoiceError,
 }: ChatViewProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -170,9 +184,28 @@ export function ChatView({
         </div>
       )}
       <div className="messages" ref={scrollRef}>
-        <TTSToolbar
-          target={mostRecentAssistantMessage(messages)}
-        />
+        <div className="messages__header" data-testid="messages-header">
+          <TTSToolbar
+            target={mostRecentAssistantMessage(messages)}
+          />
+          {/*
+            v3.7.14 — VoiceMode. Click-to-start/stop mic
+            that auto-dispatches the transcript as a user
+            message. Sits next to the TTSToolbar so the
+            "speak / listen" pair is reachable from one
+            place. When `onSend` is missing (the test-only
+            ChatView, or a parent that hasn't wired the
+            callback yet), the toolbar still renders but
+            does nothing on stop.
+          */}
+          {onSend && (
+            <VoiceToolbar
+              onSend={onSend}
+              onError={onVoiceError}
+              disabled={streamingId !== null}
+            />
+          )}
+        </div>
         {messages.map((m) => (
           <MessageBubble
             key={m.id}

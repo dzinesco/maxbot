@@ -329,6 +329,16 @@ export interface TtsSpeakResponse {
   truncated_chars: number;
 }
 
+/** v3.7.14 — Wire shape for the `audio_to_text` Tauri
+ *  command. The renderer drops `text` straight into the
+ *  chat as a user message. The struct exists (vs. a plain
+ *  string) so future STT metadata (language, duration,
+ *  confidence) can be added without breaking the IPC
+ *  contract. */
+export interface OpenAITranscribeResponse {
+  text: string;
+}
+
 export type StreamChunk =
   | { kind: "text"; delta: string }
   | {
