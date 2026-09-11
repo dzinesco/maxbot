@@ -5813,3 +5813,116 @@ button.link:hover {
   font-size: 12px;
   color: var(--text-2, #52525b);
 }
+
+/* ---- v3.7.13 — UX-3/UX-4. Tool call form ---- */
+/* Used both for the inline `mail_draft` /
+   `calendar_event_create` / `gmail_send` preview
+   in the message bubble and for the editable
+   approval-sheet form. Two states: read-only
+   preview (the chat-bubble context) and
+   interactive (the approval sheet). */
+.tool-call-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px 4px 4px 4px;
+  border-top: 1px solid var(--border);
+  margin-top: 4px;
+}
+
+.tool-call-form__field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.tool-call-form__label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-2, #52525b);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.tool-call-form input,
+.tool-call-form textarea {
+  width: 100%;
+  border: 1px solid var(--border);
+  background: var(--bg-1);
+  color: var(--text-1);
+  border-radius: 6px;
+  padding: 6px 8px;
+  font-size: 12.5px;
+  font-family: inherit;
+  resize: vertical;
+}
+
+.tool-call-form input:focus,
+.tool-call-form textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 20%, transparent);
+}
+
+.tool-call-form input:disabled,
+.tool-call-form textarea:disabled {
+  background: var(--bg-2);
+  color: var(--text-2);
+  cursor: default;
+}
+
+.tool-call-form__actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  justify-content: flex-end;
+  margin-top: 4px;
+}
+
+.tool-call-form__error {
+  flex: 1;
+  font-size: 12px;
+  color: var(--error, #dc2626);
+  text-align: left;
+}
+
+.tool-call-form__cancel,
+.tool-call-form__approve {
+  border: 1px solid var(--border);
+  background: var(--bg-1);
+  color: var(--text-1);
+  border-radius: 6px;
+  padding: 6px 12px;
+  font-size: 12.5px;
+  cursor: pointer;
+  font-weight: 500;
+}
+
+.tool-call-form__cancel:hover {
+  background: var(--bg-2);
+}
+
+.tool-call-form__approve {
+  background: var(--accent);
+  color: var(--accent-contrast, #fff);
+  border-color: var(--accent);
+}
+
+.tool-call-form__approve:hover {
+  filter: brightness(1.08);
+}
+
+.tool-call-form__approve:disabled,
+.tool-call-form__cancel:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* When the form is read-only (no approvalId,
+   the chat-bubble context), the actions row is
+   hidden entirely. The form still uses
+   `data-tool` so the parent can style per-tool. */
+.tool-call-form[data-readonly] .tool-call-form__actions {
+  display: none;
+}
+

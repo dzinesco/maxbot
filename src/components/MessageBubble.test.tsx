@@ -150,7 +150,168 @@ describe("MessageBubble — pin button (v2.5.0)", () => {
   });
 });
 
-// ---- v2.7.0 — "🔊 Speak" button ----------------------------------
+// ---- v3.7.13 — UX-3. Tool call form for gated tools ----
+//
+// `mail_draft`, `calendar_event_create`, and
+// `gmail_send` render as editable forms instead
+// of JSON blobs. The form pre-fills the
+// `to`/`title` field from the most-recent user
+// message when the model left it empty. In the
+// inline chat-bubble context the form is
+// read-only (no approvalId); the approval sheet
+// is where the user actually decides.
+describe("MessageBubble — ToolCallForm (v3.7.13)", () => {
+  const makeToolCallMsg = (
+    overrides: Partial<typeof baseMessage> & {
+      toolCalls?: Array<{
+        id: string;
+        name: string;
+        arguments: string;
+      }>;
+      lastUserMessage?: string | null;
+    } = {},
+  ) => {
+    const msg = {
+      ...baseMessage,
+      ...overrides,
+      tool_calls: overrides.toolCalls ?? [],
+    };
+    return {
+      message: msg,
+      lastUserMessage:
+        overrides.lastUserMessage === undefined
+          ? "send tmartinez@example.com a hello"
+          : overrides.lastUserMessage,
+    };
+  };
+
+  it("renders a form for `mail_draft` instead of a JSON blob", () => {
+    const { message, lastUserMessage } = makeToolCallMsg({
+      toolCalls: [
+        {
+          id: "tc-1",
+          name: "mail_draft",
+          arguments: JSON.stringify({
+            to: "",
+            subject: "Hi",
+            body: "Hello world",
+          }),
+        },
+      ],
+    });
+    render(
+      <MessageBubble
+        message={message}
+        lastUserMessage={lastUserMessage}
+      />,
+    );
+    const form = screen.getByTestId("tool-call-form");
+    expect(form).toBeInTheDocument();
+    expect(form.dataset.tool).toBe("mail_draft");
+    // The three fields are present.
+    expect(screen.getByTestId("tool-call-form-to")).toBeInTheDocument();
+    expect(screen.getByTestId("tool-call-form-subject")).toBeInTheDocument();
+    expect(screen.getByTestId("tool-call-form-body")).toBeInTheDocument();
+  });
+
+  it("pre-fills `to` from the last user message when the model sent empty", () => {
+    const { message, lastUserMessage } = makeToolCallMsg({
+      toolCalls: [
+        {
+          id: "tc-1",
+          name: "mail_draft",
+          arguments: JSON.stringify({ to: "", subject: "Hi", body: "" }),
+        },
+      ],
+    });
+    render(
+      <MessageBubble
+        message={message}
+        lastUserMessage={lastUserMessage}
+      />,
+    );
+    const toInput = screen.getByTestId("tool-call-form-to") as HTMLInputElement;
+    // The user said "send tmartinez@example.com a hello" —
+    // the pre-fill rule copies that into the empty `to` field.
+    expect(toInput.value).toBe(lastUserMessage);
+  });
+
+  it("does NOT overwrite a non-empty `to` from the model", () => {
+    const { message, lastUserMessage } = makeToolCallMsg({
+      toolCalls: [
+        {
+          id: "tc-1",
+          name: "mail_draft",
+          arguments: JSON.stringify({
+            to: "real@example.com",
+            subject: "Hi",
+            body: "",
+          }),
+        },
+      ],
+    });
+    render(
+      <MessageBubble
+        message={message}
+        lastUserMessage={lastUserMessage}
+      />,
+    );
+    const toInput = screen.getByTestId("tool-call-form-to") as HTMLInputElement;
+    // The model said `to: real@example.com` — the
+    // pre-fill rule does NOT clobber that even if
+    // the user's last message would have been
+    // different.
+    expect(toInput.value).toBe("real@example.com");
+  });
+
+  it("falls back to a JSON preview for unknown tool names", () => {
+    const { message, lastUserMessage } = makeToolCallMsg({
+      toolCalls: [
+        {
+          id: "tc-1",
+          name: "shell_run",
+          arguments: JSON.stringify({ cmd: "ls" }),
+        },
+      ],
+    });
+    render(
+      <MessageBubble
+        message={message}
+        lastUserMessage={lastUserMessage}
+      />,
+    );
+    // No form for shell_run; the original
+    // `tool-call-card` JSON preview renders
+    // instead.
+    expect(screen.queryByTestId("tool-call-form")).toBeNull();
+  });
+
+  it("renders read-only inputs in the chat-bubble context (no approvalId)", () => {
+    const { message, lastUserMessage } = makeToolCallMsg({
+      toolCalls: [
+        {
+          id: "tc-1",
+          name: "mail_draft",
+          arguments: JSON.stringify({ to: "x@y", subject: "Hi", body: "" }),
+        },
+      ],
+    });
+    render(
+      <MessageBubble
+        message={message}
+        lastUserMessage={lastUserMessage}
+      />,
+    );
+    const toInput = screen.getByTestId("tool-call-form-to") as HTMLInputElement;
+    // The chat-bubble path has no approvalId, so
+    // the input is disabled and there's no
+    // approve/cancel button row. The user acts
+    // on the approval via the approval sheet.
+    expect(toInput).toBeDisabled();
+    expect(screen.queryByTestId("tool-call-form-approve")).toBeNull();
+    expect(screen.queryByTestId("tool-call-form-cancel")).toBeNull();
+  });
+});
 //
 // The Speak button was already in the component (v0.7.6 added it
 // for ⌘⇧S); v2.7.0 just makes sure the IPC contract is pinned
