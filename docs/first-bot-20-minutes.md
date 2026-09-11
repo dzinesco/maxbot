@@ -42,7 +42,9 @@ need the Computer panel.
 
 ## 2:00 — Open the Computer chip and watch the Preview
 
-Click the **Computer** chip on Robot (VNC 5901) in the title bar.
+Click the **Computer** chip on Robot (VNC 5900 — the first
+Bot; subsequent Bots get 5901, 5902, etc. per the v3.7.16
+multi-VM VNC port allocation) in the title bar.
 The Computer panel mounts in **Preview** mode by default: a pinned
 side panel (~30% width) showing a fresh JPEG of the QEMU
 framebuffer. The host polls `virsh screenshot` every 300 ms and
@@ -102,7 +104,7 @@ turn with a synthetic tool success.
 
 Sometimes you don't want the run to resume. The Bot went off the
 rails, the 2FA prompt is actually a security warning, you need to
-re-plan the task. v3.7.5 added a **Stop now** action on the
+re-plan the task. v3.7.7 added a **Stop now** action on the
 approval row, kept unchanged in v3.7.9.
 
 **Hand back** and **Stop now** are not two ways to do the same
@@ -114,7 +116,7 @@ thing. They are two decisions:
   the 2FA happy path. The Bot's tool call returns success
   synthetically; the model treats the 2FA as solved and
   continues.
-- **Stop now** = the approval row's reject button (v3.7.5
+- **Stop now** = the approval row's reject button (v3.7.7
   semantics, unchanged). Cascades to `stop_bot_run(runId)`
   (best-effort) + `approval_decide(rejected)` + close the panel.
   The run row ends up `Failed`. The Bot's executor is halted.
@@ -230,7 +232,7 @@ out what the per-Bot VM does and does not protect against. For the
   the browser, and the refresh token is stored. See
   [user-guide.md#google-account-v3712](user-guide.md#google-account-v3712)
   for the full flow + revocation instructions.
-- The **VoiceMode (v3.7.15)** mic in the chat header lets you
+- The **VoiceMode (v3.7.14, STT provider in v3.7.15)** mic in the chat header lets you
   dictate a message hands-free: click the <kbd>🎤</kbd>, speak,
   click again to stop, and the transcript auto-sends. It uses the
   MiniMax API key (already set in the **Providers → MiniMax**

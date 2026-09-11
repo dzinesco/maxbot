@@ -45,7 +45,7 @@ tool calls) to the clipboard.
   <code>Samantha</code> (high-quality en-US, ships with every macOS
   install).
 
-### VoiceMode (v3.7.15)
+### VoiceMode (v3.7.14, STT provider in v3.7.15)
 
 VoiceMode is the inbound half of the voice loop. A click-to-start /
 click-to-stop mic in the chat header captures your voice, ships the
@@ -177,6 +177,16 @@ responding) long before the desktop is fully ready.
 
 > See [`docs/first-bot-20-minutes.md`](first-bot-20-minutes.md) for
 > the canonical end-to-end "show me the new flow" walk-through.
+
+When you provision a second Bot, its VNC display lands on
+port 5901 (the third on 5902, etc.) instead of colliding
+with the first Bot on 5900 — the Mac side reads the
+`computers.vnc_port` column before invoking
+`provision-vm.sh` and picks the lowest free display in
+5900-5999. v3.7.16 closed the v3.7.5 "5900 hard-coded
+fallback" hole. The SSH-tunnel to that port works the
+same as before; the only thing that changed is which
+port each Bot binds.
 
 Once a Bot has a running computer, three ways to see what it's doing:
 
