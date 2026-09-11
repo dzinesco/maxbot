@@ -30,6 +30,11 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 name = "maxbotd"
 path = "src/bin/maxbotd.rs"
 
+# v3.8.0 — Slice 1 (keep-alive loop) supervisor binary.
+[[bin]]
+name = "maxbot_loopd"
+path = "src/bin/maxbot_loopd.rs"
+
 [build-dependencies]
 tauri-build = { version = "2.0", features = [] }
 
