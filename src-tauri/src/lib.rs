@@ -27,6 +27,13 @@ pub mod data_migration;
 mod env_loader;
 mod grok_build;
 mod llm;
+// Slice 1 — keep-alive loop module root. Sub-slice B (file I/O)
+// lives at `loop::io`; sub-slice C (supervisor) and sub-slice D
+// (sandbox) are added by their respective PRs on top of this one.
+//
+// `loop` is a Rust keyword — use the raw-identifier form so call
+// sites read as `crate::r#loop::io::LoopIO`.
+pub mod r#loop;
 
 // Re-export so `use maxbot_lib::Settings;` works from
 // tests and from the (currently non-existent) external
