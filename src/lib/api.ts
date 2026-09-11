@@ -578,14 +578,53 @@ export interface BotTakeoverState {
   updated_at: string;
 }
 
+/** v3.7.13 — Structured result returned by
+ *  `approval_decide`. Replaces the pre-v3.7.13
+ *  `tool_result: string | null` so the renderer can
+ *  branch on `Approved` vs `Denied` without
+ *  re-parsing a JSON string. `Approved.payload` is
+ *  the tool's parsed JSON output (a structured
+ *  object, not a string); `Approved.summary` is a
+ *  one-line human description the chat can show
+ *  inline. `Denied.reason` is the same text the
+ *  LLM sees; `Denied.denied_by_user = true`
+ *  distinguishes a user-driven
+ *  `approvalDecide(rejected)` from a rule-driven
+ *  deny. `Denied.fields` is the original
+ *  `tool_args` for the denied call so the renderer
+ *  can pre-fill a re-ask.
+ *
+ *  Wire tag is `kind` with `snake_case` variants
+ *  (`"approved" | "denied"`), matching the Rust
+ *  `#[serde(tag = "kind", rename_all =
+ *  "snake_case")]` on the `ApprovalToolResult`
+ *  enum. */
+export type ApprovalToolResult =
+  | {
+      kind: "approved";
+      payload: unknown;
+      summary: string;
+    }
+  | {
+      kind: "denied";
+      reason: string;
+      denied_by_user: boolean;
+      fields: unknown;
+    };
+
 /** Returned by `approval_decide` — the canonical
- *  Approval row plus the tool's result string (when
- *  approved / edited). The renderer uses
- *  `tool_result` for the toast and `approval.result`
- *  for the row's "decided" badge. */
+ *  Approval row plus the structured tool result
+ *  (when approved / edited / rejected). The
+ *  renderer uses `tool_result` for the inline card
+ *  and `approval.result` for the row's "decided"
+ *  badge. `tool_result_string` is the deprecated
+ *  string mirror of `tool_result` — kept for one
+ *  release so external consumers don't break on
+ *  the shape change. Removed in v3.7.14. */
 export interface ApprovalDecideOutput {
   approval: Approval;
-  tool_result: string | null;
+  tool_result: ApprovalToolResult | null;
+  tool_result_string?: string | null;
 }
 
 // v2.8.0 — Always-on Daemon (24/7). The

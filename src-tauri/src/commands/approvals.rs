@@ -13,7 +13,7 @@
 
 use std::sync::Arc;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tauri::{AppHandle, State};
 use tokio_util::sync::CancellationToken;
@@ -134,14 +134,70 @@ pub async fn list_paused_bots(
 
 // ---- decide ----
 
-#[derive(Serialize, Clone)]
+/// v3.7.13 — Structured result returned by
+/// `approval_decide`. Replaces the pre-v3.7.13
+/// `tool_result: Option<String>` so the renderer can
+/// branch on `Approved` vs `Denied` without re-parsing
+/// a JSON string. The `Approved` payload is the
+/// tool's full output (parsed); the summary is a
+/// one-line human description the chat can show
+/// inline. The `Denied` reason is the same text the
+/// LLM sees (`{"error":"denied by user"}` for
+/// rejections, or `{"error":"…"}` for rule-denied
+/// calls). `denied_by_user = true` distinguishes a
+/// user-driven `approvalDecide(rejected)` from a
+/// rule-driven deny.
+///
+/// `tool_result_string` is the deprecated string
+/// form of the same content, kept for one release so
+/// existing external consumers don't break on the
+/// shape change. New code should read
+/// `tool_result`. Removed in v3.7.14.
+#[derive(Serialize, Deserialize, Clone)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ApprovalToolResult {
+    /// `approved` / `edited` — the tool ran. `payload`
+    /// is the tool's parsed JSON output (a
+    /// `serde_json::Value`, not a string), and
+    /// `summary` is a one-line description the chat
+    /// can show inline. For an `approved` call that
+    /// itself errored, `payload` is the error object
+    /// and `summary` is the friendly error text.
+    Approved {
+        payload: serde_json::Value,
+        summary: String,
+    },
+    /// `rejected` (user-driven) or rule-driven
+    /// `deny`. `reason` is the human-readable string
+    /// the LLM also sees; `denied_by_user = true`
+    /// marks a user click vs a static rule. `fields`
+    /// is the original `tool_args` for the denied
+    /// call so the renderer can pre-fill a re-ask.
+    Denied {
+        reason: String,
+        denied_by_user: bool,
+        fields: serde_json::Value,
+    },
+}
+
+#[derive(Serialize, Deserialize, Clone)]
 pub struct ApprovalDecideOutput {
     pub approval: Approval,
-    /// The tool's result string (for `approved` and
-    /// `edited`). `None` for `rejected` or when the
-    /// tool itself errored and we still want to record
-    /// the outcome.
-    pub tool_result: Option<String>,
+    /// v3.7.13 — Structured result. `Some(Approved)`
+    /// for `approved` / `edited`; `Some(Denied)` for
+    /// `rejected`; `None` for synthetic outcomes
+    /// (Takeover hand-back, etc.) where the LLM is
+    /// resumed but no tool ran. Renamed from the
+    /// pre-v3.7.13 `Option<String>`; see
+    /// `ApprovalToolResult` for the shape.
+    pub tool_result: Option<ApprovalToolResult>,
+    /// v3.7.13 — Deprecated. Same content as
+    /// `tool_result`, but as a string. Kept for one
+    /// release so external consumers reading the old
+    /// shape don't break. Empty when there's no
+    /// structured result. Removed in v3.7.14.
+    #[serde(default)]
+    pub tool_result_string: Option<String>,
 }
 
 #[tauri::command]
@@ -225,9 +281,33 @@ pub async fn approval_decide(
                 )
                 .await;
                 let updated = refetch_approval(&state, &id).await?;
+                // v3.7.13 — Parse the synthetic JSON
+                // payload for the structured result.
+                // Takeover hand-back is always an
+                // `Approved` (the LLM gets a success
+                // marker so it can continue); the
+                // payload is whatever the takeover
+                // recorded.
+                let parsed_synthetic: serde_json::Value =
+                    serde_json::from_str(&synthetic_result)
+                        .unwrap_or_else(|_| {
+                            serde_json::Value::String(
+                                synthetic_result.clone(),
+                            )
+                        });
+                let summary = parsed_synthetic
+                    .get("status")
+                    .and_then(|s| s.as_str())
+                    .unwrap_or("Takeover complete")
+                    .to_string();
+                let approved_synthetic = ApprovalToolResult::Approved {
+                    payload: parsed_synthetic,
+                    summary,
+                };
                 return Ok(ApprovalDecideOutput {
                     approval: updated,
-                    tool_result: Some(synthetic_result),
+                    tool_result: Some(approved_synthetic),
+                    tool_result_string: Some(synthetic_result),
                 });
             }
             // Use the edited args if provided,
@@ -319,9 +399,65 @@ pub async fn approval_decide(
             // gets the canonical shape (with
             // `decided_at` and `result_json`).
             let updated = refetch_approval(&state, &id).await?;
+            // v3.7.13 — Build the structured
+            // `Approved` result. `payload` is the
+            // tool's parsed JSON output; `summary`
+            // is a one-line description the chat
+            // shows inline. An `approved` call that
+            // itself errored is still wrapped in
+            // `Approved` (the user did approve — the
+            // tool itself failed), and the payload
+            // becomes the error object.
+            let (approved_payload, approved_summary) = match &result {
+                Ok(r) => {
+                    let parsed: serde_json::Value =
+                        serde_json::from_str(&r.content).unwrap_or_else(
+                            |_| {
+                                serde_json::Value::String(
+                                    r.content.clone(),
+                                )
+                            },
+                        );
+                    // v3.7.13 — Derive the summary
+                    // from the parsed payload (or the
+                    // raw content for non-JSON tools).
+                    // One line, capped at 200 chars
+                    // so a verbose tool result doesn't
+                    // flood the inline message.
+                    let summary = parsed
+                        .get("summary")
+                        .and_then(|s| s.as_str())
+                        .map(|s| s.to_string())
+                        .or_else(|| {
+                            parsed
+                                .get("message")
+                                .and_then(|s| s.as_str())
+                                .map(|s| s.to_string())
+                        })
+                        .unwrap_or_else(|| {
+                            if r.content.len() > 200 {
+                                format!("{}…", &r.content[..200])
+                            } else {
+                                r.content.clone()
+                            }
+                        });
+                    (parsed, summary)
+                }
+                Err(e) => {
+                    let err_payload = serde_json::json!({
+                        "error": e.to_string(),
+                    });
+                    (err_payload, format!("Error: {e}"))
+                }
+            };
+            let approved_result = ApprovalToolResult::Approved {
+                payload: approved_payload,
+                summary: approved_summary,
+            };
             Ok(ApprovalDecideOutput {
                 approval: updated,
-                tool_result: Some(result_str),
+                tool_result: Some(approved_result),
+                tool_result_string: Some(result_str),
             })
         }
         "rejected" => {
@@ -370,9 +506,16 @@ pub async fn approval_decide(
                 )
                 .await;
                 let updated = refetch_approval(&state, &id).await?;
+                // v3.7.13 — Takeover rejection is a
+                // synthetic non-tool outcome (the LLM
+                // resumes with a hand-back hint, but
+                // no `tool_result` runs). Keep it
+                // `None` so the renderer can show a
+                // generic "skipped" badge.
                 return Ok(ApprovalDecideOutput {
                     approval: updated,
                     tool_result: None,
+                    tool_result_string: None,
                 });
             }
             let db = state.db.clone();
@@ -403,9 +546,25 @@ pub async fn approval_decide(
             )
             .await;
             let updated = refetch_approval(&state, &id).await?;
+            // v3.7.13 — Surface the denial as a
+            // structured `Denied` result so the
+            // renderer can branch on
+            // `denied_by_user` and pre-fill a re-ask
+            // with the original `fields`. The LLM
+            // still sees `{"error":"denied by user"}`
+            // via the resumed synthetic tool
+            // message.
+            let denied = ApprovalToolResult::Denied {
+                reason: "denied by user".to_string(),
+                denied_by_user: true,
+                fields: approval.payload.clone(),
+            };
             Ok(ApprovalDecideOutput {
                 approval: updated,
-                tool_result: None,
+                tool_result: Some(denied),
+                tool_result_string: Some(
+                    "{\"error\":\"denied by user\"}".to_string(),
+                ),
             })
         }
         other => Err(format!(
@@ -852,5 +1011,127 @@ mod tests {
         assert_eq!(last.role, MessageRole::Tool);
         assert_eq!(last.content, denial_content);
         assert_eq!(last.tool_calls[0].id, "tc-LLM-2");
+    }
+
+    // ---- v3.7.13 — ApprovalToolResult enum ----
+
+    /// `Approved` serializes with a `"kind":
+    /// "approved"` discriminator and exposes the
+    /// `payload` (parsed JSON object) and `summary`
+    /// (one-line human description) the renderer
+    /// needs to render the inline card without
+    /// re-parsing a string.
+    #[test]
+    fn approval_tool_result_approved_serializes_with_kind() {
+        let result = ApprovalToolResult::Approved {
+            payload: json!({"draft_id": "dr-1", "ok": true}),
+            summary: "Draft created".to_string(),
+        };
+        let v = serde_json::to_value(&result).expect("serialize");
+        assert_eq!(v["kind"], "approved");
+        assert_eq!(v["payload"]["draft_id"], "dr-1");
+        assert_eq!(v["payload"]["ok"], true);
+        assert_eq!(v["summary"], "Draft created");
+    }
+
+    /// `Denied` serializes with a `"kind":
+    /// "denied"` discriminator and exposes the
+    /// `reason` (human-readable), `denied_by_user`
+    /// (true for user-driven rejects), and `fields`
+    /// (the original `tool_args` so the renderer
+    /// can pre-fill a re-ask).
+    #[test]
+    fn approval_tool_result_denied_serializes_with_kind_and_fields() {
+        let result = ApprovalToolResult::Denied {
+            reason: "denied by user".to_string(),
+            denied_by_user: true,
+            fields: json!({"to": "x@y", "subject": "hi"}),
+        };
+        let v = serde_json::to_value(&result).expect("serialize");
+        assert_eq!(v["kind"], "denied");
+        assert_eq!(v["reason"], "denied by user");
+        assert_eq!(v["denied_by_user"], true);
+        assert_eq!(v["fields"]["to"], "x@y");
+        assert_eq!(v["fields"]["subject"], "hi");
+    }
+
+    /// `tool_result_string` is a deprecated
+    /// mirror of `tool_result`'s string form.
+    /// The renderer migrates to `tool_result`;
+    /// external consumers can keep reading
+    /// `tool_result_string` for one release.
+    #[test]
+    fn approval_decide_output_carries_string_and_structured() {
+        let output = ApprovalDecideOutput {
+            approval: Approval {
+                id: "ap-1".to_string(),
+                bot_id: "bot-1".to_string(),
+                bot_run_id: None,
+                tool_name: "mail_draft".to_string(),
+                payload: json!({"to": "x@y"}),
+                status: "approved".to_string(),
+                result: None,
+                tool_call_id: None,
+                created_at: chrono::DateTime::parse_from_rfc3339(
+                    "2026-01-01T00:00:00Z",
+                )
+                .unwrap()
+                .with_timezone(&Utc),
+                decided_at: Some(
+                    chrono::DateTime::parse_from_rfc3339(
+                        "2026-01-01T00:01:00Z",
+                    )
+                    .unwrap()
+                    .with_timezone(&Utc),
+                ),
+                reason: None,
+            },
+            tool_result: Some(ApprovalToolResult::Approved {
+                payload: json!({"draft_id": "dr-1"}),
+                summary: "Draft created".to_string(),
+            }),
+            tool_result_string: Some("{\"draft_id\":\"dr-1\"}".to_string()),
+        };
+        let v = serde_json::to_value(&output).expect("serialize");
+        // Both fields land on the wire so the
+        // renderer can pick the new shape while
+        // any old consumer still reads the
+        // string.
+        assert_eq!(v["tool_result"]["kind"], "approved");
+        assert_eq!(
+            v["tool_result_string"],
+            json!("{\"draft_id\":\"dr-1\"}")
+        );
+    }
+
+    /// `tool_result_string` defaults to `None`
+    /// when the variant carries no string content
+    /// (e.g. takeover rejection, which is a
+    /// synthetic non-tool outcome). The
+    /// `#[serde(default)]` on the field is what
+    /// keeps the wire shape stable when older
+    /// consumers omit the field entirely.
+    #[test]
+    fn approval_decide_output_string_defaults_to_none() {
+        let v = serde_json::json!({
+            "approval": {
+                "id": "ap-2",
+                "bot_id": "bot-1",
+                "bot_run_id": null,
+                "tool_name": "computer_takeover",
+                "payload": {},
+                "status": "rejected",
+                "result": null,
+                "tool_call_id": null,
+                "created_at": "2026-01-01T00:00:00Z",
+                "decided_at": "2026-01-01T00:01:00Z",
+                "reason": null
+            },
+            "tool_result": null
+        });
+        let parsed: ApprovalDecideOutput =
+            serde_json::from_value(v).expect("parse");
+        assert!(parsed.tool_result.is_none());
+        assert!(parsed.tool_result_string.is_none());
     }
 }

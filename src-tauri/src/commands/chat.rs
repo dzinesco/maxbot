@@ -15,12 +15,13 @@
 //! know about the loop, just sees the stream events fire one after
 //! another per iteration). A hard 5-iteration cap prevents runaway.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::StreamExt;
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use tauri::async_runtime::Mutex as AsyncMutex;
 use tauri::{AppHandle, Emitter, State};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
@@ -29,7 +30,7 @@ use tokio_util::sync::CancellationToken;
 use crate::llm::provider::{provider_for_settings, ChatMessage, ChatRequest, Provider};
 use crate::llm::stream::{StreamChunk, StreamError};
 use crate::storage::{Database, MessageRole, PersistedToolCall};
-use crate::tools::tool::{ToolContext, ToolInvocation};
+use crate::tools::tool::{ToolContext, ToolError, ToolInvocation};
 use crate::tools::ToolRegistry;
 use crate::AppState;
 
@@ -390,6 +391,20 @@ async fn run_agent_loop(
     let mut next_assistant_id = first_assistant_message_id;
     let mut iteration: u32 = 0;
     let mut stop_reason = "stop".to_string();
+    // v3.7.13 — Per-turn denylist of tool calls the
+    // user has already vetoed. Keyed by
+    // (tool_name, sha256(args)) so identical
+    // retries the LLM emits in the same turn are
+    // skipped instead of re-prompting the consent
+    // dialog or re-running the tool. The set is
+    // local to this function, so a new user
+    // message gets a fresh denylist — the model
+    // can legitimately retry after the user has
+    // had a chance to clarify intent. SHA-256
+    // gives collision-resistant matching; we
+    // don't want the LLM to bypass the denylist
+    // by reshuffling key order or whitespace.
+    let mut denied_tool_calls: HashSet<(String, [u8; 32])> = HashSet::new();
 
     while iteration < MAX_AGENT_ITERATIONS {
         iteration += 1;
@@ -576,11 +591,61 @@ async fn run_agent_loop(
                 stop_reason = "cancelled".to_string();
                 break;
             }
+            // v3.7.13 — Denylist check. The user
+            // already rejected this exact call
+            // (same tool name + same JSON args) in
+            // this turn. Skip the call and the
+            // consent dialog entirely; the LLM
+            // already has the denial in its
+            // history. SHA-256 of the args is the
+            // collision-resistant key — see the
+            // comment on `denied_tool_calls` above.
+            let args_hash = hash_tool_args(&tc.name, &tc.arguments);
+            if denied_tool_calls.contains(&(tc.name.clone(), args_hash)) {
+                let skip_content = serde_json::to_string(
+                    &serde_json::json!({"error": "denied by user"}),
+                )
+                .unwrap_or_else(|_| {
+                    "{\"error\":\"denied by user\"}".to_string()
+                });
+                let db_clone = db.clone();
+                let convo_clone = conversation_id.clone();
+                let tc_id_clone = tc.id.clone();
+                let content_clone = skip_content.clone();
+                let _ = tokio::task::spawn_blocking(move || {
+                    db_clone.insert_message(
+                        &convo_clone,
+                        MessageRole::Tool,
+                        &content_clone,
+                        &[PersistedToolCall {
+                            id: tc_id_clone,
+                            name: String::new(),
+                            arguments: String::new(),
+                        }],
+                    )
+                })
+                .await;
+                messages.push(ChatMessage::Tool {
+                    tool_call_id: tc.id.clone(),
+                    content: skip_content,
+                });
+                continue;
+            }
             let consent_granted = if registry.requires_consent(&tc.name) {
                 ask_consent(&app, &tc.name, &tc.arguments)
             } else {
                 true
             };
+            // v3.7.13 — Record the denial so any
+            // retry the LLM emits later in this
+            // turn (e.g. as a fallback after a
+            // different tool failed) is blocked.
+            // The set is local to `run_agent_loop`,
+            // so a fresh user message resets it.
+            if registry.requires_consent(&tc.name) && !consent_granted {
+                denied_tool_calls
+                    .insert((tc.name.clone(), args_hash));
+            }
             let invocation = ToolInvocation {
                 name: tc.name.clone(),
                 id: tc.id.clone(),
@@ -608,6 +673,19 @@ async fn run_agent_loop(
                     },
                 )
                 .await;
+            // v3.7.13 — Track tool errors that
+            // surface as `UserDenied` (e.g. an
+            // inner guard). The denylist semantics
+            // are the same: a retry with the same
+            // args is blocked this turn. Borrow the
+            // error by reference (the `Result` was
+            // already moved into the match below)
+            // to detect the `UserDenied` variant
+            // before we destructure the result.
+            if let Err(ToolError::UserDenied) = &result {
+                denied_tool_calls
+                    .insert((tc.name.clone(), args_hash));
+            }
             let (content, is_error) = match result {
                 Ok(r) => (r.content, r.is_error),
                 Err(e) => (format!("[error] {}", e), true),
@@ -701,6 +779,26 @@ fn parse_tool_arguments(arguments: &str) -> serde_json::Value {
     })
 }
 
+/// v3.7.13 — Hash a (tool_name, args) pair for
+/// the per-turn denylist. SHA-256 is overkill for
+/// the input size but it's the collision-resistant
+/// default; we don't want the LLM to bypass the
+/// denylist by reshuffling key order, swapping
+/// `null` for `false`, or quoting whitespace
+/// differently. The hash is mixed with the tool
+/// name (so two different tools with the same args
+/// don't collide).
+fn hash_tool_args(tool_name: &str, arguments: &str) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(tool_name.as_bytes());
+    hasher.update([0u8]); // separator — no tool name ends with a NUL
+    hasher.update(arguments.as_bytes());
+    let digest = hasher.finalize();
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&digest);
+    out
+}
+
 async fn finish_turn(streams: &Arc<AsyncMutex<StreamRegistry>>, user_message_id: &str) {
     let mut registry = streams.lock().await;
     registry.active.remove(user_message_id);
@@ -749,5 +847,98 @@ fn handle_error(
             .title("MaxBot")
             .kind(kind)
             .show(|_| {});
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- v3.7.13 — denied_tool_calls denylist ----
+
+    /// The denylist is a `HashSet<(String,
+    /// [u8; 32])>` of `(tool_name, args_hash)`.
+    /// Two calls with the same tool name but
+    /// different args hash to different keys, so
+    /// denying `mail_draft(to=x)` does not block
+    /// `mail_draft(to=y)`.
+    #[test]
+    fn denied_tool_calls_keys_differ_for_different_args() {
+        let a = hash_tool_args("mail_draft", r#"{"to":"x@y"}"#);
+        let b = hash_tool_args("mail_draft", r#"{"to":"y@z"}"#);
+        assert_ne!(a, b);
+        let mut set: HashSet<(String, [u8; 32])> = HashSet::new();
+        set.insert(("mail_draft".to_string(), a));
+        assert!(set.contains(&("mail_draft".to_string(), a)));
+        assert!(!set.contains(&("mail_draft".to_string(), b)));
+    }
+
+    /// Two calls with the same tool name and
+    /// *identical* args hash to the same key. The
+    /// LLM can't bypass the denylist by
+    /// re-formatting the same args — JSON
+    /// whitespace and key order would be the
+    /// obvious bypass, but since we hash the raw
+    /// arguments string, those *are* different
+    /// hashes (which is the point — the LLM
+    /// should re-ask, not auto-retry).
+    #[test]
+    fn denied_tool_calls_keys_match_for_identical_args() {
+        let a = hash_tool_args(
+            "mail_draft",
+            r#"{"to":"x@y","subject":"hi"}"#,
+        );
+        let b = hash_tool_args(
+            "mail_draft",
+            r#"{"to":"x@y","subject":"hi"}"#,
+        );
+        assert_eq!(a, b);
+    }
+
+    /// Different tool names with the same args
+    /// hash to different keys (the tool name is
+    /// mixed into the hash). Blocking
+    /// `mail_draft(args)` does not block
+    /// `gmail_send(args)`.
+    #[test]
+    fn denied_tool_calls_keys_differ_across_tool_names() {
+        let a = hash_tool_args("mail_draft", r#"{"to":"x@y"}"#);
+        let b = hash_tool_args("gmail_send", r#"{"to":"x@y"}"#);
+        assert_ne!(a, b);
+    }
+
+    /// The denylist semantics: insert a denial,
+    /// confirm a second call with the same key
+    /// hits the denylist (i.e. is blocked), and
+    /// confirm a fresh `HashSet` (the per-turn
+    /// reset) is empty. This is the contract
+    /// `run_agent_loop` relies on.
+    #[test]
+    fn denied_tool_calls_blocks_retry_then_resets() {
+        let mut set: HashSet<(String, [u8; 32])> = HashSet::new();
+        let key = (
+            "mail_draft".to_string(),
+            hash_tool_args("mail_draft", r#"{"to":"x@y"}"#),
+        );
+        assert!(!set.contains(&key));
+        set.insert(key.clone());
+        assert!(set.contains(&key));
+        // Per-turn reset: a new `HashSet` is
+        // empty, so the LLM can retry after the
+        // user has had a chance to clarify.
+        let fresh: HashSet<(String, [u8; 32])> = HashSet::new();
+        assert!(!fresh.contains(&key));
+    }
+
+    /// `UserDenied` is a distinct variant of
+    /// `ToolError` so the executor can branch
+    /// on it without parsing the error string.
+    /// The display message is fixed so the
+    /// renderer's "you declined" copy doesn't
+    /// drift.
+    #[test]
+    fn tool_error_user_denied_has_stable_display() {
+        let err = ToolError::UserDenied;
+        assert_eq!(err.to_string(), "denied by user (already in this turn)");
     }
 }

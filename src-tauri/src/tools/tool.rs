@@ -60,6 +60,18 @@ pub enum ToolError {
     InvalidArguments(String),
     #[error("execution failed: {0}")]
     Execution(String),
+    /// v3.7.13 — The user (via the consent dialog
+    /// or the approval queue) has already denied
+    /// this exact tool call earlier in the same
+    /// LLM turn. The executor's tool loop returns
+    /// this instead of re-running the call. The
+    /// LLM sees the same `{"error":"denied by
+    /// user"}` shape it would for a fresh
+    /// rejection, but no synthetic `role=tool`
+    /// message is appended (the original denial
+    /// already did that).
+    #[error("denied by user (already in this turn)")]
+    UserDenied,
 }
 
 /// Optional side-band that the chat command can pass into a tool to

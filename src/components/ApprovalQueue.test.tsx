@@ -74,7 +74,17 @@ beforeEach(() => {
   vi.mocked(approvalDecide).mockReset();
   vi.mocked(approvalDecide).mockResolvedValue({
     approval: sampleApproval("ignored"),
-    tool_result: "ok",
+    // v3.7.13 — Mock the new structured result
+    // shape. The old `tool_result: "ok"` string is
+    // now `tool_result: { kind: "approved", ... }`.
+    // Tests that need a different shape (e.g.
+    // `denied`) override per-test.
+    tool_result: {
+      kind: "approved",
+      payload: { ok: true },
+      summary: "ok",
+    },
+    tool_result_string: "ok",
   });
 });
 
