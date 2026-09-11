@@ -12,6 +12,16 @@
 // `maxbot_lib::bots::...`. The `bots::scheduler::tick`
 // and `skills::executor::run_skill_inner` are the
 // scheduler-test surface.
+// agent-runtime/grok-shell-port — scaffolding for MaxBot's agent
+// runtime, modeled on `xai-org/grok-build`'s `xai-grok-shell` crate
+// (Apache-2.0). Two verbatim copies (`tier.rs`, `waterfall.rs`)
+// plus a small `entry.rs` stub that captures the Leader /
+// Stdio / Headless shape. The `bring_up` function is
+// intentionally not wired yet — concrete impls land in follow-up
+// slices that replace `crate::commands::chat` and
+// `crate::grok_build` respectively. See
+// `THIRD_PARTY_NOTICES.md` for the per-file attribution block.
+pub mod agent_runtime;
 pub mod approvals;
 pub mod bots;
 pub mod computer;
