@@ -772,14 +772,15 @@ describe("ComputerPanel — click-through takeover (v3.7.9)", () => {
     void container;
   });
 
-  it("the screenshot poll interval is 150ms while the mouse is down, 300ms otherwise", async () => {
+  it("the screenshot poll interval is 150ms while the mouse is down, 500ms otherwise", async () => {
     // v3.7.9: adaptive poll. The screenshot poll's
     // recursive tick sets `setTimeout(tick, delay)` where
     // `delay === 150` if `mouseDownRef.current === true`
-    // and `300` otherwise. The implementation reads
-    // `mouseDownRef` (a ref, not state) inside the
-    // tick callback, so each tick independently picks
-    // the right cadence.
+    // and `500` otherwise (v3.7.16: was 300 — see
+    // SCREENSHOT_POLL_MS for the rationale). The
+    // implementation reads `mouseDownRef` (a ref, not
+    // state) inside the tick callback, so each tick
+    // independently picks the right cadence.
     //
     // We don't drive pointer events here — the test
     // that handles those (the pointer down/move/up
@@ -813,20 +814,24 @@ describe("ComputerPanel — click-through takeover (v3.7.9)", () => {
     await waitFor(() => {
       expect(computerScreenshot).toHaveBeenCalled();
     });
-    // No driving: default cadence is 300ms. Wait
-    // ~700ms and measure the inter-call intervals.
-    await new Promise((r) => setTimeout(r, 700));
+    // No driving: default cadence is 500ms. Wait
+    // ~1200ms and measure the inter-call intervals.
+    // At 500ms cadence that gives us ~3 intervals
+    // (initial + 2 ticks).
+    await new Promise((r) => setTimeout(r, 1200));
     // At least 3 calls so we have 2 intervals.
     expect(timestamps.length).toBeGreaterThanOrEqual(3);
     const idleIntervals: number[] = [];
     for (let i = 1; i < timestamps.length; i++) {
       idleIntervals.push(timestamps[i] - timestamps[i - 1]);
     }
-    // All idle intervals should be at the 300ms
+    // All idle intervals should be at the 500ms
     // cadence (with generous tolerance for CI jitter
-    // — we just check they're not the 150ms cadence).
+    // — we just check they're not the 150ms cadence
+    // and not way over 500ms either).
     for (const interval of idleIntervals) {
-      expect(interval).toBeGreaterThanOrEqual(200);
+      expect(interval).toBeGreaterThanOrEqual(400);
+      expect(interval).toBeLessThan(900);
     }
   });
 
@@ -891,5 +896,176 @@ describe("ComputerPanel — click-through takeover (v3.7.9)", () => {
       );
       expect(title?.textContent).toBe("No computer");
     });
+  });
+
+  it("the screenshot poll short-circuits when the JPEG bytes are identical to the previous frame", async () => {
+    // v3.7.16 smoothness: idle VMs return the same
+    // QEMU framebuffer frame after frame. The poll
+    // compares the new bytes against `lastFrameBytesRef`
+    // and skips the setFrameUrl + URL.createObjectURL
+    // round-trip when they're identical. This test
+    // proves the short-circuit by spying on
+    // `URL.createObjectURL` and counting how many
+    // times it's called per IPC call. With identical
+    // bytes, exactly 1 create per IPC (the first
+    // frame, which is new by definition) — the
+    // subsequent identical frames are deduped.
+    vi.mocked(computerGet).mockResolvedValue(runningComputer);
+    const createSpy = vi.spyOn(URL, "createObjectURL");
+    const revokeSpy = vi.spyOn(URL, "revokeObjectURL");
+    // Force 3 calls to resolve with identical bytes.
+    vi.mocked(computerScreenshot).mockResolvedValue({
+      ...FAKE_JPEG,
+      // A different-bytes value the first time, then
+      // identical afterwards. The first call always
+      // creates a URL; the second + third are deduped.
+      bytes: new Uint8Array([0xff, 0xd8, 0xff, 0xaa, 0xff, 0xd9]),
+    });
+    const { unmount } = render(
+      <ComputerPanel
+        botId="bot-1"
+        mode="preview"
+        pollIntervalMs={60000}
+      />,
+    );
+    // Wait for the initial frame.
+    await waitFor(() => {
+      expect(computerScreenshot).toHaveBeenCalled();
+    });
+    // First call always creates a URL (1 create).
+    expect(createSpy).toHaveBeenCalledTimes(1);
+    // Now wait for at least 2 more polls (the second
+    // poll is ~500ms after the first, the third is
+    // ~1000ms after the first). We use 1200ms.
+    await new Promise((r) => setTimeout(r, 1200));
+    // computerScreenshot should have fired ≥ 3 times.
+    expect(computerScreenshot.mock.calls.length).toBeGreaterThanOrEqual(3);
+    // But createObjectURL was only called once — the
+    // second + third frames matched the first's
+    // bytes and short-circuited.
+    expect(createSpy).toHaveBeenCalledTimes(1);
+    expect(revokeSpy).not.toHaveBeenCalled();
+    // Cleanup: unmount triggers the final revoke.
+    unmount();
+    expect(revokeSpy).toHaveBeenCalledTimes(1);
+    createSpy.mockRestore();
+    revokeSpy.mockRestore();
+  });
+
+  it("the screenshot poll revokes the previous blob URL when bytes change", async () => {
+    // v3.7.16: when the bytes DO change (the VM is
+    // doing something), the poll creates a new blob
+    // URL and revokes the previous one. This is the
+    // invariant that prevents a 30-min preview from
+    // accumulating 3600 blob URLs in memory.
+    vi.mocked(computerGet).mockResolvedValue(runningComputer);
+    const createSpy = vi.spyOn(URL, "createObjectURL");
+    const revokeSpy = vi.spyOn(URL, "revokeObjectURL");
+    // First call returns bytes A, second returns bytes B.
+    let n = 0;
+    vi.mocked(computerScreenshot).mockImplementation(async () => {
+      n += 1;
+      return {
+        ...FAKE_JPEG,
+        bytes: new Uint8Array([n, 0xd8, 0xff, 0xaa, n, 0xd9]),
+      };
+    });
+    const { unmount } = render(
+      <ComputerPanel
+        botId="bot-1"
+        mode="preview"
+        pollIntervalMs={60000}
+      />,
+    );
+    await waitFor(() => {
+      expect(computerScreenshot).toHaveBeenCalled();
+    });
+    // First call: 1 create, 0 revoke.
+    expect(createSpy).toHaveBeenCalledTimes(1);
+    expect(revokeSpy).toHaveBeenCalledTimes(0);
+    // Wait for the second poll.
+    await new Promise((r) => setTimeout(r, 700));
+    expect(n).toBeGreaterThanOrEqual(2);
+    // Second call: another create + 1 revoke (of the
+    // first URL).
+    expect(createSpy).toHaveBeenCalledTimes(2);
+    expect(revokeSpy).toHaveBeenCalledTimes(1);
+    unmount();
+    // Unmount revoke: the second URL gets revoked.
+    expect(revokeSpy).toHaveBeenCalledTimes(2);
+    createSpy.mockRestore();
+    revokeSpy.mockRestore();
+  });
+
+  it("unmounting the panel revokes the active blob URL (no leak across open/close)", async () => {
+    // v3.7.16: the unmount-cleanup effect revokes the
+    // last blob URL. Without it, the user could open +
+    // close the Computer panel 100 times and end up
+    // with 100 pinned blob URLs in memory. With it,
+    // every panel-close pair balances create+revoke.
+    vi.mocked(computerGet).mockResolvedValue(runningComputer);
+    const createSpy = vi.spyOn(URL, "createObjectURL");
+    const revokeSpy = vi.spyOn(URL, "revokeObjectURL");
+    const { unmount } = render(
+      <ComputerPanel
+        botId="bot-1"
+        mode="preview"
+        pollIntervalMs={60000}
+      />,
+    );
+    await waitFor(() => {
+      expect(computerScreenshot).toHaveBeenCalled();
+    });
+    expect(createSpy).toHaveBeenCalled();
+    const createdCount = createSpy.mock.calls.length;
+    const revokedBefore = revokeSpy.mock.calls.length;
+    // Unmount — the active blob URL must be revoked
+    // in the cleanup effect.
+    unmount();
+    // The unmount cleanup revokes the most recent URL
+    // that the panel created. (Subsequent frames would
+    // also have been revoking the prior frame, but at
+    // this point only 1 frame has rendered, so the
+    // delta is +1.)
+    expect(revokeSpy.mock.calls.length).toBe(revokedBefore + 1);
+    // Net create-revoke balance: 0 (1 create on mount,
+    // 1 revoke on unmount). No leak.
+    expect(createSpy.mock.calls.length - revokeSpy.mock.calls.length).toBe(
+      createdCount - (revokedBefore + 1),
+    );
+    createSpy.mockRestore();
+    revokeSpy.mockRestore();
+  });
+
+  it("the screenshot poll does not run when the tab is hidden", async () => {
+    // v3.7.16: the poll short-circuits when
+    // `document.hidden === true`. Backgrounded tabs
+    // should not burn SSH + virsh + Tauri IPC.
+    vi.mocked(computerGet).mockResolvedValue(runningComputer);
+    // Force the test environment to look "hidden".
+    Object.defineProperty(document, "hidden", {
+      configurable: true,
+      get: () => true,
+    });
+    try {
+      render(
+        <ComputerPanel
+          botId="bot-1"
+          mode="preview"
+          pollIntervalMs={60000}
+        />,
+      );
+      // Wait long enough for the poll to have run
+      // many times if it weren't honoring hidden.
+      await new Promise((r) => setTimeout(r, 1200));
+      // No screenshot calls — the initial tick also
+      // returns early because of the hidden check.
+      expect(computerScreenshot).not.toHaveBeenCalled();
+    } finally {
+      Object.defineProperty(document, "hidden", {
+        configurable: true,
+        get: () => false,
+      });
+    }
   });
 });
