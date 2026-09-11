@@ -960,3 +960,52 @@ export interface GoogleOauthStatus {
   expires_at: string | null;
   scopes: string[];
 }
+
+// v3.7.17 Slice 2 — UI surface for `maxbot_loopd`. Mirrors
+// the Rust types in `commands::loopd` (LoopdStatus /
+// LoopdTask / LoopdJournal). Read-only with respect to
+// `loop/io` — these are the IPC shapes the renderer polls.
+
+/** Snapshot of `maxbot_loopd` for the Loop panel.
+ *  `state` is one of:
+ *  - `"alive"`     — STATE.json's pid is currently a live process.
+ *  - `"dead"`      — STATE.json exists but its pid is gone.
+ *  - `"no_state"`  — STATE.json doesn't exist (supervisor never ran). */
+export interface LoopdStatus {
+  state: "alive" | "dead" | "no_state";
+  alive: boolean;
+  pid: number | null;
+  turn: number | null;
+  completed_turn: number | null;
+  last_heartbeat: string | null;
+  age_secs: number | null;
+  started_at: string | null;
+  run_id: string | null;
+  last_action_id: string | null;
+  loop_dir: string;
+}
+
+/** Parsed TASK.md frontmatter + body. `exists=false` means the
+ *  file isn't on disk yet (supervisor has never written one —
+ *  e.g. on a fresh install the UI hasn't seeded anything). */
+export interface LoopdTask {
+  status: string;
+  body: string;
+  updated_at: string;
+  exists: boolean;
+}
+
+/** Last journal entry (today's date) for the Loop panel.
+ *  `last_heading` is the most recent `## Turn N @ t` line.
+ *  `last_actions` are the bullets under the most recent
+ *  `### Actions` section. `last_note` is the prose under the
+ *  most recent `### Note` (e.g. "recovered from kill-mid-
+ *  turn; action_id=..."). */
+export interface LoopdJournal {
+  date: string;
+  last_heading: string | null;
+  last_actions: string[];
+  last_note: string | null;
+  line_count: number;
+  exists: boolean;
+}

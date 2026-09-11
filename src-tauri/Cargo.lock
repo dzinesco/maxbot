@@ -2503,6 +2503,7 @@ dependencies = [
  "eventsource-stream",
  "futures-util",
  "image",
+ "libc",
  "log",
  "rand 0.8.8",
  "reqwest 0.12.28",

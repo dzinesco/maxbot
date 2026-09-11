@@ -167,6 +167,13 @@ pub fn run() {
                 recorder: std::sync::Arc::new(RecorderState::new()),
             });
             app.manage(Arc::new(AsyncMutex::new(StreamRegistry::default())));
+            // v3.7.17 Slice 2 — `maxbot_loopd` child handle. The UI's
+            // start/stop commands look this up; the source of truth
+            // for "is anything running?" is still STATE.json +
+            // `kill(pid, 0)`. The handle is just "did THIS Tauri
+            // session spawn it?" so a fresh Tauri launch can still
+            // see a daemon started by a previous session.
+            app.manage(commands::loopd::LoopdHandle::new());
             // Start the bot scheduler. It runs in a background tokio task
             // for the lifetime of the process, waking every 30s to fire
             // any bot whose schedule is due.
@@ -361,6 +368,15 @@ pub fn run() {
             // continues to work even when the daemon
             // is down.
             commands::daemon::push_settings_to_daemon,
+            // v3.7.17 Slice 2 — UI surface for `maxbot_loopd`.
+            // Spawn / stop / read. Read-only with respect to
+            // loop/io — the supervisor owns the canonical
+            // writes; this command set is the IPC adapter.
+            commands::loopd::loopd_status,
+            commands::loopd::loopd_start,
+            commands::loopd::loopd_stop,
+            commands::loopd::loopd_read_task,
+            commands::loopd::loopd_read_journal,
             // v3.7.12 — real Google OAuth. The renderer
             // drives the flow over IPC: start → open
             // browser → user grants consent → complete.

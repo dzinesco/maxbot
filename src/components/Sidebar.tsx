@@ -36,6 +36,13 @@ import type {
 } from "../lib/api";
 import { approvalPendingCount, computerGet, groupList } from "../lib/tauri";
 import { ActivityFeed } from "./ActivityFeed";
+// v3.7.17 Slice 2 — UI surface for `maxbot_loopd`. The
+// Loop panel sits between the ActivityFeed and the
+// footer so the user sees supervisor state + Start/Stop
+// without scrolling. The component is read-only with
+// respect to loop/io; only `loopdStart` / `loopdStop` are
+// lifecycle calls.
+import { LoopPanel } from "./LoopPanel";
 
 // Version pulled from package.json at build time so the sidebar
 // pill always matches the running app. The `data-version-channel`
@@ -311,6 +318,13 @@ export function Sidebar({
           so the user sees "what fired while I was
           away" without opening a separate view. */}
       <ActivityFeed />
+
+      {/* v3.7.17 Slice 2 — Loop supervisor panel.
+         Sits above the footer so it doesn't fight the
+         version pill + Settings button for row space.
+         Always visible (not collapsible for this slice —
+         the panel is small enough to fit without hiding). */}
+      <LoopPanel />
 
       <div className="sidebar-footer">
         <div

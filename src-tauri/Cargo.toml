@@ -56,6 +56,16 @@ env_logger = "0.11"
 async-trait = "0.1"
 sha2 = "0.10"
 base64 = "0.22"
+# v3.8.0 — Slice 2 UI surface for `maxbot_loopd`. We need
+# `kill(pid, 0)` (POSIX alive check) to distinguish "daemon
+# is alive and just stale" from "daemon died and STATE.json
+# is the corpse." `setsid()` in `pre_exec` lets the daemon
+# outlive the Tauri app: when the user quits MaxBot, the
+# daemon doesn't receive a SIGHUP because its session is
+# detached. `libc` is the minimum-dependency POSIX surface;
+# pulling `nix` just for two syscalls isn't worth the
+# compile-time hit.
+libc = "0.2"
 
 # v2.0 — ComputerManager: SSH into the per-Bot Linux VM, drive libvirt
 # over SSH on the user's Ubuntu server, encrypt per-Bot SSH keypairs
