@@ -63,6 +63,30 @@
   background: var(--bg-2);
 }
 
+/* v4 S6 — Right-aligned actions cluster in the header.
+   Computer button + Stop button sit side-by-side, separated
+   by 8px. Computer is hidden when App.tsx doesn't pass
+   onOpenComputer (ChatPane's `onOpenComputer &&` guard). */
+.v4-chat-pane-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.v4-chat-pane-computer {
+  flex-shrink: 0;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  padding: 4px 12px;
+  border-color: var(--border);
+  color: var(--text-1);
+}
+
+.v4-chat-pane-computer:hover:not(:disabled) {
+  background: var(--bg-2);
+}
+
 .v4-chat-pane-error {
   padding: 8px 20px;
   color: var(--danger);

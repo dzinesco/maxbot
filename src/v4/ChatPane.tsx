@@ -67,6 +67,13 @@ export interface ChatPaneProps {
    * title). Optional — when omitted, no title auto-update happens.
    */
   onFirstUserMessage?: (conversationId: string, content: string) => void;
+  /**
+   * v4 S6 — Called when the user clicks the `Computer` button
+   * in the chat header. App.tsx sets `view = "computer"`, which
+   * mounts ComputerRoute for the selected bot. Optional — when
+   * omitted, the Computer button is hidden.
+   */
+  onOpenComputer?: () => void;
 }
 
 interface AssistantDraft {
@@ -213,7 +220,7 @@ function generateRequestId(): string {
   return `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
-export function ChatPane({ bot, conversationId, onFirstUserMessage }: ChatPaneProps) {
+export function ChatPane({ bot, conversationId, onFirstUserMessage, onOpenComputer }: ChatPaneProps) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [composer, setComposer] = useState("");
   const [draft, setDraft] = useState<AssistantDraft | null>(null);
@@ -507,16 +514,30 @@ export function ChatPane({ bot, conversationId, onFirstUserMessage }: ChatPanePr
             {headerStatus}
           </span>
         </div>
-        {showStop && (
-          <button
-            type="button"
-            className="v4-chat-pane-stop small"
-            onClick={handleStop}
-            title="Stop the running assistant response"
-          >
-            Stop
-          </button>
-        )}
+        <div className="v4-chat-pane-header-actions">
+          {onOpenComputer && (
+            <button
+              type="button"
+              className="v4-chat-pane-computer small"
+              onClick={onOpenComputer}
+              aria-label={`Open Computer Use for ${bot.name}`}
+              title="Open Computer Use for this bot"
+              data-testid="v4-chat-pane-computer"
+            >
+              Computer
+            </button>
+          )}
+          {showStop && (
+            <button
+              type="button"
+              className="v4-chat-pane-stop small"
+              onClick={handleStop}
+              title="Stop the running assistant response"
+            >
+              Stop
+            </button>
+          )}
+        </div>
       </header>
 
       {error && (

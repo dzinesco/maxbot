@@ -344,6 +344,7 @@ export default function App() {
                 bot={selectedBot}
                 conversationId={selectedConvId}
                 onFirstUserMessage={handleFirstUserMessage}
+                onOpenComputer={handleOpenComputer}
               />
               {/* v4 S3 — ApprovalSheet renders the first pending
                   approval for the selected bot. Fetches on mount
