@@ -691,10 +691,14 @@ mod tests {
     use super::*;
 
     fn tempdir() -> PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
         let p = std::env::temp_dir().join(format!(
-            "maxbot-loop-test-{}-{}",
+            "maxbot-loop-test-{}-{}-{}",
             process::id(),
-            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0),
+            n,
         ));
         fs::create_dir_all(&p).unwrap();
         p
