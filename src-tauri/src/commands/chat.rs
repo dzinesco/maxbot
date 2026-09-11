@@ -39,12 +39,124 @@ use crate::AppState;
 /// runaway agents from hammering the API.
 const MAX_AGENT_ITERATIONS: u32 = 5;
 
+/// v3.7.16 — S3a. Per-turn failure threshold for an identical
+/// (tool_name, args_hash) pair. The first failure tells the LLM
+/// once; the second identical failure cancels the turn so the
+/// user sees what the model has so far instead of getting
+/// spammed with permission dialogs.
+const TOOL_FAILURE_AUTO_STOP: u32 = 2;
+
+/// v3.7.16 — S3a. The tool names that may pop the consent
+/// dialog / approval sheet. Tools outside this list either run
+/// silently (auto) or fail with a synthetic tool error. The
+/// renderer mirrors this list in
+/// `src/v4/lib/toolAllowlist.ts` — adding a tool here should
+/// land in both places.
+const TOOL_PERMISSION_ALLOWLIST: &[&str] = &[
+    // Mail / Gmail — outbound email.
+    "mail_draft",
+    "gmail_send",
+    // Calendar — outbound event creation.
+    "calendar_event_create",
+    // Computer Use — VM screen + browser.
+    "vm_computer_use",
+    "vm_browser_open",
+    // Loop daemon — start / stop / read.
+    "loopd_start",
+    "loopd_stop",
+    "loopd_status",
+    "loopd_read_task",
+    "loopd_read_journal",
+    // Mac-side browser automation.
+    "ego_browser",
+];
+
+/// v3.7.17 — S3a follow-up. Tools the model is NEVER allowed
+/// to call. A denylisted tool:
+///   - On the FIRST call: returns the synthetic message
+///     "invalid tool; answer in text" (no consent dialog, no
+///     execution).
+///   - On any subsequent call this turn: cancels the turn
+///     and surfaces the partial text answer to the user.
+///
+/// shell_run sits on this list because it's overkill for the
+/// questions the model actually asks it for ("what day is
+/// it?", "what time is it?"). The date_header_for_now system
+/// message gives the model the answer in text; the denylist
+/// is the safety net when the model ignores that header.
+const TOOL_DENYLIST: &[&str] = &[
+    "shell_run",
+];
+
+/// Synthetic error string for the FIRST call to a denylisted
+/// tool this turn. The model is told to answer in text.
+const TOOL_DENY_FIRST: &str = "invalid tool; answer in text";
+
+/// Synthetic error string for ANY subsequent call to the same
+/// denylisted tool this turn. Turn is cancelled after this is
+/// emitted; the user sees the partial text answer instead of
+/// another tool error.
+fn tool_deny_repeat_msg(name: &str) -> String {
+    format!(
+        "Tool '{}' is not available this turn. Answer without it.",
+        name
+    )
+}
+
 /// Per-chunk streaming timeout. If the provider goes silent for this
 /// long between chunks (cold start, TCP half-open, hung model), we
 /// surface a `stream stalled` error and let the UI recover. 90s
 /// accommodates the slowest cold starts while still failing fast on
 /// real stalls.
 pub(crate) const STREAM_CHUNK_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// v3.7.16 — S3a. Build the per-turn date header that gets
+/// prepended to the chat's system messages. Includes the rule
+/// the LLM must follow ("do not use tools for the current
+/// date") so the model doesn't burn a tool roundtrip on a
+/// calendar question. The header is rebuilt on every send — the
+/// date stays fresh across long-lived conversations.
+///
+/// v3.7.17 — S3a follow-up. Format changed from the bracketed
+/// key-value form to the natural-language form the model
+/// follows more reliably. Per Tyler's S3a brief: "Today is
+/// {local date, weekday, timezone}. Do not use tools to answer
+/// the current date or time."
+fn date_header_for_now() -> String {
+    let now = chrono::Local::now();
+    format!(
+        "Today is {}, {} {}, {}, {}. \
+         Do not use tools to answer the current date or time. \
+         When the user asks for today's date, the current day of the \
+         week, or the current time, answer directly from this header — \
+         do not call shell_run, vm_computer_use, or any other tool.\n",
+        now.format("%A"),   // Friday
+        now.format("%B"),   // September
+        now.format("%d"),   // 11
+        now.format("%Y"),   // 2026
+        now.format("%Z"),   // MDT
+    )
+}
+
+/// v3.7.17 — S3a follow-up. Truncate the first user message into
+/// a thread title. Word-boundary aware so we don't slice a word
+/// in half; ellipsis on truncation. Mirrors the JS
+/// `truncateTitle` in App.tsx — both sides agree on the rule.
+fn truncate_title_for_storage(text: &str, max: usize) -> String {
+    let trimmed = text.trim();
+    if trimmed.chars().count() <= max {
+        return trimmed.to_string();
+    }
+    // Walk back from `max` chars to find the last whitespace,
+    // so the cut lands at a word boundary.
+    let cut: String = trimmed.chars().take(max).collect();
+    if let Some(idx) = cut.rfind(|c: char| c.is_whitespace()) {
+        if idx > max / 2 {
+            return format!("{}…", &cut[..idx]);
+        }
+    }
+    format!("{}…", cut)
+}
 
 #[derive(Serialize, Clone)]
 struct ChunkEvent {
@@ -111,6 +223,40 @@ pub async fn send_message(
     .await
     .map_err(|e| e.to_string())?
     .map_err(|e| e.to_string())?;
+
+    // 1a. v3.7.17 — S3a follow-up. Auto-derive the thread title
+    // from the first user message. If the conversation's current
+    // title is still the Rust default ("New chat") or empty,
+    // overwrite it with a truncated version of this message.
+    // Subsequent sends keep whatever title is set (we never
+    // rename a user-edited title).
+    {
+        let db = state.db.clone();
+        let convo_id = conversation_id.clone();
+        let first_user_line = content.clone();
+        tokio::task::spawn_blocking(move || {
+            // Read current title.
+            let current = db.get_conversation_title(&convo_id).ok().flatten();
+            let needs_rename = match current.as_deref() {
+                None => false,                       // conversation gone — bail
+                Some("") | Some("New chat") => true, // default → rename
+                Some(_) => false,                    // user-set → leave alone
+            };
+            if needs_rename {
+                let new_title = truncate_title_for_storage(&first_user_line, 60);
+                // Only rename if the current row is STILL the
+                // default — protects against a concurrent rename
+                // (the JS UI calls renameConversation after send).
+                let _ = db.set_title_if(
+                    &convo_id,
+                    "New chat",
+                    &new_title,
+                );
+            }
+        })
+        .await
+        .ok();
+    }
 
     // 2. Pre-create the assistant message so we can stream into it.
     let db = state.db.clone();
@@ -280,7 +426,19 @@ async fn prepare_and_spawn_loop(
         .await
         .map_err(|e| e.to_string())?
         .map_err(|e| e.to_string())?;
-    let initial_messages = history_to_provider(&history);
+    let mut initial_messages = history_to_provider(&history);
+    // v3.7.16 — S3a. Inject today's date as a system message
+    // at the start of every turn. The header includes a rule
+    // telling the model NOT to call tools for the current date
+    // — the date is already here. The persisted system row
+    // (if any) stays untouched; this is layered on top per
+    // turn so long-lived conversations don't get a stale date.
+    initial_messages.insert(
+        0,
+        ChatMessage::System {
+            content: date_header_for_now(),
+        },
+    );
 
     // Tool registry includes MCP-backed tools loaded at startup.
     let registry = Arc::new(ToolRegistry::default_with_extras(
@@ -405,6 +563,15 @@ async fn run_agent_loop(
     // don't want the LLM to bypass the denylist
     // by reshuffling key order or whitespace.
     let mut denied_tool_calls: HashSet<(String, [u8; 32])> = HashSet::new();
+    // v3.7.16 — S3a. Per-turn counter of tool calls that
+    // FAILED with the same (tool_name, sha256(args)) pair. The
+    // map value is the count; we increment on each error, replace
+    // the error message on the FIRST failure so the LLM can
+    // retry with corrected args, and CANCEL the turn on the
+    // SECOND identical failure so the user isn't dragged into a
+    // click-loop. Cleared by a fresh user message (it's local to
+    // `run_agent_loop`).
+    let mut failed_tool_calls: HashMap<(String, [u8; 32]), u32> = HashMap::new();
 
     while iteration < MAX_AGENT_ITERATIONS {
         iteration += 1;
@@ -586,10 +753,71 @@ async fn run_agent_loop(
         //    Persist a `tool` role message per result so the model sees
         //    them on the next iteration. If the user cancelled mid-loop,
         //    abort.
+        //
+        // v3.7.17 — S3a follow-up. Per-turn count of calls to
+        // a denylisted tool. First call returns a synthetic error
+        // ("invalid tool; answer in text"); any subsequent call
+        // cancels the turn. The count is per tool name (NOT per
+        // args hash) because we want to catch the model retrying
+        // the same tool with slightly different args.
+        let mut denied_tool_count: HashMap<String, u32> = HashMap::new();
         for tc in &tool_calls {
             if cancel.is_cancelled() {
                 stop_reason = "cancelled".to_string();
                 break;
+            }
+            // v3.7.17 — S3a follow-up. Denylist short-circuit.
+            // Runs BEFORE consent / dedupe / execution so a
+            // denylisted tool never opens the Allow dialog, never
+            // reaches the registry, and never counts toward the
+            // generic dedupe map.
+            if TOOL_DENYLIST.contains(&tc.name.as_str()) {
+                let count = {
+                    let entry = denied_tool_count
+                        .entry(tc.name.clone())
+                        .or_insert(0);
+                    *entry += 1;
+                    *entry
+                };
+                let synthetic = if count == 1 {
+                    TOOL_DENY_FIRST.to_string()
+                } else {
+                    tool_deny_repeat_msg(&tc.name)
+                };
+                // Persist as a `tool` role message so the model
+                // sees the denial in its history on the next
+                // iteration.
+                let db_clone = db.clone();
+                let convo_clone = conversation_id.clone();
+                let tc_id_clone = tc.id.clone();
+                let content_clone = synthetic.clone();
+                let _ = tokio::task::spawn_blocking(move || {
+                    db_clone.insert_message(
+                        &convo_clone,
+                        MessageRole::Tool,
+                        &content_clone,
+                        &[PersistedToolCall {
+                            id: tc_id_clone,
+                            name: String::new(),
+                            arguments: String::new(),
+                        }],
+                    )
+                })
+                .await;
+                messages.push(ChatMessage::Tool {
+                    tool_call_id: tc.id.clone(),
+                    content: synthetic,
+                });
+                if count >= 2 {
+                    // Second (or later) call to a denylisted
+                    // tool this turn → cancel so the user sees
+                    // the partial text answer instead of more
+                    // tool errors.
+                    cancel.cancel();
+                    stop_reason = "denied_tool_repeated".to_string();
+                    break;
+                }
+                continue;
             }
             // v3.7.13 — Denylist check. The user
             // already rejected this exact call
@@ -601,6 +829,93 @@ async fn run_agent_loop(
             // collision-resistant key — see the
             // comment on `denied_tool_calls` above.
             let args_hash = hash_tool_args(&tc.name, &tc.arguments);
+            // v3.7.16 — S3a. Per-turn dedupe of identical
+            // tool calls. If this exact (name, args) has
+            // already failed once this turn, skip the
+            // consent dialog AND the tool execution —
+            // just push the synthetic failure message and
+            // bump the counter. The second identical
+            // failure cancels the turn.
+            if let Some(&prior_failures) =
+                failed_tool_calls.get(&(tc.name.clone(), args_hash))
+            {
+                if prior_failures >= 1 {
+                    let n = {
+                        let entry = failed_tool_calls
+                            .entry((tc.name.clone(), args_hash))
+                            .or_insert(0);
+                        *entry += 1;
+                        *entry
+                    };
+                    if n >= TOOL_FAILURE_AUTO_STOP {
+                        // Second (or later) identical failure
+                        // → cancel the turn so the user sees
+                        // what the model has so far.
+                        let stop_msg = format!(
+                            "Tool '{}' failed {} times with the same \
+                             arguments. Stopping the turn — answer \
+                             from the text above.",
+                            tc.name, n,
+                        );
+                        let db_clone = db.clone();
+                        let convo_clone = conversation_id.clone();
+                        let tc_id_clone = tc.id.clone();
+                        let content_clone = stop_msg.clone();
+                        let _ = tokio::task::spawn_blocking(move || {
+                            db_clone.insert_message(
+                                &convo_clone,
+                                MessageRole::Tool,
+                                &content_clone,
+                                &[PersistedToolCall {
+                                    id: tc_id_clone,
+                                    name: String::new(),
+                                    arguments: String::new(),
+                                }],
+                            )
+                        })
+                        .await;
+                        messages.push(ChatMessage::Tool {
+                            tool_call_id: tc.id.clone(),
+                            content: stop_msg,
+                        });
+                        cancel.cancel();
+                        break;
+                    } else {
+                        // Defensive — the only way to reach
+                        // here with n < 2 is if the prior
+                        // failures count was somehow < 1.
+                        // Treat as first retry.
+                        let synthetic = format!(
+                            "Tool '{}' failed again. Do not retry this \
+                             exact call — answer without tools or try \
+                             a different tool.",
+                            tc.name,
+                        );
+                        let db_clone = db.clone();
+                        let convo_clone = conversation_id.clone();
+                        let tc_id_clone = tc.id.clone();
+                        let content_clone = synthetic.clone();
+                        let _ = tokio::task::spawn_blocking(move || {
+                            db_clone.insert_message(
+                                &convo_clone,
+                                MessageRole::Tool,
+                                &content_clone,
+                                &[PersistedToolCall {
+                                    id: tc_id_clone,
+                                    name: String::new(),
+                                    arguments: String::new(),
+                                }],
+                            )
+                        })
+                        .await;
+                        messages.push(ChatMessage::Tool {
+                            tool_call_id: tc.id.clone(),
+                            content: synthetic,
+                        });
+                        continue;
+                    }
+                }
+            }
             if denied_tool_calls.contains(&(tc.name.clone(), args_hash)) {
                 let skip_content = serde_json::to_string(
                     &serde_json::json!({"error": "denied by user"}),
@@ -632,7 +947,39 @@ async fn run_agent_loop(
                 continue;
             }
             let consent_granted = if registry.requires_consent(&tc.name) {
-                ask_consent(&app, &tc.name, &tc.arguments)
+                // v3.7.16 — S3a. The consent dialog is
+                // gated on TOOL_PERMISSION_ALLOWLIST.
+                // Tools outside the allowlist (e.g.
+                // file_read on a local path, web_search,
+                // shell_run on the user's own machine)
+                // run auto — only mail / computer /
+                // loopd actually touch the world in a
+                // way the user wants to gate. Adding a
+                // tool to the allowlist should land in
+                // both this list AND the renderer's
+                // `src/v4/lib/toolAllowlist.ts`.
+                if TOOL_PERMISSION_ALLOWLIST
+                    .contains(&tc.name.as_str())
+                {
+                    // v3.7.16 — S3a. If this exact call
+                    // has already failed once this turn,
+                    // skip the dialog entirely. The LLM
+                    // is just retrying a bad call; we
+                    // return the synthetic failure again
+                    // (handled after the dedupe block
+                    // below) and bump the counter — the
+                    // second failure cancels the turn.
+                    if failed_tool_calls
+                        .contains_key(&(tc.name.clone(), args_hash))
+                    {
+                        false
+                    } else {
+                        ask_consent(&app, &tc.name, &tc.arguments)
+                    }
+                } else {
+                    // Outside the allowlist → auto-grant.
+                    true
+                }
             } else {
                 true
             };
@@ -642,9 +989,11 @@ async fn run_agent_loop(
             // different tool failed) is blocked.
             // The set is local to `run_agent_loop`,
             // so a fresh user message resets it.
-            if registry.requires_consent(&tc.name) && !consent_granted {
-                denied_tool_calls
-                    .insert((tc.name.clone(), args_hash));
+            if TOOL_PERMISSION_ALLOWLIST.contains(&tc.name.as_str())
+                && registry.requires_consent(&tc.name)
+                && !consent_granted
+            {
+                denied_tool_calls.insert((tc.name.clone(), args_hash));
             }
             let invocation = ToolInvocation {
                 name: tc.name.clone(),
@@ -686,10 +1035,44 @@ async fn run_agent_loop(
                 denied_tool_calls
                     .insert((tc.name.clone(), args_hash));
             }
-            let (content, is_error) = match result {
+            let (mut content, is_error) = match result {
                 Ok(r) => (r.content, r.is_error),
                 Err(e) => (format!("[error] {}", e), true),
             };
+            // v3.7.16 — S3a. Per-turn failure tracking. On
+            // the FIRST error for a given (name, args), bump
+            // the counter and replace the error message so
+            // the LLM knows the call failed and shouldn't
+            // retry the same args. The SECOND identical
+            // failure is caught by the dedupe branch above
+            // (it fires before consent + execution, so the
+            // tool doesn't actually run again).
+            if is_error {
+                let n = {
+                    let entry = failed_tool_calls
+                        .entry((tc.name.clone(), args_hash))
+                        .or_insert(0);
+                    *entry += 1;
+                    *entry
+                };
+                content = format!(
+                    "Tool '{}' failed: {}. \
+                     Do not retry this exact call — answer without \
+                     tools or try a different tool with corrected \
+                     arguments.",
+                    tc.name, content,
+                );
+                let _ = n; // n == 1 here; the second attempt
+                           // short-circuits via the dedupe
+                           // branch above.
+            } else {
+                // Success — clear any prior failure count
+                // for this exact call. The LLM may legitimately
+                // call the same tool with the same args in a
+                // later iteration after fixing the underlying
+                // problem.
+                failed_tool_calls.remove(&(tc.name.clone(), args_hash));
+            }
             // Persist the tool result as a `tool` message.
             let db_clone = db.clone();
             let convo_clone = conversation_id.clone();
@@ -940,5 +1323,206 @@ mod tests {
     fn tool_error_user_denied_has_stable_display() {
         let err = ToolError::UserDenied;
         assert_eq!(err.to_string(), "denied by user (already in this turn)");
+    }
+
+    // ---- v3.7.16 — S3a. failed_tool_calls counter ----
+
+    /// The counter is keyed the same way as
+    /// `denied_tool_calls` — `(tool_name,
+    /// sha256(args))`. Two different args hash to
+    /// different keys; the LLM legitimately retrying
+    /// with corrected args starts a fresh counter.
+    #[test]
+    fn failed_tool_calls_keys_differ_for_different_args() {
+        let mut map: HashMap<(String, [u8; 32]), u32> = HashMap::new();
+        let key_a = (
+            "shell_run".to_string(),
+            hash_tool_args("shell_run", r#"{"command":"date"}"#),
+        );
+        let key_b = (
+            "shell_run".to_string(),
+            hash_tool_args("shell_run", r#"{"command":"ls"}"#),
+        );
+        assert_ne!(key_a.1, key_b.1);
+        map.insert(key_a.clone(), 1);
+        assert!(map.contains_key(&key_a));
+        assert!(!map.contains_key(&key_b));
+    }
+
+    /// Two identical failures push the counter to 2.
+    /// That's the `TOOL_FAILURE_AUTO_STOP` threshold —
+    /// the dedupe branch in `run_agent_loop` cancels
+    /// the turn on the second identical call.
+    #[test]
+    fn failed_tool_calls_counter_increments_on_each_failure() {
+        let mut map: HashMap<(String, [u8; 32]), u32> = HashMap::new();
+        let key = (
+            "shell_run".to_string(),
+            hash_tool_args("shell_run", r#"{}"#),
+        );
+        let entry = map.entry(key.clone()).or_insert(0);
+        *entry += 1;
+        let entry = map.entry(key.clone()).or_insert(0);
+        *entry += 1;
+        assert_eq!(*map.get(&key).unwrap(), 2);
+        assert!(2 >= TOOL_FAILURE_AUTO_STOP);
+    }
+
+    /// A success clears the counter for that exact
+    /// call — the LLM may legitimately call the same
+    /// tool with the same args in a later iteration
+    /// after fixing the underlying problem (e.g.
+    /// after the user provided the missing field).
+    #[test]
+    fn failed_tool_calls_counter_clears_on_success() {
+        let mut map: HashMap<(String, [u8; 32]), u32> = HashMap::new();
+        let key = (
+            "shell_run".to_string(),
+            hash_tool_args("shell_run", r#"{"command":"date"}"#),
+        );
+        map.insert(key.clone(), 1);
+        assert_eq!(*map.get(&key).unwrap(), 1);
+        // Tool succeeds.
+        map.remove(&key);
+        assert!(!map.contains_key(&key));
+    }
+
+    /// Per-turn reset: a new `HashMap` is empty. The
+    /// LLM can retry after the user has had a chance
+    /// to clarify intent.
+    #[test]
+    fn failed_tool_calls_resets_per_turn() {
+        let mut map: HashMap<(String, [u8; 32]), u32> = HashMap::new();
+        let key = (
+            "shell_run".to_string(),
+            hash_tool_args("shell_run", r#"{}"#),
+        );
+        map.insert(key.clone(), 2);
+        assert_eq!(*map.get(&key).unwrap(), 2);
+        // Per-turn reset — the run_agent_loop local
+        // map goes out of scope.
+        let fresh: HashMap<(String, [u8; 32]), u32> = HashMap::new();
+        assert!(!fresh.contains_key(&key));
+    }
+
+    // ---- v3.7.16 — S3a. TOOL_PERMISSION_ALLOWLIST ----
+
+    /// The allowlist contains the world-touching tools
+    /// the renderer + server agree on. Adding a tool
+    /// here should land in
+    /// `src/v4/lib/toolAllowlist.ts` too.
+    ///
+    /// v3.7.17 — S3a follow-up. shell_run is no longer in
+    /// this allowlist; it moved to TOOL_DENYLIST because the
+    /// model kept calling it for "what day is it?" instead of
+    /// answering in text from the date header.
+    #[test]
+    fn tool_permission_allowlist_contains_expected_world_touching_tools() {
+        for tool in [
+            "mail_draft",
+            "gmail_send",
+            "calendar_event_create",
+            "vm_computer_use",
+            "vm_browser_open",
+            "loopd_start",
+            "loopd_stop",
+            "loopd_status",
+            "loopd_read_task",
+            "loopd_read_journal",
+            "ego_browser",
+        ] {
+            assert!(
+                TOOL_PERMISSION_ALLOWLIST.contains(&tool),
+                "expected {tool} in TOOL_PERMISSION_ALLOWLIST"
+            );
+        }
+        // shell_run is intentionally NOT here — see TOOL_DENYLIST.
+        assert!(
+            !TOOL_PERMISSION_ALLOWLIST.contains(&"shell_run"),
+            "shell_run should be in TOOL_DENYLIST, not TOOL_PERMISSION_ALLOWLIST"
+        );
+    }
+
+    // ---- v3.7.17 — S3a follow-up. TOOL_DENYLIST ----
+
+    /// shell_run is on the denylist. Any other tool the model
+    /// might emit should NOT be on this list — denylisting is
+    /// intentionally narrow.
+    #[test]
+    fn tool_denylist_contains_shell_run() {
+        assert!(TOOL_DENYLIST.contains(&"shell_run"));
+        assert_eq!(TOOL_DENYLIST.len(), 1);
+    }
+
+    // ---- v3.7.16 — S3a. date_header_for_now ----
+
+    /// The date header contains today's date in
+    /// natural-language form (weekday, month, day, year, TZ)
+    /// AND the rule telling the LLM not to call tools for the
+    /// current date. v3.7.17 changed the format from
+    /// bracketed YYYY-MM-DD to the natural-language form the
+    /// model follows more reliably.
+    #[test]
+    fn date_header_for_now_contains_today_and_rule() {
+        let header = date_header_for_now();
+        // Year + day-of-month are still present (just inside
+        // the natural-language form, not as ISO YYYY-MM-DD).
+        let year = chrono::Local::now().format("%Y").to_string();
+        let month = chrono::Local::now().format("%B").to_string();
+        let day = chrono::Local::now().format("%d").to_string();
+        assert!(
+            header.contains(&year),
+            "expected year ({year}) in header: {header}"
+        );
+        assert!(
+            header.contains(&month),
+            "expected month ({month}) in header: {header}"
+        );
+        assert!(
+            header.contains(&day.trim_start_matches('0')),
+            "expected day-of-month ({day}) in header: {header}"
+        );
+        // Weekday — e.g. "Friday".
+        let weekday = chrono::Local::now().format("%A").to_string();
+        assert!(
+            header.contains(&weekday),
+            "expected weekday ({weekday}) in header: {header}"
+        );
+        // The "don't call tools for date" rule.
+        assert!(
+            header.to_lowercase().contains("do not use tools"),
+            "expected no-tools-for-date rule in header: {header}"
+        );
+    }
+
+    // ---- v3.7.17 — S3a follow-up. truncate_title_for_storage ----
+
+    #[test]
+    fn truncate_title_short_text_returned_unchanged() {
+        assert_eq!(truncate_title_for_storage("hi", 60), "hi");
+    }
+
+    #[test]
+    fn truncate_title_long_text_breaks_at_word_boundary() {
+        // Use a sentence whose 20-char prefix ends mid-word
+        // (after "lon" of "long"), so the boundary-cut rule
+        // must fire — otherwise the cut would slice "long"
+        // into "lon" + ellipsis.
+        let s = "this is a fairly long first user message";
+        let out = truncate_title_for_storage(s, 20);
+        // Ellipsis terminates the cut.
+        assert!(out.ends_with('…'), "expected ellipsis: {out:?}");
+        // Cut is at most 20 chars + ellipsis.
+        assert!(out.chars().count() <= 21, "too long: {out:?}");
+        // The cut text (without the trailing ellipsis) must
+        // end at a word boundary — the next char in the source
+        // string must be whitespace, otherwise we sliced a
+        // word in half.
+        let cut_part: String = out.chars().take_while(|c| *c != '…').collect();
+        let next_char = s.chars().nth(cut_part.chars().count());
+        assert!(
+            next_char.map(|c| c.is_whitespace()).unwrap_or(true),
+            "cut should end at word boundary: {out:?}"
+        );
     }
 }

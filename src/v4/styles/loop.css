@@ -1,23 +1,29 @@
 /*
- * v4 — Loop surface styles.
+ * v4 — Loop surface styles (S2.6 — small text chip in rail footer).
  *
- * Two components:
- * - LoopChip: pill + Start/Stop buttons. Always rendered.
- * - LoopExpanded: TASK.md + journal. Mounted only when open.
+ * Per the S2.6 brief:
+ *   - Loop: small text chip in the rail footer.
+ *   - Remove the big white Start button from the default rail.
  *
- * Vocabulary: same as the v3 Slice 3 LoopPanel so the colors
- * stay consistent for users moving between the v3 dev build
- * and the v4 shell.
+ * The chip is now a single text row. The Start/Stop action
+ * is parked — it lived in the chip's actions div, which is
+ * removed here. The expanded panel (LoopExpanded) still shows
+ * the TASK + journal when opened.
+ *
+ * S2.5 had a colorful Loop chip with primary-blue Start and
+ * red Stop buttons in a 2-column row below the toggle. Both
+ * the actions row and the color are dropped here for the
+ * Grok look.
  */
 
 .v4-loop-chip {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  padding: 8px 12px;
-  border-top: 1px solid var(--border);
+  padding: 8px 14px 12px;
+  flex-shrink: 0;
 }
 
+/* Compact text toggle — no border, no fill, just type + caret. */
 .v4-loop-chip-toggle {
   display: flex;
   align-items: center;
@@ -25,38 +31,40 @@
   width: 100%;
   text-align: left;
   background: transparent;
-  border: 1px solid transparent;
-  padding: 4px 6px;
-  border-radius: var(--radius-sm);
+  border: none;
+  padding: 0;
+  cursor: pointer;
 }
 
 .v4-loop-chip-toggle:hover {
-  background: var(--bg-2);
+  /* Subtle: just brighten the text, no fill change. */
+  color: var(--text-0);
 }
 
 .v4-loop-chip-toggle.is-open {
-  background: var(--bg-2);
+  color: var(--text-0);
 }
 
 .v4-loop-chip-indicator {
-  width: 8px;
-  height: 8px;
+  width: 6px;
+  height: 6px;
   border-radius: 50%;
   flex-shrink: 0;
   background: var(--text-3);
 }
 
+/* Single muted dot — no glow, no rainbow. */
 .v4-loop-chip-indicator--alive {
-  background: var(--success);
-  box-shadow: 0 0 6px rgba(34, 197, 94, 0.5);
+  background: var(--text-2);
 }
 
 .v4-loop-chip-indicator--dead {
-  background: var(--danger);
+  background: var(--text-3);
+  opacity: 0.6;
 }
 
 .v4-loop-chip-indicator--idle {
-  background: var(--warn);
+  background: var(--text-3);
 }
 
 .v4-loop-chip-indicator--unknown {
@@ -79,33 +87,10 @@
   flex-shrink: 0;
 }
 
-.v4-loop-chip-actions {
-  display: flex;
-  gap: 6px;
-  padding: 0 6px;
-}
-
-.v4-loop-chip-action {
-  flex: 1;
-  font-size: 12px;
-  padding: 4px 8px;
-}
-
-.v4-loop-chip-action.primary {
-  background: var(--accent);
-  border-color: var(--accent);
-  color: var(--text-0);
-}
-
-.v4-loop-chip-action.danger {
-  border-color: var(--danger);
-  color: var(--danger);
-}
-
 /* Expanded panel — slides in below the chip. */
 
 .v4-loop-expanded {
-  padding: 8px 12px 12px;
+  padding: 8px 14px 12px;
   border-top: 1px dashed var(--border);
   display: flex;
   flex-direction: column;
@@ -121,15 +106,15 @@
 }
 
 .v4-loop-expanded-title {
-  font-weight: 600;
+  font-weight: 500;
   color: var(--text-2);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  font-size: 10px;
+  font-size: 11px;
 }
 
 .v4-loop-expanded-refresh {
   flex-shrink: 0;
+  font-size: 11px;
+  padding: 2px 6px;
 }
 
 .v4-loop-expanded-task {
@@ -139,39 +124,25 @@
   line-height: 1.4;
 }
 
+/* Pills are now monochrome — same tone as the text-2 muted. */
 .v4-loop-expanded-pill {
   display: inline-block;
   padding: 1px 6px;
-  border-radius: 999px;
+  border-radius: var(--radius-sm);
   font-size: 10px;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  background: var(--bg-3);
+  background: transparent;
   color: var(--text-2);
   border: 1px solid var(--border);
   flex-shrink: 0;
 }
 
-.v4-loop-expanded-pill--running {
-  background: rgba(34, 197, 94, 0.15);
-  color: var(--success);
-  border-color: rgba(34, 197, 94, 0.4);
-}
-
-.v4-loop-expanded-pill--done {
-  background: rgba(148, 163, 184, 0.15);
-  color: var(--text-2);
-}
-
-.v4-loop-expanded-pill--blocked {
-  background: rgba(251, 191, 36, 0.15);
-  color: var(--warn);
-  border-color: rgba(251, 191, 36, 0.4);
-}
-
+.v4-loop-expanded-pill--running,
+.v4-loop-expanded-pill--done,
+.v4-loop-expanded-pill--blocked,
 .v4-loop-expanded-pill--idle {
-  background: rgba(148, 163, 184, 0.1);
-  color: var(--text-3);
+  background: transparent;
+  color: var(--text-2);
+  border-color: var(--border);
 }
 
 .v4-loop-expanded-task-body {
@@ -179,6 +150,7 @@
   min-width: 0;
   word-break: break-word;
   white-space: pre-wrap;
+  color: var(--text-1);
 }
 
 .v4-loop-expanded-journal {
@@ -188,14 +160,14 @@
 }
 
 .v4-loop-expanded-journal--empty {
-  color: var(--text-3);
+  color: var(--text-2);
   font-style: italic;
 }
 
 .v4-loop-expanded-journal-heading {
   font-family: var(--font-mono);
   font-size: 11px;
-  color: var(--text-3);
+  color: var(--text-2);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -226,12 +198,12 @@
 
 .v4-loop-expanded-journal-note {
   font-size: 11px;
-  color: var(--text-3);
+  color: var(--text-2);
   font-style: italic;
 }
 
 .v4-loop-expanded-empty {
-  color: var(--text-3);
+  color: var(--text-2);
   font-style: italic;
 }
 

@@ -24,15 +24,24 @@ export interface RosterProps {
   onSelectBot: (botId: string) => void;
 }
 
-function relativeTime(iso: string | null | undefined): string {
-  if (!iso) return "—";
+/** Single muted status word + optional relative time. The em-dash
+ *  fallback is dropped — if there's no `last_active_at`, we just
+ *  show the status word alone. S2.6 brief: "Idle" only. */
+function statusLine(
+  state: BotState | undefined,
+  iso: string | null | undefined,
+): string {
+  const word = statusWord(state);
+  if (!iso) return word;
   const t = Date.parse(iso);
-  if (Number.isNaN(t)) return "—";
+  if (Number.isNaN(t)) return word;
   const diff = Date.now() - t;
-  if (diff < 60_000) return "just now";
-  if (diff < 60 * 60_000) return `${Math.floor(diff / 60_000)}m ago`;
-  if (diff < 24 * 60 * 60_000) return `${Math.floor(diff / (60 * 60_000))}h ago`;
-  return `${Math.floor(diff / (24 * 60 * 60_000))}d ago`;
+  let when: string;
+  if (diff < 60_000) when = "just now";
+  else if (diff < 60 * 60_000) when = `${Math.floor(diff / 60_000)}m ago`;
+  else if (diff < 24 * 60 * 60_000) when = `${Math.floor(diff / (60 * 60_000))}h ago`;
+  else when = `${Math.floor(diff / (24 * 60 * 60_000))}d ago`;
+  return `${word} · ${when}`;
 }
 
 /** Single muted status word for the roster row. One color, one tone. */
@@ -118,7 +127,7 @@ export function Roster({ bots, selectedBotId, onSelectBot }: RosterProps) {
       {bots.map((bot) => {
         const selected = bot.id === selectedBotId;
         const status = statusWord(bot.state);
-        const when = relativeTime(bot.last_active_at);
+        const line = statusLine(bot.state, bot.last_active_at);
         return (
           <li key={bot.id}>
             <button
@@ -131,9 +140,7 @@ export function Roster({ bots, selectedBotId, onSelectBot }: RosterProps) {
               <Avatar name={bot.name} icon={bot.icon} color={bot.color} />
               <span className="v4-roster-text">
                 <span className="v4-roster-name">{bot.name}</span>
-                <span className="v4-roster-when">
-                  {status} · {when}
-                </span>
+                <span className="v4-roster-when">{line}</span>
               </span>
             </button>
           </li>

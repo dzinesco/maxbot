@@ -22,9 +22,15 @@ function truncateBody(body: string, max = 240): string {
 export interface LoopExpandedProps {
   /** True while this panel should be mounted + visible. */
   open: boolean;
+  /** Start the loop. Wired by App.tsx (parked in S2.6 — chip is
+   *  text-only in the rail, action lives here in the expanded
+   *  panel for a future slice that re-adds it). */
+  onStart?: () => void | Promise<void>;
+  /** Stop the loop. Same parking as `onStart`. */
+  onStop?: () => void | Promise<void>;
 }
 
-export function LoopExpanded({ open }: LoopExpandedProps) {
+export function LoopExpanded({ open, onStart, onStop }: LoopExpandedProps) {
   const [task, setTask] = useState<LoopdTask | null>(null);
   const [journal, setJournal] = useState<LoopdJournal | null>(null);
   const [busy, setBusy] = useState(false);

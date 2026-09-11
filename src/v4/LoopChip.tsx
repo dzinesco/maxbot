@@ -1,23 +1,20 @@
 /*
- * v4 — LoopChip
+ * v4 — LoopChip (S2.6 — small text chip in rail footer)
  *
- * Status pill for `maxbot_loopd`. Always rendered. Fetches
- * `loopdStatus` ONCE on mount. No setInterval. No polling.
+ * Per the S2.6 brief:
+ *   - Loop: small text chip in the rail footer.
+ *   - Remove the big white Start button from the default rail.
  *
- * Re-fetches status on:
- * - Window focus (via useFocusRefresh) — cheap, user-driven.
- * - Manual Start/Stop button click — callback bubbles up to
- *   App.tsx which calls loopdStart/loopdStop and re-renders.
+ * The chip is now a single text row — status word + caret.
+ * The Start/Stop action moves out of v4 entirely; users who
+ * need to manage `maxbot_loopd` fall back to the daily
+ * /Applications/MaxBot.app (where the Loop panel is full-
+ * featured). Re-adding the action in v4 is a follow-up slice.
  *
- * Click the chip to expand into LoopExpanded (full task body +
- * last journal heading). The expanded body is fetched on demand
- * inside LoopExpanded — this chip never holds the body.
- *
- * Per Tyler's v4 hard rules: "no setInterval unless surface
- * visible" — the chip IS always visible, but the data it shows
- * is "what's the daemon doing right now" which is itself a
- * low-cardinality state field, not a stream. One fetch on
- * focus is enough.
+ * Per the v4 hard rules:
+ *   - No setInterval — status is fetched once on mount +
+ *     on window focus.
+ *   - Listeners paired with unlistens in the same useEffect.
  */
 
 import { useEffect, useState } from "react";
@@ -31,12 +28,6 @@ export interface LoopChipProps {
   onToggleExpand: () => void;
   /** Whether the expand panel is currently open. Drives styling. */
   expanded: boolean;
-  /** Called when the user clicks Start. App.tsx handles the IPC. */
-  onStart: () => void;
-  /** Called when the user clicks Stop. App.tsx handles the IPC. */
-  onStop: () => void;
-  /** True while a Start/Stop IPC is in flight. Disables buttons. */
-  busy: boolean;
 }
 
 function statusLabel(
@@ -47,18 +38,12 @@ function statusLabel(
     return { text: `Loop alive · pid ${s.pid ?? "?"}`, tone: "alive" };
   }
   if (s.state === "dead") {
-    return { text: "Loop dead · Start", tone: "dead" };
+    return { text: "Loop dead", tone: "dead" };
   }
-  return { text: "Loop idle · Start", tone: "idle" };
+  return { text: "Loop idle", tone: "idle" };
 }
 
-export function LoopChip({
-  onToggleExpand,
-  expanded,
-  onStart,
-  onStop,
-  busy,
-}: LoopChipProps) {
+export function LoopChip({ onToggleExpand, expanded }: LoopChipProps) {
   const [status, setStatus] = useState<LoopdStatus | null>(null);
 
   const refresh = () => {
@@ -83,8 +68,6 @@ export function LoopChip({
   useFocusRefresh(refresh);
 
   const label = statusLabel(status);
-  const showStart = status?.state !== "alive";
-  const showStop = status?.state === "alive";
 
   return (
     <section className="v4-loop-chip" aria-label="Loop supervisor">
@@ -93,6 +76,7 @@ export function LoopChip({
         className={`v4-loop-chip-toggle ${expanded ? "is-open" : ""}`}
         onClick={onToggleExpand}
         aria-expanded={expanded}
+        title="Loop supervisor — click to expand"
       >
         <span
           className={`v4-loop-chip-indicator v4-loop-chip-indicator--${label.tone}`}
@@ -104,32 +88,6 @@ export function LoopChip({
           {expanded ? "▾" : "▸"}
         </span>
       </button>
-      {(showStart || showStop) && (
-        <div className="v4-loop-chip-actions">
-          {showStart && (
-            <button
-              type="button"
-              className="v4-loop-chip-action primary"
-              onClick={onStart}
-              disabled={busy}
-              title="Start maxbot_loopd"
-            >
-              {busy ? "Starting…" : "Start"}
-            </button>
-          )}
-          {showStop && (
-            <button
-              type="button"
-              className="v4-loop-chip-action danger"
-              onClick={onStop}
-              disabled={busy}
-              title="Stop maxbot_loopd (SIGTERM, then SIGKILL)"
-            >
-              {busy ? "Stopping…" : "Stop"}
-            </button>
-          )}
-        </div>
-      )}
     </section>
   );
 }

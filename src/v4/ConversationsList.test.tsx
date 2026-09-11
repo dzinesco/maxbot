@@ -1,31 +1,23 @@
-// v4 — ConversationsList tests.
+// v4 — ConversationsList tests (S2.6 — display-only).
 //
-// Per the S2 brief:
-//   - "Conversation list for the selected bot only, fetched on
-//      bot select, not at boot."
-//   - "Tests: new chat, switch thread, persist selected bot."
+// S2.6 — ConversationsList no longer fetches. App.tsx holds the
+// conversation list (lifted state) and passes it down via the
+// `conversations` prop. Coverage:
 //
-// Coverage:
 //   1. Mounting with botId=null renders nothing.
-//   2. Mounting with a botId calls listConversations(bot.id)
-//      exactly once (NOT at boot, NOT per render).
-//   3. Sorted by updated_at desc.
+//   2. Renders the conversations passed via prop (no IPC).
+//   3. Sorted by updated_at desc — verified by the prop order
+//      (App.tsx sorts before passing).
 //   4. Clicking a row fires onSelectConv.
-//   5. Clicking "New chat" fires onNewChat.
-//   6. Switching botId re-fetches.
-//   7. selectedConvId that isn't in the current list triggers
-//      a refetch (the new-chat-after-select path).
+//   5. Clicking "+ New chat" fires onNewChat.
+//   6. Selected conversation row has is-selected class.
+//   7. Empty list shows the "No threads yet." message.
+//   8. Loading state (conversations=null) shows the Loading row.
 
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { ConversationsList } from "./ConversationsList";
 import type { Conversation } from "../lib/api";
-
-const invokeMock = vi.fn();
-
-vi.mock("@tauri-apps/api/core", () => ({
-  invoke: (cmd: string, args?: unknown) => invokeMock(cmd, args),
-}));
 
 const now = "2026-09-11T18:00:00+00:00";
 const older = "2026-09-10T18:00:00+00:00";
@@ -53,17 +45,14 @@ const convC: Conversation = {
   bot_id: "bot-1",
 };
 
-beforeEach(() => {
-  invokeMock.mockReset();
-});
-
 afterEach(() => cleanup());
 
-describe("ConversationsList — S2 contract", () => {
+describe("ConversationsList — S2.6 display-only contract", () => {
   it("renders nothing when botId is null", () => {
     const { container } = render(
       <ConversationsList
         botId={null}
+        conversations={null}
         selectedConvId={null}
         onSelectConv={() => {}}
         onNewChat={() => {}}
@@ -71,194 +60,139 @@ describe("ConversationsList — S2 contract", () => {
       />,
     );
     expect(container.firstChild).toBeNull();
-    expect(invokeMock).not.toHaveBeenCalled();
   });
 
-  it("calls listConversations(bot.id) once when a bot is selected", async () => {
-    invokeMock.mockResolvedValue([convA, convB, convC]);
+  it("renders one row per conversation passed via prop (no IPC)", () => {
     render(
       <ConversationsList
         botId="bot-1"
+        conversations={[convA, convB, convC]}
         selectedConvId={null}
         onSelectConv={() => {}}
         onNewChat={() => {}}
         newChatBusy={false}
       />,
     );
-    await waitFor(() => {
-      expect(invokeMock).toHaveBeenCalledWith("list_conversations", {
-        botId: "bot-1",
-      });
-    });
-    expect(
-      invokeMock.mock.calls.filter((c) => c[0] === "list_conversations"),
-    ).toHaveLength(1);
+    expect(screen.getByText("Old chat")).toBeTruthy();
+    expect(screen.getByText("Current chat")).toBeTruthy();
+    expect(screen.getByText("Newest chat")).toBeTruthy();
   });
 
-  it("renders rows sorted by updated_at desc", async () => {
-    invokeMock.mockResolvedValue([convA, convB, convC]);
+  it("renders rows in the order passed via prop (App sorts first)", () => {
     const { container } = render(
       <ConversationsList
         botId="bot-1"
+        conversations={[convC, convB, convA]}
         selectedConvId={null}
         onSelectConv={() => {}}
         onNewChat={() => {}}
         newChatBusy={false}
       />,
     );
-    await waitFor(() => screen.getByText("Newest chat"));
-    // Scope to the threads list (not the "+ New chat" button, which
-    // lives in its own .v4-conv-list-new row).
-    const rows = container.querySelectorAll(
+    const titles = container.querySelectorAll(
       ".v4-conv-list-rows .v4-conv-list-row-title",
     );
-    const titles = Array.from(rows).map((n) => n.textContent);
-    expect(titles).toEqual(["Newest chat", "Current chat", "Old chat"]);
+    expect(Array.from(titles).map((n) => n.textContent)).toEqual([
+      "Newest chat",
+      "Current chat",
+      "Old chat",
+    ]);
   });
 
-  it("clicking a row fires onSelectConv with that conversation id", async () => {
-    invokeMock.mockResolvedValue([convA, convB]);
+  it("clicking a row fires onSelectConv with that conversation id", () => {
     const onSelect = vi.fn();
     render(
       <ConversationsList
         botId="bot-1"
+        conversations={[convA, convB]}
         selectedConvId={null}
         onSelectConv={onSelect}
         onNewChat={() => {}}
         newChatBusy={false}
       />,
     );
-    await waitFor(() => screen.getByText("Current chat"));
     fireEvent.click(screen.getByText("Current chat"));
     expect(onSelect).toHaveBeenCalledWith("conv-B");
   });
 
-  it("clicking New chat fires onNewChat", async () => {
-    invokeMock.mockResolvedValue([]);
+  it("clicking + New chat fires onNewChat", () => {
     const onNew = vi.fn();
     render(
       <ConversationsList
         botId="bot-1"
+        conversations={[]}
         selectedConvId={null}
         onSelectConv={() => {}}
         onNewChat={onNew}
         newChatBusy={false}
       />,
     );
-    await waitFor(() => screen.getByText(/no threads yet/i));
-    // S2.5 — the "New chat" button lives in its own row under the
-    // threads list. Class on the row is .v4-conv-list-new so it's
-    // distinguishable from real conversation rows.
     const btn = screen.getByText(/\+ New chat/);
     fireEvent.click(btn);
     expect(onNew).toHaveBeenCalledTimes(1);
   });
 
-  it("marks the selected conversation row with is-selected", async () => {
-    invokeMock.mockResolvedValue([convA, convB]);
+  it("marks the selected conversation row with is-selected", () => {
     render(
       <ConversationsList
         botId="bot-1"
+        conversations={[convA, convB]}
         selectedConvId="conv-B"
         onSelectConv={() => {}}
         onNewChat={() => {}}
         newChatBusy={false}
       />,
     );
-    await waitFor(() => screen.getByText("Current chat"));
     const selected = screen.getByText("Current chat").closest("button");
     expect(selected?.classList.contains("is-selected")).toBe(true);
     const other = screen.getByText("Old chat").closest("button");
     expect(other?.classList.contains("is-selected")).toBe(false);
   });
 
-  it("refetches when botId changes (new bot selected)", async () => {
-    invokeMock.mockImplementation((cmd: string) => {
-      if (cmd === "list_conversations") {
-        // Return different lists for different bots.
-        return Promise.resolve([convA]);
-      }
-      return Promise.resolve(null);
-    });
-    const { rerender } = render(
+  it("shows 'No threads yet.' when conversations is empty", () => {
+    render(
       <ConversationsList
         botId="bot-1"
+        conversations={[]}
         selectedConvId={null}
         onSelectConv={() => {}}
         onNewChat={() => {}}
         newChatBusy={false}
       />,
     );
-    await waitFor(() => screen.getByText("Old chat"));
-    expect(
-      invokeMock.mock.calls.filter((c) => c[0] === "list_conversations"),
-    ).toHaveLength(1);
-
-    rerender(
-      <ConversationsList
-        botId="bot-2"
-        selectedConvId={null}
-        onSelectConv={() => {}}
-        onNewChat={() => {}}
-        newChatBusy={false}
-      />,
-    );
-    await waitFor(() => {
-      expect(
-        invokeMock.mock.calls.filter((c) => c[0] === "list_conversations"),
-      ).toHaveLength(2);
-    });
-    expect(invokeMock).toHaveBeenLastCalledWith("list_conversations", {
-      botId: "bot-2",
-    });
+    expect(screen.getByText(/no threads yet/i)).toBeTruthy();
   });
 
-  it("refetches when selectedConvId changes to an id not in the list", async () => {
-    invokeMock.mockResolvedValue([convA, convB]);
-    const { rerender } = render(
+  it("shows the Loading row when conversations is null", () => {
+    render(
       <ConversationsList
         botId="bot-1"
-        selectedConvId="conv-A"
+        conversations={null}
+        selectedConvId={null}
         onSelectConv={() => {}}
         onNewChat={() => {}}
         newChatBusy={false}
       />,
     );
-    await waitFor(() => screen.getByText("Current chat"));
-    expect(
-      invokeMock.mock.calls.filter((c) => c[0] === "list_conversations"),
-    ).toHaveLength(1);
+    expect(screen.getByText(/loading/i)).toBeTruthy();
+  });
 
-    // selectedConvId changes to conv-B (which IS in the list) — no refetch.
-    rerender(
+  it("falls back to 'New chat' label when the title is empty", () => {
+    const emptyTitle: Conversation = {
+      ...convB,
+      id: "conv-empty",
+      title: "",
+    };
+    render(
       <ConversationsList
         botId="bot-1"
-        selectedConvId="conv-B"
+        conversations={[emptyTitle]}
+        selectedConvId={null}
         onSelectConv={() => {}}
         onNewChat={() => {}}
         newChatBusy={false}
       />,
     );
-    // Yield once so any potential effect runs, then check the count.
-    await new Promise((r) => setTimeout(r, 50));
-    expect(
-      invokeMock.mock.calls.filter((c) => c[0] === "list_conversations"),
-    ).toHaveLength(1);
-
-    // selectedConvId changes to a new id (not in the list) — refetch.
-    rerender(
-      <ConversationsList
-        botId="bot-1"
-        selectedConvId="conv-NEW"
-        onSelectConv={() => {}}
-        onNewChat={() => {}}
-        newChatBusy={false}
-      />,
-    );
-    await waitFor(() => {
-      expect(
-        invokeMock.mock.calls.filter((c) => c[0] === "list_conversations"),
-      ).toHaveLength(2);
-    });
+    expect(screen.getByText("New chat")).toBeTruthy();
   });
 });

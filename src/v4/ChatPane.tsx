@@ -58,6 +58,15 @@ export interface ChatPaneProps {
    * in App.tsx (S2 contract).
    */
   conversationId: string | null;
+  /**
+   * Called when the FIRST user message is sent into a conversation
+   * whose title is still the Rust default ("New chat") or empty.
+   * App.tsx uses this to derive the thread title from the first
+   * message + persist it via `renameConversation`. Fires only
+   * once per conversation (subsequent sends keep the existing
+   * title). Optional — when omitted, no title auto-update happens.
+   */
+  onFirstUserMessage?: (conversationId: string, content: string) => void;
 }
 
 interface AssistantDraft {
@@ -137,14 +146,24 @@ function truncateResult(text: string | null, max = 80): string {
  * Strip <think>…</think> reasoning blocks from assistant content.
  * S2.5 hides them in CSS (`.think { display: none }`), but we also
  * drop them in render so the DOM stays clean and the truncated
- * preview shows what the user actually said. Strips both
- * block-form `<think>...</think>` and the newer `<think>\n...</think>\n`
- * variant some providers emit.
+ * preview shows what the user actually said. Strips:
+ *   - Complete blocks `<think>...</think>`
+ *   - Orphan opening `<think>` (some providers forget the close)
+ *   - Orphan closing `</think>` (some providers forget the open)
+ * Whitespace around stripped regions is normalized so a dangling
+ * `</think>` doesn't leave a leading newline in the rendered body.
  */
 function stripThinkBlocks(text: string): string {
   if (!text) return text;
-  // Match the full block including the tags.
-  return text.replace(/<think>[\s\S]*?<\/think>/g, "").trim();
+  // Drop complete blocks first (greedy across newlines).
+  let out = text.replace(/<think>[\s\S]*?<\/think>/gi, "");
+  // Drop orphan opening tags.
+  out = out.replace(/<think>/gi, "");
+  // Drop orphan closing tags.
+  out = out.replace(/<\/think>/gi, "");
+  // Collapse runs of blank lines left behind.
+  out = out.replace(/\n{3,}/g, "\n\n");
+  return out.trim();
 }
 
 /** Single status word for the chat header. */
@@ -177,7 +196,7 @@ function generateRequestId(): string {
   return `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
-export function ChatPane({ bot, conversationId }: ChatPaneProps) {
+export function ChatPane({ bot, conversationId, onFirstUserMessage }: ChatPaneProps) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [composer, setComposer] = useState("");
   const [draft, setDraft] = useState<AssistantDraft | null>(null);
@@ -389,6 +408,12 @@ export function ChatPane({ bot, conversationId }: ChatPaneProps) {
           error_message: null,
         },
       ]);
+      // S2.6 — first user message in a thread drives the title.
+      // Fires unconditionally on send; App.tsx decides whether
+      // to actually rename (no-op when the title is already set).
+      if (onFirstUserMessage) {
+        onFirstUserMessage(conversationId, text);
+      }
       const resp = await sendMessage(conversationId, text, requestId);
       setDraft((prev) =>
         prev && prev.requestId === requestId
@@ -401,7 +426,7 @@ export function ChatPane({ bot, conversationId }: ChatPaneProps) {
     } finally {
       setBusy(false);
     }
-  }, [composer, conversationId, busy]);
+  }, [composer, conversationId, busy, onFirstUserMessage]);
 
   const handleStop = useCallback(async () => {
     if (!draft || !draft.pending || !draft.assistantMessageId) return;
@@ -513,27 +538,59 @@ export function ChatPane({ bot, conversationId }: ChatPaneProps) {
       </div>
 
       <footer className="v4-chat-pane-composer">
-        <textarea
-          className="v4-chat-pane-input"
-          value={composer}
-          onChange={(e) => setComposer(e.target.value)}
-          onKeyDown={handleComposerKey}
-          placeholder={
-            conversationId
-              ? `Message ${bot.name}…`
-              : "Pick a thread or start a new chat."
-          }
-          disabled={busy || !conversationId}
-          rows={1}
-        />
-        <button
-          type="button"
-          className="v4-chat-pane-send primary"
-          onClick={handleSend}
-          disabled={busy || composer.trim().length === 0 || !conversationId}
+        {/* S2.6 — composer is one rounded field. The send button
+            sits INSIDE the pill on the right edge; the input fills
+            the rest. Enabled whenever a bot + thread are selected
+            (the empty state on bot select is handled in App.tsx:
+            when the bot has no threads, one is created). */}
+        <div
+          className={`v4-chat-pane-composer-field ${
+            composer.trim().length === 0 ? "is-empty" : "has-text"
+          }`}
         >
-          {busy ? "…" : "Send"}
-        </button>
+          <textarea
+            className="v4-chat-pane-input"
+            value={composer}
+            onChange={(e) => setComposer(e.target.value)}
+            onKeyDown={handleComposerKey}
+            placeholder={
+              conversationId
+                ? `Message ${bot.name}…`
+                : "Pick a thread or start a new chat."
+            }
+            disabled={!conversationId}
+            rows={1}
+          />
+          <button
+            type="button"
+            className="v4-chat-pane-send"
+            onClick={handleSend}
+            disabled={
+              busy || composer.trim().length === 0 || !conversationId
+            }
+            title="Send message"
+            aria-label="Send message"
+          >
+            {/* Up-arrow icon — single glyph, matches the Grok
+                composer convention. No text label. */}
+            <svg
+              width="16"
+              height="16"
+              viewBox="0 0 16 16"
+              aria-hidden
+              focusable="false"
+            >
+              <path
+                d="M8 2 L8 12 M3 7 L8 2 L13 7"
+                stroke="currentColor"
+                strokeWidth="1.5"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                fill="none"
+              />
+            </svg>
+          </button>
+        </div>
       </footer>
     </div>
   );

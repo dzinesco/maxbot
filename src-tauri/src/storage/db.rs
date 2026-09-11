@@ -951,6 +951,51 @@ impl Database {
         Ok(())
     }
 
+    /// v3.7.17 — S3a follow-up. Set the conversation title to
+    /// `new_title` IF AND ONLY IF its current title matches
+    /// `expected_current_title`. Used to auto-derive the thread
+    /// title from the first user message — the rename fires
+    /// once when the conversation still carries the Rust
+    /// default ("New chat") or empty title, and never overwrites
+    /// a user-set title.
+    ///
+    /// Returns true if the row was updated, false if the
+    /// current title didn't match (caller treats as no-op).
+    pub fn set_title_if(
+        &self,
+        id: &str,
+        expected_current_title: &str,
+        new_title: &str,
+    ) -> rusqlite::Result<bool> {
+        let now = Utc::now().to_rfc3339();
+        let conn = self.conn.lock().expect("db lock poisoned");
+        let updated = conn.execute(
+            "UPDATE conversations SET title = ?, updated_at = ? \
+             WHERE id = ? AND title = ?",
+            params![new_title, now, id, expected_current_title],
+        )?;
+        Ok(updated > 0)
+    }
+
+    /// v3.7.17 — S3a follow-up. Return the current title of a
+    /// conversation, or None if the conversation doesn't exist.
+    /// Used by `send_message` to decide whether to auto-derive
+    /// the title from the first user message.
+    pub fn get_conversation_title(
+        &self,
+        id: &str,
+    ) -> rusqlite::Result<Option<String>> {
+        let conn = self.conn.lock().expect("db lock poisoned");
+        let title: Option<String> = conn
+            .query_row(
+                "SELECT title FROM conversations WHERE id = ?",
+                params![id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(title)
+    }
+
     pub fn touch_conversation(&self, id: &str) -> rusqlite::Result<()> {
         let now = Utc::now().to_rfc3339();
         let conn = self.conn.lock().expect("db lock poisoned");

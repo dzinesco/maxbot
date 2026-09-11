@@ -109,11 +109,15 @@
   word-break: break-word;
 }
 
-/* User: right-aligned, muted. */
+/* User: right-aligned, muted. S3a — fixed max-width 720px so
+ * long user messages wrap inside the right column instead of
+ * running off the edge. The container is right-anchored
+ * (align-self: flex-end) so the body hugs the right side even
+ * when the text wraps to multiple lines. */
 .v4-chat-pane-msg--user {
   align-items: flex-end;
   align-self: flex-end;
-  max-width: 80%;
+  max-width: 720px;
   margin-left: auto;
 }
 
@@ -189,7 +193,12 @@
   min-width: 0;
 }
 
-/* Composer — 44px pill, 12px radius, border #2a2a2c, 16px off bottom. */
+/* Composer — S2.6: ONE rounded field with the send button INSIDE
+ * the pill on the right edge. 44px tall, 12px radius, border
+ * #2a2a2c, sits 16px off the bottom. No separate Send button row.
+ * Enabled whenever a bot + thread are selected (App.tsx creates
+ * a thread on bot select when none exist, so the composer is
+ * live the moment a bot is picked). */
 .v4-chat-pane-composer {
   display: flex;
   gap: 8px;
@@ -199,24 +208,36 @@
   background: var(--bg-0);
 }
 
-.v4-chat-pane-input {
-  flex: 1 1 auto;
-  resize: none;
+.v4-chat-pane-composer-field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
   height: 44px;
+  padding: 0 6px 0 16px;
   background: var(--bg-1);
   border: 1px solid var(--border);
   border-radius: 12px;
-  padding: 0 16px;
+  transition: border-color 80ms ease;
+}
+
+.v4-chat-pane-composer-field:focus-within {
+  border-color: var(--border-strong);
+}
+
+.v4-chat-pane-input {
+  flex: 1 1 auto;
+  resize: none;
+  height: 100%;
+  background: transparent;
+  border: none;
+  padding: 0;
   color: var(--text-0);
   font-family: var(--font-sans);
   font-size: 14px;
-  line-height: 44px;
+  line-height: 42px;
   overflow: hidden;
-}
-
-.v4-chat-pane-input:focus {
   outline: none;
-  border-color: var(--border-strong);
 }
 
 .v4-chat-pane-input::placeholder {
@@ -227,10 +248,35 @@
   opacity: 0.4;
 }
 
+/* Send button — sits INSIDE the field. Just an icon, no text.
+ * Default state is muted; enabled (text present) state goes
+ * near-white. Hover brightens further. */
 .v4-chat-pane-send {
   flex-shrink: 0;
-  height: 44px;
-  padding: 0 18px;
-  font-weight: 500;
-  border-radius: 12px;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--text-3);
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: color 80ms ease, background-color 80ms ease;
+}
+
+.v4-chat-pane-composer-field:not(.is-empty) .v4-chat-pane-send {
+  color: var(--text-0);
+}
+
+.v4-chat-pane-send:hover:not(:disabled) {
+  background: var(--bg-2);
+  color: var(--text-0);
+}
+
+.v4-chat-pane-send:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
 }
