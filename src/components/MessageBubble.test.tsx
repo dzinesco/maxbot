@@ -7,7 +7,8 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, render, screen, fireEvent, waitFor } from "@testing-library/react";
-import { ErrorMessage, MessageBubble } from "./MessageBubble";
+import { ErrorMessage, MessageBubble, TTSToolbar } from "./MessageBubble";
+import type { Message } from "../lib/api";
 
 const invokeMock = vi.fn();
 vi.mock("@tauri-apps/api/core", () => ({
@@ -319,34 +320,65 @@ describe("MessageBubble — ToolCallForm (v3.7.13)", () => {
 // text and flips to a "speaking" state until tts_stop fires (or
 // the per-bubble timeout lands).
 
-describe("MessageBubble — Speak button (v2.7.0)", () => {
-  it("renders a Speak button on assistant messages", () => {
-    render(<MessageBubble message={baseMessage} />);
-    const speak = screen.getByRole("button", { name: /speak/i });
-    expect(speak).toBeInTheDocument();
+// ---- v3.7.13 — UX-5. TTS toolbar ----
+//
+// v3.7.13 moves the per-bubble Speak / Copy buttons
+// to a single TTSToolbar that lives above the
+// message list. The toolbar speaks / copies the
+// most-recent assistant message. The per-bubble
+// Speak button is gone, so the pre-v3.7.13 tests
+// are replaced with TTSToolbar tests below.
+describe("TTSToolbar (v3.7.13)", () => {
+  it("renders a disabled toolbar when target is null", () => {
+    render(<TTSToolbar target={null} />);
+    const toolbar = screen.getByTestId("tts-toolbar");
+    expect(toolbar.dataset.disabled).toBe("true");
+    expect(
+      screen.getByTestId("tts-toolbar-speak") as HTMLButtonElement,
+    ).toBeDisabled();
+    expect(
+      screen.getByTestId("tts-toolbar-copy") as HTMLButtonElement,
+    ).toBeDisabled();
   });
 
-  it("calls tts_speak with the message content when clicked", async () => {
-    let capturedArgs: Record<string, unknown> | undefined;
-    invokeMock.mockImplementation(async (cmd: string, args?: Record<string, unknown>) => {
-      if (cmd === "tts_speak") {
-        capturedArgs = args;
-        // The Rust side returns a small struct; we only
-        // care that the call fired for the assertion.
-        return {
-          chars: 0,
-          voice: "Samantha",
-          truncated_chars: 0,
-        };
-      }
-      return null;
-    });
-    render(<MessageBubble message={baseMessage} />);
-    const speak = screen.getByRole("button", { name: /speak/i });
-    fireEvent.click(speak);
+  it("renders an enabled toolbar when target has content", () => {
+    const msg: Message = {
+      ...baseMessage,
+      role: "assistant",
+      id: "asst-1",
+      content: "Hello world",
+    };
+    render(<TTSToolbar target={msg} />);
+    const toolbar = screen.getByTestId("tts-toolbar");
+    expect(toolbar.dataset.disabled).toBe("false");
+    expect(
+      screen.getByTestId("tts-toolbar-speak") as HTMLButtonElement,
+    ).not.toBeDisabled();
+  });
+
+  it("calls tts_speak with the target's content when Speak is clicked", async () => {
+    let capturedCmd: string | null = null;
+    let capturedText: string | null = null;
+    invokeMock.mockImplementation(
+      async (cmd: string, args?: Record<string, unknown>) => {
+        if (cmd === "tts_speak") {
+          capturedCmd = cmd;
+          capturedText = (args?.text as string) ?? null;
+        }
+        return null;
+      },
+    );
+    const msg: Message = {
+      ...baseMessage,
+      role: "assistant",
+      id: "asst-2",
+      content: "Hi there",
+    };
+    render(<TTSToolbar target={msg} />);
+    fireEvent.click(screen.getByTestId("tts-toolbar-speak"));
     await waitFor(() => {
-      expect(capturedArgs).toBeTruthy();
+      expect(capturedCmd).toBe("tts_speak");
     });
-    expect(capturedArgs?.text).toBe(baseMessage.content);
+    expect(capturedText).toBe("Hi there");
   });
 });

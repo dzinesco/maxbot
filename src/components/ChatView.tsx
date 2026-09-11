@@ -18,7 +18,11 @@
 
 import { useEffect, useMemo, useRef } from "react";
 import type { Bot, Conversation, Message } from "../lib/api";
-import { MessageBubble } from "./MessageBubble";
+import {
+  MessageBubble,
+  TTSToolbar,
+  mostRecentAssistantMessage,
+} from "./MessageBubble";
 import { BotAvatar } from "./BotAvatar";
 
 interface ChatViewProps {
@@ -122,6 +126,9 @@ export function ChatView({
         </div>
       )}
       <div className="messages" ref={scrollRef}>
+        <TTSToolbar
+          target={mostRecentAssistantMessage(messages)}
+        />
         {messages.map((m) => (
           <MessageBubble
             key={m.id}

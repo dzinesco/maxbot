@@ -146,16 +146,33 @@ function ToolCalls({
   lastUserMessage?: string | null;
 }) {
   if (calls.length === 0) return null;
-  // v3.7.13 — UX-3. Gated tool names get a
+  // v3.7.13 — UX-3 + UX-5. Gated tool names get a
   // form instead of a JSON preview. The
   // chat-bubble context doesn't have an
   // approvalId, so the form renders read-only
   // (the user sees what the model wants, the
   // approval sheet is where they act on it).
+  //
+  // v3.7.13 — UX-5. The pluralized "N tool calls"
+  // header is gone. For gated tool names, the
+  // header is the same one-liner the approval
+  // form uses ("Draft email" / "Send email" / "Add
+  // to calendar") so the user sees a single
+  // intent line. Unknown tools fall through to a
+  // neutral "Tool call" header.
+  const firstCall = calls[0];
+  const headerText = FORM_TOOLS.has(firstCall.name)
+    ? approveLabelFor(firstCall.name)
+    : firstCall.name === "shell_run" || firstCall.name.startsWith("vm_")
+    ? "Computer"
+    : "Tool call";
   return (
     <div className="tool-calls">
-      <div className="tool-calls-header">
-        {calls.length} tool call{calls.length === 1 ? "" : "s"}
+      <div
+        className="tool-calls-header"
+        data-testid="tool-calls-header"
+      >
+        {headerText}
       </div>
       {calls.map((tc) => (
         <ToolCallFormOrCard
@@ -708,49 +725,98 @@ function CollapsibleToolResult({ content }: { content: string }) {
   );
 }
 
-export function MessageBubble({
-  message,
-  streaming,
-  onRetry,
-  botId,
-  lastUserMessage,
-}: MessageBubbleProps) {
-  const isUser = message.role === "user";
-  const isTool = message.role === "tool";
-  const isAssistant = !isUser && !isTool;
-  const [copied, setCopied] = useState(false);
+// ---- v3.7.13 — UX-5. TTS / Copy toolbar ----
+//
+// The pre-v3.7.13 message bubble had a per-bubble
+// "🔊 Speak" + "Copy" pair in the meta row. v3.7.13
+// moves both to a single toolbar above the message
+// list, so the user has one place to act on the
+// most-recent assistant turn (the only one worth
+// speaking / copying in practice). The per-bubble
+// pin (📌) stays — that's per-message memory
+// affordance, not TTS.
+//
+// The toolbar handles the same `tts_speak` /
+// `tts_stop` IPC the per-bubble buttons did, and
+// keeps the same "Speaking…" / "Stop" toggle. The
+// `mostRecentAssistantMessage` helper is exported
+// so ChatView can compute the target text without
+// duplicating the role check.
+export function mostRecentAssistantMessage(
+  messages: Message[],
+): Message | null {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].role === "assistant") {
+      return messages[i];
+    }
+  }
+  return null;
+}
+
+interface TTSToolbarProps {
+  /** The most-recent assistant message. When
+   *  null, the toolbar renders disabled. */
+  target: Message | null;
+}
+
+/** v3.7.13 — UX-5. Speak / Copy toolbar rendered
+ *  above the message list. One Speak button that
+ *  speaks the most-recent assistant message, one
+ *  Copy button that copies it. The keyboard
+ *  shortcut is bound at the ChatView level (space,
+ *  when the user isn't focused in an input) — see
+ *  ChatView.tsx. */
+export function TTSToolbar({ target }: TTSToolbarProps) {
   const [speaking, setSpeaking] = useState(false);
-  // v2.5.0 — the "📌 Remember this" button briefly shows
-  // "Saved" after a successful click. Per-bubble state so a
-  // click on one bubble's pin doesn't tear down another's.
-  const [pinned, setPinned] = useState(false);
-  // Tracks whether THIS bubble is the one currently being spoken. We
-  // rely on a local ref + state so a click on a different bubble's
-  // speaker button doesn't tear down our speech in flight.
+  const [copied, setCopied] = useState(false);
   const speechMarker = useRef<string | null>(null);
 
-  const handlePin = useCallback(async () => {
-    if (!botId || !message.content.trim()) return;
-    const key = deriveMemoryKey(message.content);
+  const handleToggleSpeech = useCallback(async () => {
+    if (!target) return;
+    if (speaking) {
+      try {
+        await ttsStop();
+      } catch {
+        // best-effort — the speech will end on its own
+      }
+      setSpeaking(false);
+      speechMarker.current = null;
+      return;
+    }
     try {
-      await memoryRemember(botId, "fact", key, message.content);
-      setPinned(true);
-      setTimeout(() => setPinned(false), 1500);
+      speechMarker.current = target.id;
+      setSpeaking(true);
+      await ttsSpeak(target.content);
+      // The `speaking` state flips back via
+      // the marker's cleanup so a stop click
+      // mid-speech isn't a no-op. The
+      // speakable-vs-empty check guards
+      // against an empty assistant message
+      // (e.g. while streaming).
+      if (speechMarker.current === target.id) {
+        setSpeaking(false);
+        speechMarker.current = null;
+      }
     } catch (e) {
       // eslint-disable-next-line no-console
-      console.warn("memory_remember failed:", e);
+      console.warn("tts_speak failed:", e);
+      setSpeaking(false);
+      speechMarker.current = null;
     }
-  }, [botId, message.content]);
-  const handleCopy = async () => {
+  }, [target, speaking]);
+
+  const handleCopy = useCallback(async () => {
+    if (!target) return;
     try {
-      await navigator.clipboard.writeText(message.content);
+      await navigator.clipboard.writeText(target.content);
       setCopied(true);
       setTimeout(() => setCopied(false), 1200);
     } catch {
-      // Clipboard API can fail in iframes / non-secure contexts;
-      // fall back to a hidden textarea + execCommand.
+      // Fallback for non-secure contexts
+      // (clipboard API is gated on https or
+      // localhost).
       const ta = document.createElement("textarea");
-      ta.value = message.content;
+      ta.value = target.content;
       ta.style.position = "fixed";
       ta.style.opacity = "0";
       document.body.appendChild(ta);
@@ -765,60 +831,75 @@ export function MessageBubble({
         document.body.removeChild(ta);
       }
     }
-  };
-  const handleToggleSpeech = async () => {
-    if (speaking) {
-      try {
-        await ttsStop();
-      } catch {
-        // best-effort — the speech will eventually end on its own
-      }
-      setSpeaking(false);
-      speechMarker.current = null;
-      return;
-    }
-    if (!message.content.trim()) return;
-    setSpeaking(true);
-    // Estimate how long the speech will take. `say` averages ~150
-    // words/minute; we don't know the exact duration, but a rough
-    // chars/12 estimate keeps the button in "Stop" state long enough
-    // for typical messages. The user can always click Stop to
-    // override.
-    const chars = message.content.length;
-    const approxSeconds = Math.max(3, Math.ceil(chars / 12));
-    speechMarker.current = message.id;
-    setTimeout(() => {
-      if (speechMarker.current === message.id) {
-        setSpeaking(false);
-        speechMarker.current = null;
-      }
-    }, approxSeconds * 1000);
+  }, [target]);
+
+  const disabled = !target || !target.content;
+
+  return (
+    <div
+      className="tts-toolbar"
+      data-testid="tts-toolbar"
+      data-disabled={disabled ? "true" : "false"}
+    >
+      <button
+        type="button"
+        className={`tts-toolbar__btn${speaking ? " speaking" : ""}`}
+        data-testid="tts-toolbar-speak"
+        onClick={handleToggleSpeech}
+        disabled={disabled}
+        title={
+          speaking
+            ? "Stop speaking (or press space)"
+            : "Speak the most-recent message (space)"
+        }
+      >
+        {speaking ? "⏹ Stop" : "🔊 Speak"}
+      </button>
+      <button
+        type="button"
+        className="tts-toolbar__btn"
+        data-testid="tts-toolbar-copy"
+        onClick={handleCopy}
+        disabled={disabled}
+        title="Copy the most-recent message"
+      >
+        {copied ? "Copied" : "Copy"}
+      </button>
+    </div>
+  );
+}
+
+export function MessageBubble({
+  message,
+  streaming,
+  onRetry,
+  botId,
+  lastUserMessage,
+}: MessageBubbleProps) {
+  const isUser = message.role === "user";
+  const isTool = message.role === "tool";
+  const isAssistant = !isUser && !isTool;
+  // v2.5.0 — the "📌 Remember this" button briefly shows
+  // "Saved" after a successful click. Per-bubble state so a
+  // click on one bubble's pin doesn't tear down another's.
+  // v3.7.13 — UX-5. The per-bubble Speak / Copy
+  // buttons are gone; those moved to the
+  // TTSToolbar above the message list.
+  const [pinned, setPinned] = useState(false);
+
+  const handlePin = useCallback(async () => {
+    if (!botId || !message.content.trim()) return;
+    const key = deriveMemoryKey(message.content);
     try {
-      await ttsSpeak(message.content);
+      await memoryRemember(botId, "fact", key, message.content);
+      setPinned(true);
+      setTimeout(() => setPinned(false), 1500);
     } catch (e) {
-      // If the Rust side errors, fall out of the speaking state so
-      // the button doesn't get stuck.
-      setSpeaking(false);
-      speechMarker.current = null;
-      // Surface a non-blocking hint in the console; the model can
-      // call tts_speak too if the user wants the error in a tool
-      // result.
       // eslint-disable-next-line no-console
-      console.warn("tts_speak failed:", e);
+      console.warn("memory_remember failed:", e);
     }
-  };
-  // If the message is replaced (e.g. after a Regenerate), make sure
-  // we don't leave the button in "speaking" state.
-  useEffect(() => {
-    return () => {
-      if (speechMarker.current === message.id) {
-        // Best-effort: stop any speech that was triggered by this
-        // bubble. We don't await — the bubble is going away.
-        ttsStop().catch(() => {});
-      }
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [message.id]);
+  }, [botId, message.content]);
+
   // Friendly "10:42 AM" formatting for the meta line. Show on
   // every non-streaming message; cheap to render and useful when
   // scrolling back through a long conversation.
@@ -850,19 +931,6 @@ export function MessageBubble({
           {metaTime && <span className="meta-time">{metaTime}</span>}
           {!streaming && message.content && (
             <span className="meta-actions">
-              {isAssistant && (
-                <button
-                  className={`copy-btn tts-btn${speaking ? " speaking" : ""}`}
-                  onClick={handleToggleSpeech}
-                  title={
-                    speaking
-                      ? "Stop speaking (or press ⌘⇧S)"
-                      : "Speak this message aloud (⌘⇧S)"
-                  }
-                >
-                  {speaking ? "⏹ Stop" : "🔊 Speak"}
-                </button>
-              )}
               {isAssistant && botId && (
                 <button
                   className="copy-btn pin-btn"
@@ -873,13 +941,6 @@ export function MessageBubble({
                   {pinned ? "Saved" : "📌"}
                 </button>
               )}
-              <button
-                className="copy-btn"
-                onClick={handleCopy}
-                title="Copy message text"
-              >
-                {copied ? "Copied" : "Copy"}
-              </button>
             </span>
           )}
         </div>
