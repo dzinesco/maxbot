@@ -89,7 +89,7 @@ beforeEach(() => {
 });
 
 describe("ApprovalQueue", () => {
-  it("renders the pending approvals with Approve/Reject/Edit buttons", async () => {
+  it("renders the pending approvals with quick-action Approve/Reject buttons", async () => {
     vi.mocked(approvalList).mockResolvedValueOnce([
       sampleApproval("a-1"),
       sampleApproval("a-2", { tool_name: "file_write" }),
@@ -101,7 +101,11 @@ describe("ApprovalQueue", () => {
     await waitFor(() => {
       expect(screen.getByTestId("approval-approve-a-1")).toBeTruthy();
       expect(screen.getByTestId("approval-reject-a-1")).toBeTruthy();
-      expect(screen.getByTestId("approval-edit-a-1")).toBeTruthy();
+      // v3.7.13 — UX-4. The per-row "Edit & send"
+      // button is gone; the queue is a navigation
+      // list, the Edit & approve flow happens in
+      // the parent's ApprovalSheet.
+      expect(screen.queryByTestId("approval-edit-a-1")).toBeNull();
       expect(screen.getByTestId("approval-approve-a-2")).toBeTruthy();
     });
   });
@@ -138,35 +142,57 @@ describe("ApprovalQueue", () => {
     });
   });
 
-  it("clicking Edit & send opens the modal with the JSON pre-filled", async () => {
+  // v3.7.13 — UX-4. Clicking a non-takeover row
+  // body opens the parent's ApprovalSheet via
+  // the `onSelect` callback. The per-row
+  // Approve / Reject buttons bypass the sheet
+  // (so the user can quick-decide without
+  // waiting for the sheet to mount).
+  it("clicking a row body calls onSelect with the approval and Bot", async () => {
     vi.mocked(approvalList).mockResolvedValueOnce([sampleApproval("a-3")]);
-    render(<ApprovalQueue bots={[blankBot("bot-1", "TestBot")]} />);
+    const onSelect = vi.fn();
+    render(
+      <ApprovalQueue
+        bots={[blankBot("bot-1", "TestBot")]}
+        onSelect={onSelect}
+      />,
+    );
     await waitFor(() => {
-      expect(screen.getByTestId("approval-edit-a-3")).toBeTruthy();
+      expect(screen.getByTestId("approval-row-a-3")).toBeTruthy();
     });
-    fireEvent.click(screen.getByTestId("approval-edit-a-3"));
-    // Modal renders; textarea holds the
-    // pretty-printed payload.
-    const textarea = screen.getByTestId(
-      "approval-edit-textarea",
-    ) as HTMLTextAreaElement;
-    expect(textarea).toBeTruthy();
-    expect(textarea.value).toContain("user@example.com");
-    // Approve-with-edited-args starts disabled
-    // because the JSON is valid (it pre-fills with a
-    // parseable shape), but we don't assert the
-    // disabled state directly — it would be a
-    // tautology ("pre-filled valid JSON" → "not
-    // disabled"). Instead we submit and verify the
-    // call shape.
-    fireEvent.click(screen.getByTestId("approval-edit-submit"));
+    fireEvent.click(screen.getByTestId("approval-row-a-3"));
+    expect(onSelect).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "a-3", tool_name: "mail_send" }),
+      expect.objectContaining({ id: "bot-1", name: "TestBot" }),
+    );
+    // The quick-action Approve was NOT fired
+    // (we only clicked the row body).
+    expect(approvalDecide).not.toHaveBeenCalled();
+  });
+
+  // v3.7.13 — UX-4. Clicking a per-row Approve
+  // button does NOT also open the sheet (the
+  // click event would otherwise bubble up to
+  // the row and trigger onSelect). The
+  // stopPropagation on the row-actions
+  // container is the fix.
+  it("clicking a per-row Approve does NOT also fire onSelect", async () => {
+    vi.mocked(approvalList).mockResolvedValueOnce([sampleApproval("a-3b")]);
+    const onSelect = vi.fn();
+    render(
+      <ApprovalQueue
+        bots={[blankBot("bot-1", "TestBot")]}
+        onSelect={onSelect}
+      />,
+    );
     await waitFor(() => {
-      expect(approvalDecide).toHaveBeenCalledWith(
-        "a-3",
-        "approved",
-        expect.objectContaining({ to: "user@example.com" }),
-      );
+      expect(screen.getByTestId("approval-approve-a-3b")).toBeTruthy();
     });
+    fireEvent.click(screen.getByTestId("approval-approve-a-3b"));
+    await waitFor(() => {
+      expect(approvalDecide).toHaveBeenCalledWith("a-3b", "approved", undefined);
+    });
+    expect(onSelect).not.toHaveBeenCalled();
   });
 
   // v3.4.0 (Phase 5) — Takeover approvals surface
@@ -199,7 +225,7 @@ describe("ApprovalQueue", () => {
     expect(screen.getByTestId("approval-reason").textContent).toContain(
       "2FA prompt visible",
     );
-    // No regular Approve / Reject / Edit buttons
+    // No regular Approve / Reject buttons
     // on a Takeover row.
     expect(screen.queryByTestId("approval-approve-a-tak")).toBeNull();
     // Clicking "Take over" fires the parent's

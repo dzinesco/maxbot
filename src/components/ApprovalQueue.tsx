@@ -3,17 +3,27 @@
 // Top-level view that lists every pending approval.
 // Each row shows the Bot, the tool, the JSON payload
 // (truncated to 4 lines with a "show more" toggle),
-// and three buttons: Approve, Reject, Edit & send.
+// and quick-action Approve / Reject buttons.
 //
-// Approve / Reject / Edit dispatch `approval_decide`.
-// On success the row animates out and the queue
-// re-fetches.
+// v3.7.13 — UX-4. The previous "Edit & send" inline
+// modal is gone. The queue is now a navigation list:
+// clicking a row's body opens the parent's
+// `ApprovalSheet`, where the user can Approve, Edit
+// & approve, or Deny with a proper form. The
+// per-row Approve / Reject buttons stay as
+// quick-action shortcuts for the common case.
 //
-// The "Edit & send" button opens a modal with a JSON
-// textarea pre-filled with the original payload.
-// The textarea has a red border when the JSON is
-// invalid; the Approve button inside the modal is
-// disabled until the parse succeeds.
+// The "Edit & send" button was removed because the
+// JSON-textarea modal forced the user to context-
+// switch out of the chat to act on a pending
+// approval. The sheet (a fixed panel) keeps the
+// chat visible while the user decides.
+//
+// Takeover approvals keep their own row layout
+// (Take over / Skip). The sheet doesn't apply
+// to takeovers — those are handled by the parent's
+// `onTakeoverRequested` callback opening the
+// Computer panel.
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
@@ -40,10 +50,17 @@ interface ApprovalQueueProps {
    *  the request — the parent owns the panel
    *  mount/lifecycle. */
   onTakeoverRequested?: (botId: string, approvalId: string) => void;
+  /** v3.7.13 — UX-4. Fired when the user clicks a
+   *  non-takeover row body. The parent (App.tsx)
+   *  opens the `ApprovalSheet` with the
+   *  corresponding approval. The row's per-row
+   *  Approve / Reject buttons bypass this
+   *  callback and decide inline. */
+  onSelect?: (approval: Approval, bot: Bot | undefined) => void;
 }
 
 export function ApprovalQueue(props: ApprovalQueueProps) {
-  const { bots, botId, onTakeoverRequested } = props;
+  const { bots, botId, onTakeoverRequested, onSelect } = props;
   const [approvals, setApprovals] = useState<Approval[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -51,9 +68,6 @@ export function ApprovalQueue(props: ApprovalQueueProps) {
   // row's buttons can show a spinner and we don't
   // double-fire on a slow network.
   const [busy, setBusy] = useState<string | null>(null);
-  // The id currently being edited — when set, the
-  // Edit modal is open.
-  const [editing, setEditing] = useState<Approval | null>(null);
 
   const botById = useMemo(() => {
     const m: Record<string, Bot> = {};
@@ -93,7 +107,6 @@ export function ApprovalQueue(props: ApprovalQueueProps) {
         setError(`approval decision failed: ${e}`);
       } finally {
         setBusy(null);
-        setEditing(null);
       }
     },
     [refresh],
@@ -156,6 +169,28 @@ export function ApprovalQueue(props: ApprovalQueueProps) {
                 (takeover ? " approval-queue__row--takeover" : "")
               }
               data-testid={`approval-row-${a.id}`}
+              // v3.7.13 — UX-4. Clicking the row
+              // body opens the parent's
+              // `ApprovalSheet`. Takeover rows
+              // delegate to `handleTakeOver`
+              // instead — they don't go through
+              // the sheet. Buttons inside the row
+              // call `stopPropagation` so a click
+              // on Approve / Reject doesn't
+              // also open the sheet.
+              onClick={() => {
+                if (takeover) return;
+                onSelect?.(a, bot);
+              }}
+              role={takeover ? undefined : "button"}
+              tabIndex={takeover ? -1 : 0}
+              onKeyDown={(e) => {
+                if (takeover) return;
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  onSelect?.(a, bot);
+                }
+              }}
             >
               <div className="approval-queue__row-head">
                 <span className="approval-queue__bot">
@@ -184,7 +219,14 @@ export function ApprovalQueue(props: ApprovalQueueProps) {
                 }
               />
               <PayloadPreview payload={a.payload} />
-              <div className="approval-queue__row-actions">
+              <div
+                className="approval-queue__row-actions"
+                // Stop the row's click from also
+                // firing when the user clicks one
+                // of the per-row quick-action
+                // buttons.
+                onClick={(e) => e.stopPropagation()}
+              >
                 {takeover ? (
                   <>
                     <button
@@ -222,14 +264,6 @@ export function ApprovalQueue(props: ApprovalQueueProps) {
                     >
                       Reject
                     </button>
-                    <button
-                      className="ghost small"
-                      disabled={busy === a.id}
-                      onClick={() => setEditing(a)}
-                      data-testid={`approval-edit-${a.id}`}
-                    >
-                      Edit & send
-                    </button>
                   </>
                 )}
                 {busy === a.id && (
@@ -240,13 +274,6 @@ export function ApprovalQueue(props: ApprovalQueueProps) {
           );
         })}
       </ul>
-      {editing && (
-        <EditModal
-          approval={editing}
-          onCancel={() => setEditing(null)}
-          onSubmit={(newArgs) => handleDecide(editing.id, "approved", newArgs)}
-        />
-      )}
     </div>
   );
 }
@@ -312,101 +339,14 @@ function PayloadPreview({ payload }: { payload: unknown }) {
   );
 }
 
-// ---- edit modal ----
-
-interface EditModalProps {
-  approval: Approval;
-  onCancel: () => void;
-  onSubmit: (newArgs: unknown) => void;
-}
-
-function EditModal({ approval, onCancel, onSubmit }: EditModalProps) {
-  const [text, setText] = useState(() => {
-    try {
-      return JSON.stringify(approval.payload, null, 2);
-    } catch {
-      return "{}";
-    }
-  });
-  const [submitting, setSubmitting] = useState(false);
-
-  // Live-validate. `null` means "valid"; otherwise the
-  // parse error message renders below the textarea.
-  const parseError = useMemo(() => {
-    if (text.trim() === "") return "payload is empty";
-    try {
-      JSON.parse(text);
-      return null;
-    } catch (e) {
-      return String(e);
-    }
-  }, [text]);
-
-  const handleSubmit = useCallback(async () => {
-    if (parseError) return;
-    setSubmitting(true);
-    try {
-      onSubmit(JSON.parse(text));
-    } finally {
-      setSubmitting(false);
-    }
-  }, [parseError, text, onSubmit]);
-
-  return (
-    <div
-      className="modal-backdrop"
-      onClick={onCancel}
-      data-testid="approval-edit-modal"
-    >
-      <div
-        className="modal"
-        onClick={(e) => e.stopPropagation()}
-        role="dialog"
-        aria-modal="true"
-        aria-label="Edit approval payload"
-      >
-        <header className="modal-header">
-          <h2>Edit & send: {approval.tool_name}</h2>
-          <button className="ghost small" onClick={onCancel} aria-label="Close">
-            ✕
-          </button>
-        </header>
-        <div className="modal-body">
-          <p className="muted small">
-            Rewrite the tool's arguments as JSON, then
-            click Approve. The Bot will see the edited
-            result on its next turn.
-          </p>
-          <textarea
-            className={`approval-queue__edit-area${
-              parseError ? " approval-queue__edit-area--invalid" : ""
-            }`}
-            value={text}
-            onChange={(e) => setText(e.target.value)}
-            rows={14}
-            spellCheck={false}
-            data-testid="approval-edit-textarea"
-          />
-          {parseError && (
-            <p className="error small" role="alert">
-              {parseError}
-            </p>
-          )}
-        </div>
-        <footer className="modal-footer">
-          <button className="ghost small" onClick={onCancel}>
-            Cancel
-          </button>
-          <button
-            className="primary small"
-            disabled={parseError !== null || submitting}
-            onClick={handleSubmit}
-            data-testid="approval-edit-submit"
-          >
-            Approve with edited args
-          </button>
-        </footer>
-      </div>
-    </div>
-  );
-}
+// ---- v3.7.13 — UX-4. Edit modal removed ----
+//
+// The pre-v3.7.13 `EditModal` component lived at
+// the bottom of this file. It has been replaced
+// by the parent's `ApprovalSheet` (see
+// `src/components/ApprovalSheet.tsx`). The sheet
+// is a fixed panel that opens when the user
+// clicks a row body; the JSON-textarea modal
+// forced a full-screen context switch, which
+// was the whole point of the v3.7.13 UX
+// hardening series.
