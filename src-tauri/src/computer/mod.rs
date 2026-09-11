@@ -340,7 +340,43 @@ impl ComputerManager {
         // 2. Run the orchestrator. This is the long
         //    step (1-2 min) and we want the UI to see
         //    `provisioning` throughout.
-        let result = provision::provision_vm(bot_id, &opts, &*self.pool, &self.libvirt).await;
+        //
+        //    v3.7.16: pick the next free VNC display
+        //    number BEFORE invoking the orchestrator.
+        //    We read the `computers` table for the
+        //    current VNC ports in use and find the
+        //    smallest free slot in 5900-5999. The
+        //    orchestrator passes that display to the
+        //    server-side `provision-vm.sh` script
+        //    which substitutes it into the
+        //    qemu:commandline, so QEMU binds to
+        //    `127.0.0.1:<display>,password=off,to=5999`.
+        //    Result: the second Bot gets 5901, the
+        //    third 5902, etc. — no more "every VM
+        //    collides on 5900" from the v3.7.5
+        //    hard-coded fallback.
+        let in_use_ports: Vec<u16> = db
+            .list_computers()
+            .map_err(ComputerError::from)?
+            .into_iter()
+            .filter_map(|c| c.vnc_port)
+            .collect();
+        let vnc_display = provision::next_free_vnc_display(&in_use_ports, 0, 99)
+            .ok_or_else(|| {
+                ComputerError::Libvirt(
+                    "VNC port range 5900-5999 is fully in use; destroy a \
+                     Bot before provisioning another"
+                        .into(),
+                )
+            })?;
+        let result = provision::provision_vm(
+            bot_id,
+            &opts,
+            &*self.pool,
+            &self.libvirt,
+            vnc_display as u8,
+        )
+        .await;
 
         // 3. Persist the result. On success, also
         //    encrypt + store the SSH key, register the
