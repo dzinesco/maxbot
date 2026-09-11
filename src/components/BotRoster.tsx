@@ -27,7 +27,7 @@
 // shows an empty state with a "Create your first Bot"
 // primary CTA.
 
-import { useMemo, useState } from "react";
+import { memo, useMemo, useState } from "react";
 import type {
   Bot,
   BotRun,
@@ -67,7 +67,7 @@ export interface BotRosterProps {
 
 // ---- Component ----
 
-export function BotRoster({
+export const BotRoster = memo(function BotRoster({
   bots,
   selectedBotId,
   lastRunsByBot,
@@ -226,7 +226,7 @@ export function BotRoster({
       )}
     </div>
   );
-}
+});
 
 // ---- Empty / no-matches states ----
 

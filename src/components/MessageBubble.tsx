@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Message, PersistedToolCall } from "../lib/api";
 import { approvalDecide, memoryRemember, ttsSpeak, ttsStop } from "../lib/tauri";
 
@@ -869,7 +869,7 @@ export function TTSToolbar({ target }: TTSToolbarProps) {
   );
 }
 
-export function MessageBubble({
+export const MessageBubble = memo(function MessageBubble({
   message,
   streaming,
   onRetry,
@@ -965,4 +965,4 @@ export function MessageBubble({
       </div>
     </div>
   );
-}
+});
