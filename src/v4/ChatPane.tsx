@@ -232,6 +232,12 @@ export function ChatPane({ bot, conversationId, onFirstUserMessage }: ChatPanePr
   // Track active stream so the history tick knows to back off.
   const pendingRef = useRef<boolean>(false);
   pendingRef.current = draft?.pending ?? false;
+  // v4 S5 — Synchronous in-flight flag for handleSend.
+  // React `busy` state is async (a second invocation in the
+  // same tick can both read busy=false and both fire). A ref
+  // updates synchronously, so back-to-back Enter presses or
+  // Enter+Send clicks can't double-send.
+  const sendingRef = useRef<boolean>(false);
 
   // History load — keyed on conversationId. When the user
   // switches threads via App.tsx, this fires and reloads.
@@ -396,7 +402,13 @@ export function ChatPane({ bot, conversationId, onFirstUserMessage }: ChatPanePr
 
   const handleSend = useCallback(async () => {
     const text = composer.trim();
-    if (!text || !conversationId || busy) return;
+    if (!text || !conversationId) return;
+    // v4 S5 — Synchronous double-send guard. The ref flips
+    // immediately so a rapid Enter+Enter or Enter+click lands
+    // only one send_message IPC. The React `busy` state lags
+    // by one render; this ref doesn't.
+    if (sendingRef.current) return;
+    sendingRef.current = true;
     const requestId = generateRequestId();
     setBusy(true);
     setComposer("");
@@ -441,9 +453,10 @@ export function ChatPane({ bot, conversationId, onFirstUserMessage }: ChatPanePr
       setError(`Send failed: ${e}`);
       setDraft(null);
     } finally {
+      sendingRef.current = false;
       setBusy(false);
     }
-  }, [composer, conversationId, busy, onFirstUserMessage]);
+  }, [composer, conversationId, onFirstUserMessage]);
 
   const handleStop = useCallback(async () => {
     if (!draft || !draft.pending || !draft.assistantMessageId) return;

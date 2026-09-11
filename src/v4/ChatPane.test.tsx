@@ -440,3 +440,51 @@ describe("ChatPane — S3a think-strip", () => {
     expect(screen.queryByText(/let me check/)).toBeNull();
   });
 });
+
+describe("ChatPane — S5 send debounce", () => {
+  it("a second send in the same tick does not fire send_message twice", async () => {
+    // The S5 brief: when the user mashes Enter or clicks
+    // Enter+Send in rapid succession, only ONE send_message
+    // IPC lands. The React `busy` state is async; the
+    // sendingRef flips synchronously, so the second
+    // invocation sees the flag and bails.
+    let sendCount = 0;
+    let sendResolveFn!: (v: unknown) => void;
+    invokeMock.mockImplementation((cmd: string, args?: unknown) => {
+      if (cmd === "get_messages") return Promise.resolve([userMsg, assistantMsg]);
+      if (cmd === "send_message") {
+        sendCount++;
+        return new Promise((res) => {
+          sendResolveFn = res;
+        });
+      }
+      return Promise.resolve(null);
+    });
+
+    render(<ChatPane bot={bot} conversationId="conv-1" />);
+    await waitFor(() => screen.getByText("hello!"));
+    const textarea = screen.getByPlaceholderText(/Message Alpha/i);
+    fireEvent.change(textarea, { target: { value: "what day is it" } });
+
+    // Three back-to-back Enter presses in the same tick.
+    fireEvent.keyDown(textarea, { key: "Enter", shiftKey: false });
+    fireEvent.keyDown(textarea, { key: "Enter", shiftKey: false });
+    fireEvent.keyDown(textarea, { key: "Enter", shiftKey: false });
+
+    // Allow the first IPC to land.
+    await waitFor(() => expect(sendCount).toBeGreaterThanOrEqual(1));
+    // Resolve so the test can exit cleanly.
+    const reqId = (
+      invokeMock.mock.calls.find(
+        (c) => c[0] === "send_message",
+      ) as [string, { requestId: string }]
+    )[1].requestId;
+    sendResolveFn({
+      user_message_id: "msg-u",
+      assistant_message_id: "msg-a",
+      request_id: reqId,
+    });
+    // Only one send_message despite three Enter presses.
+    expect(sendCount).toBe(1);
+  });
+});
