@@ -31,7 +31,9 @@ import {
   cancelGoogleOauth,
   completeGoogleOauth,
   disconnectGoogleOauth,
+  getSettings,
   googleOauthStatus,
+  saveSettings,
   startGoogleOauth,
 } from "../lib/tauri";
 
@@ -592,6 +594,13 @@ export function SettingsPalette({
             without leaving the command palette. The
             search input above stays focused. */}
         <GoogleAccountSection />
+        {/* v3.7.14 — Voice section. Sits below the Google
+            Account section so the user can set the OpenAI
+            API key without leaving the command palette.
+            The key is read by the Rust `audio_to_text`
+            command when the chat-header mic sends audio
+            to Whisper. */}
+        <VoiceSection />
         <div className="settings-palette__hint">
           <span>↑↓ navigate</span>
           <span>↵ select</span>
@@ -847,4 +856,138 @@ function GoogleAccountSection() {
       )}
     </section>
   );
+}
+
+/** v3.7.14 — Voice section. The user can paste an OpenAI
+ *  API key (`sk-…`) without leaving the command palette.
+ *  The key is read by the Rust `audio_to_text` command
+ *  when the chat-header mic dispatches audio to Whisper.
+ *
+ *  Persistence: the component loads the current Settings
+ *  on mount, then saves via the same `save_settings` Tauri
+ *  command the Settings modal uses. The user can also
+ *  edit this key under Settings → Providers (the same
+ *  field); the two paths write to the same row.
+ *
+ *  Scope: this section is self-contained — it owns its
+ *  input value + save state. Esc / backdrop click on the
+ *  parent palette closes the modal; the section doesn't
+ *  intercept Esc. */
+function VoiceSection() {
+  const [key, setKey] = useState("");
+  const [savedKeyMask, setSavedKeyMask] = useState<string | null>(null);
+  // "idle" | "saving" | "saved" | "error" — drives the
+  // button label + a small "Saved" pill that auto-clears
+  // after 1.5s.
+  const [phase, setPhase] = useState<"idle" | "saving" | "saved" | "error">(
+    "idle",
+  );
+  const [error, setError] = useState<string | null>(null);
+
+  // Read the current Settings on mount so the field
+  // pre-fills with the existing key (masked to "••••" so
+  // we don't render the secret in cleartext). The Rust
+  // side returns the actual key — we mask it client-side
+  // for display.
+  useEffect(() => {
+    let alive = true;
+    getSettings()
+      .then((s) => {
+        if (!alive) return;
+        const k = (s.openai_api_key ?? "").trim();
+        setSavedKeyMask(k ? maskKey(k) : null);
+      })
+      .catch((e) => {
+        if (alive) setError(String(e));
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  const onSave = async () => {
+    setError(null);
+    setPhase("saving");
+    try {
+      // Read the current Settings, mutate
+      // `openai_api_key`, then save. The Settings
+      // modal does the same round-trip; this is
+      // the canonical "edit one field" pattern.
+      const current = await getSettings();
+      const next = {
+        ...current,
+        openai_api_key: key.trim() || null,
+      };
+      await saveSettings(next);
+      const trimmed = key.trim();
+      setSavedKeyMask(trimmed ? maskKey(trimmed) : null);
+      setKey("");
+      setPhase("saved");
+      // Auto-clear the "Saved" pill so it doesn't
+      // linger forever.
+      setTimeout(() => {
+        setPhase((p) => (p === "saved" ? "idle" : p));
+      }, 1500);
+    } catch (e) {
+      setError(String(e));
+      setPhase("error");
+    }
+  };
+
+  return (
+    <section
+      className="settings-palette__voice-section"
+      data-testid="settings-palette-voice"
+      aria-label="Voice"
+    >
+      <h3 className="settings-palette__voice-title">Voice</h3>
+      <p
+        className="settings-palette__voice-status"
+        data-testid="settings-palette-voice-status"
+      >
+        {savedKeyMask
+          ? `OpenAI API key set: ${savedKeyMask}`
+          : "OpenAI API key not set."}
+      </p>
+      <input
+        type="password"
+        placeholder="sk-…  (Whisper transcriptions)"
+        value={key}
+        onChange={(e) => setKey(e.target.value)}
+        data-testid="settings-palette-voice-api-key"
+        autoComplete="off"
+        spellCheck={false}
+        disabled={phase === "saving"}
+      />
+      {error && (
+        <p
+          className="settings-palette__voice-error"
+          data-testid="settings-palette-voice-error"
+        >
+          {error}
+        </p>
+      )}
+      <button
+        type="button"
+        onClick={onSave}
+        disabled={phase === "saving"}
+        data-testid="settings-palette-voice-save"
+      >
+        {phase === "saving"
+          ? "Saving…"
+          : phase === "saved"
+            ? "Saved"
+            : "Save OpenAI API key"}
+      </button>
+    </section>
+  );
+}
+
+/** Mask an API key for display: keep the first 3 and last 4
+ *  chars, replace the rest with `•`. The Rust side already
+ *  returns the key; we just don't want to render the full
+ *  secret in the palette's chrome. */
+function maskKey(k: string): string {
+  if (k.length <= 7) return "•".repeat(k.length);
+  return `${k.slice(0, 3)}${"•".repeat(Math.max(4, k.length - 7))}${k.slice(-4)}`;
 }

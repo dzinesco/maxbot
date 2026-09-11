@@ -982,6 +982,16 @@ export default function App() {
     }
   }, [ttsSpeaking, lastAssistantText]);
 
+  // v3.7.14 — VoiceMode error sink. The VoiceToolbar surfaces
+  // mic permission denials + STT failures here. The existing
+  // toast surface lives only in the Composer for chat errors;
+  // for now we mirror the TTS path and log to the console.
+  // A future "Global toast" pass can hook this up.
+  const handleVoiceError = useCallback((message: string) => {
+    // eslint-disable-next-line no-console
+    console.warn("voice-toolbar error:", message);
+  }, []);
+
   // ⌘⇧S → speak the last assistant response (or stop if already
   // v2.0 Slice E: the sidebar's "+ New chat" header button
   // dispatches a `maxbot:new-conversation` custom event with
@@ -2000,6 +2010,8 @@ export default function App() {
                 activeConversationId={activeId}
                 onSelectConversation={setActiveId}
                 onNewConversation={handleNewBotConversation}
+                onSend={handleSend}
+                onVoiceError={handleVoiceError}
               />
             )}
             <Composer
