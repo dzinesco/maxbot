@@ -27,6 +27,15 @@ pub mod data_migration;
 mod env_loader;
 mod grok_build;
 mod llm;
+// v3.8.0 — Slice 1 keep-alive loop module root.
+// `loop` is a Rust keyword, so the module is exposed under its
+// raw-identifier form (`r#loop`); the directory on disk stays
+// as `loop/` per the brief's filesystem contract. Sub-slice C
+// (sandbox bind) declares `pub mod r#loop::sandbox`; the
+// supervisor and file-I/O sub-slices add their own `pub mod`
+// lines when they merge.
+#[path = "loop/mod.rs"]
+pub mod r#loop;
 
 // Re-export so `use maxbot_lib::Settings;` works from
 // tests and from the (currently non-existent) external
