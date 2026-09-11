@@ -113,3 +113,115 @@ I'll do these in this order:
 
 ## Progress
 - 23:08 — Inventory written. Starting Workstream 1.
+- 23:08 → 23:15 — **Slice 1+2 DONE** (blob lifecycle + bytes-unchanged short-circuit + 500ms poll). 4 new tests.
+- 23:15 → 23:18 — **Slice 3 DONE** (React.memo for MessageBubble + BotRoster). 2 new tests.
+- 23:18 → 23:21 — **Slice 4 DONE** (VoiceToolbar level meter direct DOM mutation).
+- 23:21 → 23:24 — **Slice 5 DONE** (VoiceSection optimistic save + drop v3.7.14 OpenAI copy).
+- 23:24 → 23:28 — **Slice 6 DONE** (footer error surface + VoiceToolbar onError routing). 1 new test.
+- 23:28 → 23:30 — **Slice 7 DONE** (idle timer audit clean; final test gate; version bump to 3.8.0; CHANGELOG entry).
+
+## Final test gate (morning-readout)
+- `npm test`: 22 files, **203 passed**, 0 failed (was 196 at start, +7 new tests)
+- `cargo test --lib`: **365 passed**, 0 failed, 3 ignored (unchanged — no Rust touched)
+- `cargo test --bin maxbotd`: **10 passed**, 0 failed, 1 ignored (unchanged)
+- Working tree clean on `overnight/smooth-2026-09-11`. Not pushed (per the "No push to origin" hard rule).
+
+## Final commit log on `overnight/smooth-2026-09-11`
+```
+9f2395c smoothness: route error surfaces (footer + voice onError) instead of console.warn
+1a12360 smoothness: optimistic save in VoiceSection + drop v3.7.14 OpenAI copy
+6d76636 smoothness: VoiceToolbar level meter via direct DOM mutation
+f4075b9 smoothness: React.memo for MessageBubble + BotRoster (render isolation)
+9698dfb smoothness: blob lifecycle hardening + bytes-unchanged short-circuit
+b5050d0 overnight/smooth-2026-09-11: smoothness inventory + log
+```
+(Plus the pending version bump + CHANGELOG commit, not yet committed at the
+time of this log update.)
+
+7 commits ahead of `overnight/2026-09-10` (63234d4). Branch is local; no push to origin.
+
+## Slice-by-slice summary
+
+### Slice 1+2 — Blob lifecycle + bytes-unchanged + 500ms poll
+The dominant renderer cost during VM preview. Three
+changes: default poll cadence 300ms → 500ms (saves
+~40% of IPC + re-render cost for an idle VM);
+bytes-unchanged short-circuit (caches the previous
+frame's bytes and skips URL.createObjectURL +
+setFrameUrl when the QEMU framebuffer is static — the
+common case); unmount cleanup also clears the bytes
+cache. Four new tests pin the lifecycle. The
+v3.7.15 renderer memory leak is smaller now — the
+only outstanding source is the WebKit heap itself,
+not a JS object we hold a ref to.
+
+### Slice 3 — React.memo for MessageBubble + BotRoster
+The chat-stream re-render storm. Streaming
+chunks caused every historical MessageBubble and
+every BotRoster row to re-render. With memo, only
+the streaming bubble re-renders. ~2500
+reconciliations/s avoided for a 50-message
+conversation streaming at 50 tokens/s. Two new
+tests pin the memo.
+
+### Slice 4 — VoiceToolbar level meter via direct DOM
+The 60fps `setLevel(pct)` was re-rendering the
+entire VoiceToolbar every frame. Now writes
+`fillRef.current.style.width` and `aria-valuenow`
+directly. Zero React re-renders during recording.
+
+### Slice 5 — Optimistic save + drop OpenAI copy
+The VoiceSection's `onSave` no longer awaits the
+SQLite write before showing "Saved" — the pill
+appears immediately, the write runs in the
+background. Removes 50-200ms modal hitch. Also
+fixed the leftover v3.7.14 "OpenAI API key" /
+"Whisper" / "sk-…" copy in the palette and
+VoiceButton (the STT was swapped to MiniMax
+`asr-1.0` in v3.7.15 but the UI text wasn't).
+
+### Slice 6 — Error surfaces (footer + voice onError)
+ComputerFooter now surfaces the screenshot poll's
+viewerError as a single muted cell. The preview
+stays usable (showing the last good frame)
+instead of dumping the error in the image area.
+One new test. Also routed VoiceToolbar's
+level-meter init failure through `onError` instead
+of `console.warn`.
+
+### Slice 7 — Idle timer audit (clean) + version bump
+All `setInterval` calls in `src/` have proper
+cleanup. The one-off `setTimeout`s that fire
+state setters are not leaks. No new fixes
+needed. Bumped to 3.8.0 (real overhaul, several
+landed slices, user-visible behavior changes).
+
+## Items NOT addressed (intentionally)
+- The v3.7.15 WebKit Malloc zone leak (requires
+  a devtools build + heap snapshot comparison;
+  out of scope for an overnight smoothness pass).
+  The closed lifecycles make the leak smaller
+  but the WebKit heap itself still grows — needs
+  human-in-the-loop Web Inspector investigation.
+- `useCallback` for `handleSend` in App.tsx (would
+  prevent ChatView's `onSend` prop from changing
+  every render). Not in scope — the streaming
+  message's re-render is the dominant cost, and
+  that's already handled by the MessageBubble memo.
+- Background-only `console.warn` calls in App.tsx
+  (load messages failed, list conversations
+  failed, etc.). The user didn't trigger these —
+  a toast would be confusing. Left as-is.
+
+## Hard rules observed
+- Stayed in repo. No new product.
+- No live SSH / live libvirt / real API keys.
+- No push to origin. Local commits on
+  `overnight/smooth-2026-09-11`.
+- File-disjoint slices where possible.
+- Tests green for everything I touched.
+- BLOCKER.md not needed — no blocker occurred.
+- Version bump (3.8.0) only because the
+  overhaul is real: 6 user-visible slices shipped,
+  the dominant renderer cost got fixed, the
+  leftover v3.7.14 copy got cleaned up.

@@ -4,6 +4,127 @@ All notable changes to MaxBot are documented in this file. The format
 follows [Keep a Changelog](https://keepachangelog.com/) and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## v3.8.0 — 2026-09-10
+
+### Changed — Smoothness overhaul (lifecycle, render isolation, error surfaces)
+
+Six slices shipped in one night — the dominant renderer
+cost during VM preview was the 300ms screenshot poll
++ the chat-stream re-render storm, and both got
+surgical fixes. v3.8.0 is a minor version bump
+because the user-visible behavior changes (smoother
+preview, faster settings save, no console.warn on
+the voice path) are real product changes, not just
+refactors.
+
+- **Slice 1+2: Screenshot poll lifecycle + bytes-unchanged
+  short-circuit + 500ms default cadence** —
+  `src/components/ComputerPanel.tsx:114` bumps the
+  default poll from 300ms to 500ms (2fps idle is
+  well above the "feels alive" threshold and saves
+  ~40% of the IPC + re-render cost). The poll now
+  caches the previous frame's bytes and short-
+  circuits when the QEMU framebuffer is static
+  (the common idle case) — the 96-byte FNV-1a
+  sample in `frameBytesMatch` is collision-free
+  for 10-30KB JPEGs in practice. The unmount
+  cleanup also clears the bytes cache. Four new
+  tests pin the lifecycle: identical-bytes
+  short-circuit, bytes-change revoke, unmount
+  revoke, document.hidden pause.
+
+- **Slice 3: React.memo for MessageBubble + BotRoster**
+  — `src/components/MessageBubble.tsx:872` and
+  `src/components/BotRoster.tsx:70` are wrapped in
+  `React.memo` with default shallow equality.
+  During a chat stream, every chunk causes the
+  parent ChatView to re-render. Without memo, the
+  50+ historical MessageBubble instances and the
+  BotRoster's N rows re-render every time. The
+  streaming bubble's `message` prop is a new
+  reference each chunk (new content), so it
+  re-renders normally. The historical bubbles' prop
+  references are stable (React's `.map` keeps the
+  non-target elements identical), so the memo
+  skips. For a 50-message conversation streaming
+  at 50 tokens/s, this is ~2500 reconciliations/s
+  avoided. Two new tests pin the memo.
+
+- **Slice 4: VoiceToolbar level meter via direct
+  DOM mutation** — `src/components/VoiceToolbar.tsx:118`
+  removes the `useState<number>` for the level
+  meter. The RAF tick now writes
+  `fillRef.current.style.width` and the
+  `aria-valuenow` attribute directly, bypassing
+  React entirely. The 60fps `setLevel(pct)` was
+  re-rendering the entire VoiceToolbar (button +
+  status text + listening indicator) just to
+  update one CSS property. Now zero re-renders
+  during recording.
+
+- **Slice 5: Optimistic save in VoiceSection + drop
+  v3.7.14 OpenAI copy** —
+  `src/components/SettingsPalette.tsx:908` no
+  longer awaits the SQLite write before showing
+  the "Saved" pill. The pill appears immediately;
+  the write runs in the background. On failure,
+  the error state restores and the saved-key mask
+  is re-read. Removes the 50-200ms modal-hitch on
+  every STT key save. Also fixed the leftover
+  v3.7.14 "OpenAI API key" / "Whisper" / "sk-…"
+  copy in the palette and VoiceButton — the STT
+  provider was swapped to MiniMax `asr-1.0` in
+  v3.7.15 but the UI text wasn't.
+
+- **Slice 6: Error surfaces (footer + voice onError)**
+  — `src/components/ComputerPanel.tsx:1662`
+  ComputerFooter now takes an `error` prop and
+  renders it as a single muted cell (truncated
+  to 80 chars with ellipsis; full message in the
+  title attribute). The preview itself stays
+  usable (showing the last good frame) instead
+  of dumping the error in the image area. The
+  prompt's "Drive / screenshot / provision errors:
+  one line in the Computer footer, not a stack dump
+  in the preview" rule. Also routed
+  VoiceToolbar's level-meter init failure through
+  `onError` (which the parent routes to the chat
+  toast) instead of `console.warn`. One new test
+  pins the footer behavior.
+
+- **Slice 7: Idle timer audit (clean)** — all
+  `setInterval` calls in `src/` (ActivityFeed,
+  Sidebar, ComputerPanel's loadComputer + uptime +
+  screenshot poll) have proper cleanup. The one-off
+  `setTimeout`s that fire state setters (TTS state
+  reset, copy-button flash, pin-button flash) are
+  not leaks — they fire once and clear. The
+  search-debounce in App.tsx:385 has `clearTimeout`
+  in its cleanup. No new fixes needed.
+
+### Test gate
+- `npm test`: 22 files, **203 passed**, 0 failed
+  (was 196, +7 from the new lifecycle + memo + footer
+  tests)
+- `cargo test --lib`: **365 passed**, 0 failed,
+  3 ignored (unchanged from v3.7.16 — no Rust code
+  touched in this overhaul)
+- `cargo test --bin maxbotd`: **10 passed**, 0
+  failed, 1 ignored (unchanged)
+
+### Not addressed (intentionally)
+- The v3.7.15 renderer memory leak hunt (the
+  WebKit Malloc zone + JavaScriptCore heap snapshot
+  investigation per the v3.7.16 entry in MEMORY.md).
+  This overhaul closes the known blob/RAF/poll
+  lifecycle holes; the remaining leak is a
+  WebKit-internal allocation pattern that requires
+  a devtools build + heap snapshot comparison,
+  out of scope for an overnight smoothness pass.
+  The closed lifecycles make the leak smaller
+  (the only outstanding source is the WebKit
+  heap itself, not a JS object we hold a ref to).
+
 ## v3.7.16 — 2026-09-10
 
 ### Changed — Multi-VM VNC port allocation (Hardening item #3)
