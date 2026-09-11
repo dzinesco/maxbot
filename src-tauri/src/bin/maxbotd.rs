@@ -1177,7 +1177,7 @@ async fn ensure_conversation(
         let convo = if let Ok(Some(sched)) = db.get_schedule(&bot_id) {
             if let Some(existing) = sched.last_conversation_id {
                 if db
-                    .list_conversations()
+                    .list_conversations(None)
                     .map(|list| list.iter().any(|c| c.id == existing))
                     .unwrap_or(false)
                 {

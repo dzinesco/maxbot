@@ -9,11 +9,15 @@ use crate::AppState;
 #[tauri::command]
 pub async fn list_conversations(
     state: State<'_, AppState>,
+    bot_id: Option<String>,
 ) -> Result<Vec<Conversation>, String> {
     let db = state.db.clone();
-    tokio::task::spawn_blocking(move || db.list_conversations().map_err(|e| e.to_string()))
-        .await
-        .map_err(|e| e.to_string())?
+    tokio::task::spawn_blocking(move || {
+        db.list_conversations(bot_id.as_deref())
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]

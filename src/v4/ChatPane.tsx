@@ -122,6 +122,23 @@ function summarizeToolCalls(messages: Message[]): Map<string, ToolCallRow> {
           found++;
         }
       }
+      // v4 S4 — Drop rows where the result is a
+      // flailing-error from the pre-S3a model: an unknown
+      // tool call or a schema-invalid call (missing field).
+      // These were persisted as `[error] invalid arguments:
+      // missing field: command` and `[error] unknown tool: X`
+      // rows from before the bug fix. They were never useful
+      // to the user — they only existed because the LLM was
+      // looping on a bad call. The post-S3a model never emits
+      // them; we don't render the historical ones either so
+      // old threads don't look noisy.
+      if (
+        resultText !== null &&
+        (resultText.startsWith("[error] invalid arguments") ||
+          resultText.startsWith("[error] unknown tool"))
+      ) {
+        continue;
+      }
       out.set(call.id, {
         id: call.id,
         name: call.name,

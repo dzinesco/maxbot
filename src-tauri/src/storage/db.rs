@@ -855,25 +855,70 @@ impl Database {
 
     // ----- conversations -----
 
-    pub fn list_conversations(&self) -> rusqlite::Result<Vec<Conversation>> {
+    /// v4 S4 — List conversations for a bot, hiding empty
+    /// leftover "New chat" threads that have no messages. The
+    /// EXISTS subquery is cheap (messages is indexed on
+    /// conversation_id) and keeps the rail clean: a user who
+    /// creates a thread but never sends a message doesn't get
+    /// a ghost row in the sidebar.
+    ///
+    /// `bot_id == None` returns conversations across all bots
+    /// (the legacy behaviour, kept for any non-renderer caller
+    /// that hasn't been migrated to per-bot filtering).
+    pub fn list_conversations(
+        &self,
+        bot_id: Option<&str>,
+    ) -> rusqlite::Result<Vec<Conversation>> {
         let conn = self.conn.lock().expect("db lock poisoned");
-        let mut stmt = conn.prepare(
-            "SELECT id, title, created_at, updated_at, bot_id
-             FROM conversations
-             ORDER BY updated_at DESC",
-        )?;
-        let rows = stmt.query_map([], |row| {
-            Ok(Conversation {
-                id: row.get(0)?,
-                title: row.get(1)?,
-                created_at: parse_dt(row.get::<_, String>(2)?),
-                updated_at: parse_dt(row.get::<_, String>(3)?),
-                bot_id: row.get(4)?,
-            })
-        })?;
-        let mut out = Vec::new();
-        for row in rows {
-            out.push(row?);
+        let mut out: Vec<Conversation> = Vec::new();
+        match bot_id {
+            Some(bid) => {
+                let mut stmt = conn.prepare(
+                    "SELECT c.id, c.title, c.created_at, c.updated_at, c.bot_id
+                     FROM conversations c
+                     WHERE c.bot_id = ?1
+                       AND EXISTS (
+                         SELECT 1 FROM messages m
+                         WHERE m.conversation_id = c.id
+                       )
+                     ORDER BY c.updated_at DESC",
+                )?;
+                let rows = stmt.query_map([bid], |row| {
+                    Ok(Conversation {
+                        id: row.get(0)?,
+                        title: row.get(1)?,
+                        created_at: parse_dt(row.get::<_, String>(2)?),
+                        updated_at: parse_dt(row.get::<_, String>(3)?),
+                        bot_id: row.get(4)?,
+                    })
+                })?;
+                for row in rows {
+                    out.push(row?);
+                }
+            }
+            None => {
+                let mut stmt = conn.prepare(
+                    "SELECT c.id, c.title, c.created_at, c.updated_at, c.bot_id
+                     FROM conversations c
+                     WHERE EXISTS (
+                         SELECT 1 FROM messages m
+                         WHERE m.conversation_id = c.id
+                       )
+                     ORDER BY c.updated_at DESC",
+                )?;
+                let rows = stmt.query_map([], |row| {
+                    Ok(Conversation {
+                        id: row.get(0)?,
+                        title: row.get(1)?,
+                        created_at: parse_dt(row.get::<_, String>(2)?),
+                        updated_at: parse_dt(row.get::<_, String>(3)?),
+                        bot_id: row.get(4)?,
+                    })
+                })?;
+                for row in rows {
+                    out.push(row?);
+                }
+            }
         }
         Ok(out)
     }

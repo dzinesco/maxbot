@@ -91,14 +91,14 @@
   display: flex;
   flex-direction: column;
   gap: 4px;
-  max-width: 720px;
+  max-width: 40rem;
 }
 
 /* Assistant: full-width, large body. */
 .v4-chat-pane-msg--assistant {
   align-items: flex-start;
   width: 100%;
-  max-width: 100%;
+  max-width: 40rem;
 }
 
 .v4-chat-pane-msg--assistant .v4-chat-pane-msg-body {
@@ -109,7 +109,7 @@
   word-break: break-word;
 }
 
-/* User: right-aligned, muted. S3a-real — max-width 36rem so
+/* User: right-aligned, muted. S4 — max-width 40rem so
  * long user messages wrap inside the right column and stay
  * on screen. The container is right-anchored (align-self:
  * flex-end) so the body hugs the right side even when the
@@ -117,7 +117,7 @@
 .v4-chat-pane-msg--user {
   align-items: flex-end;
   align-self: flex-end;
-  max-width: 36rem;
+  max-width: 40rem;
   margin-left: auto;
 }
 

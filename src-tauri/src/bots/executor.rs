@@ -144,7 +144,7 @@ pub async fn run_bot_once(
     let conversation = if let Some(pinned) = existing_conversation_id.clone() {
         let exists = state
             .db
-            .list_conversations()
+            .list_conversations(None)
             .ok()
             .map(|list| list.iter().any(|c| c.id == pinned))
             .unwrap_or(false);
@@ -180,7 +180,7 @@ pub async fn run_bot_once(
             // Verify the conversation still exists.
             let exists = state
                 .db
-                .list_conversations()
+                .list_conversations(None)
                 .ok()
                 .map(|list| list.iter().any(|c| c.id == existing_id))
                 .unwrap_or(false);
