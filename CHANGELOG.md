@@ -4,6 +4,87 @@ All notable changes to MaxBot are documented in this file. The format
 follows [Keep a Changelog](https://keepachangelog.com/) and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## v3.7.17 — 2026-09-11
+
+### Changed — Bundle identifier rename to escape WebKit Malloc leak
+
+The d964581 "Fix session resource leaks and reconnect chat
+lifecycle flows" commit is necessary but NOT sufficient.
+Slice A diagnostic (commit `eac31dc`, profile at 10:22Z)
+reverted just the identifier to `com.maxbot.app` while
+keeping `devtools: true` and reproduced the leak at the
+identical signature (11.7 GB allocated / 1% fragmentation /
+7.3 GB swapped at t=30s). The bundle identifier is the
+load-bearing variable. d964581 alone is not the fix.
+
+v3.7.17 renames the identifier from `com.maxbot.app` to
+`com.maxbot.app.devtools` and adds a one-shot data dir
+migration so existing users keep their profiles.
+
+- **`src-tauri/tauri.conf.json`** — `identifier` is now
+  `com.maxbot.app.devtools`; `devtools: true` is set on the
+  window (was previously default). The bundle ID change
+  is the WebKit Malloc fix; the devtools flag is kept on
+  per Tyler's leak-hunt directive so future heap
+  snapshots are reachable without rebuilding.
+
+- **`src-tauri/src/data_migration.rs` (new)** — module
+  with `run_for_app_data_dir(new_dir) -> MigrationOutcome`
+  and a pure `run(old_dir, new_dir)` core. On first
+  v3.7.17 launch, if `~/Library/Application
+  Support/com.maxbot.app/` exists AND the new
+  `com.maxbot.app.devtools/` dir is missing or empty, the
+  old dir is copied recursively into the new one. The
+  old dir is LEFT IN PLACE for one release (Tyler's
+  directive — gives a downgrade a clean recovery path).
+  If both exist and the new dir is non-empty, the copy
+  is skipped (do NOT merge blindly). If the old dir is
+  missing, it's a no-op (fresh install). The function
+  never deletes anything, so re-running is fully
+  recoverable. Wired into `lib.rs` setup hook at line 82,
+  right after the data dir is resolved and before
+  `create_dir_all`.
+
+- **`src-tauri/src/lib.rs`** — `mod data_migration;`
+  added; setup hook calls `run_for_app_data_dir` and
+  logs the outcome (`migrated` / `skipped (new dir
+  non-empty)` / `no-op` / `failed`). All four outcomes
+  log a single line so the launch log tells the user /
+  dev exactly what happened.
+
+- **8 unit tests** (`src-tauri/src/data_migration.rs`)
+  cover: no-op on missing old dir, migrate when new dir
+  missing, migrate when new dir empty, skip when new dir
+  non-empty, idempotent second-run skip, nested-dir
+  recursive copy, file-content preservation, and the
+  end-to-end `run_for_app_data_dir` path. All 8 use
+  `/tmp/maxbot-migration-test-*` scratch dirs.
+
+### Notes
+
+- **Do NOT revert the identifier in any future change.**
+  Reverting to `com.maxbot.app` would re-introduce the
+  WebKit Malloc leak for every user. The data dir
+  migration is the user-facing workaround; the root
+  cause is in WebKit/macOS code path keyed on the
+  bundle ID. Investigation tracked in
+  `docs/followups/2026-09-11-bundle-id-leak.md`.
+
+- The leak-hunt diagnostic chain (d964581 → 6e05a93 →
+  eac31dc) is preserved in `docs/leak-hunt-2026-09-11.md`.
+  The 5 consecutive healthy runs on `com.maxbot.app.devtools`
+  (10 MB allocated, 40% fragmentation, 0 KB swapped) and
+  Slice A's reproducing run on `com.maxbot.app`
+  (11.7 GB allocated, 1% fragmentation, 7.3 GB swapped)
+  are the load-bearing evidence.
+
+- The v3.7.4 `maxbotd` FK fix (already shipped — the
+  `insert_test_bot` helper that satisfies
+  `daemon_tokens.bot_id`) keeps `daemon_token_round_trip`
+  and `rotate_daemon_token_invalidates_old` green at
+  v3.7.17. `cargo test --bin maxbotd` shows 10 passing
+  + 1 ignored, no failures.
+
 ## v3.7.16 — 2026-09-10
 
 ### Changed — Multi-VM VNC port allocation (Hardening item #3)

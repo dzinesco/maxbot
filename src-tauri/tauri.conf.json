@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "MaxBot",
-  "version": "3.7.16",
-  "identifier": "com.maxbot.app",
+  "version": "3.7.17",
+  "identifier": "com.maxbot.app.devtools",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
@@ -19,7 +19,8 @@
         "minHeight": 480,
         "resizable": true,
         "fullscreen": false,
-        "titleBarStyle": "Visible"
+        "titleBarStyle": "Visible",
+        "devtools": true
       }
     ],
     "security": {

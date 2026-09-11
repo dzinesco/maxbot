@@ -23,6 +23,7 @@ pub mod skills;
 pub mod storage;
 pub mod tools;
 mod commands;
+pub mod data_migration;
 mod env_loader;
 mod grok_build;
 mod llm;
@@ -86,6 +87,35 @@ pub fn run() {
                 .path()
                 .app_data_dir()
                 .expect("app data dir should be resolvable on a supported platform");
+            // v3.7.17 — bundle-id-rename migration. The bundle
+            // identifier moved from `com.maxbot.app` to
+            // `com.maxbot.app.devtools` to escape a WebKit memory
+            // leak keyed on the original identifier (see
+            // `docs/leak-hunt-2026-09-11.md`). Existing v3.7.16
+            // users have their state in the OLD dir; copy it into
+            // the NEW dir on first launch so they keep their
+            // profiles. Old dir is left in place for one release.
+            match data_migration::run_for_app_data_dir(&data_dir) {
+                data_migration::MigrationOutcome::NoOp => {
+                    log::info!("data_migration: no old dir found; fresh install");
+                }
+                data_migration::MigrationOutcome::Migrated { copied_entries } => {
+                    log::info!(
+                        "data_migration: copied {copied_entries} entries from old dir to {}",
+                        data_dir.display()
+                    );
+                }
+                data_migration::MigrationOutcome::Skipped => {
+                    log::warn!(
+                        "data_migration: old dir exists AND new dir is non-empty; skipping copy (per Tyler). User may have a partial state — investigate via `ls ~/Library/Application\\ Support/com.maxbot.app*`"
+                    );
+                }
+                data_migration::MigrationOutcome::Failed { error } => {
+                    log::error!(
+                        "data_migration: copy FAILED ({error}); old dir preserved, new dir may be partial. Continuing startup — MaxBot will recreate missing files on first use."
+                    );
+                }
+            }
             std::fs::create_dir_all(&data_dir)
                 .expect("create MaxBot data dir");
             let db_path = data_dir.join("maxbot.sqlite");
