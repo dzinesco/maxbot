@@ -1,0 +1,123 @@
+/*
+ * v4 — App layout styles.
+ *
+ * Two-column shell: sidebar (roster + loop chip) | main
+ * (chat / computer / empty state). Per-surface CSS lives
+ * next to each surface component; this file owns only
+ * layout.
+ */
+
+.v4-app {
+  display: grid;
+  grid-template-columns: var(--sidebar-w) 1fr;
+  height: 100vh;
+  background: var(--bg-0);
+}
+
+.v4-app-sidebar {
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid var(--border);
+  background: var(--bg-1);
+  min-width: 0;
+  overflow: hidden;
+}
+
+.v4-app-sidebar-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.v4-app-brand {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 14px;
+  letter-spacing: 0.04em;
+  color: var(--text-0);
+}
+
+.v4-app-loading {
+  color: var(--text-3);
+  font-size: 12px;
+  font-style: italic;
+}
+
+.v4-app-sidebar-bottom {
+  margin-top: auto;
+  border-top: 1px solid var(--border);
+}
+
+.v4-app-main {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.v4-app-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-2);
+  flex-shrink: 0;
+}
+
+.v4-app-empty {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg-0);
+  color: var(--text-3);
+}
+
+.v4-app-empty-text {
+  font-size: 13px;
+  font-style: italic;
+  text-align: center;
+  padding: 32px;
+  max-width: 480px;
+  line-height: 1.5;
+}
+
+.v4-app--boot-error {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100vh;
+  background: var(--bg-0);
+}
+
+.v4-app-boot-error-panel {
+  background: var(--bg-1);
+  border: 1px solid var(--danger);
+  border-radius: var(--radius-md);
+  padding: 24px;
+  max-width: 640px;
+  width: 90%;
+}
+
+.v4-app-boot-error-panel h1 {
+  margin: 0 0 16px;
+  font-size: 18px;
+  color: var(--danger);
+}
+
+.v4-app-boot-error-msg {
+  background: var(--bg-0);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 12px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-1);
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin: 0 0 16px;
+}

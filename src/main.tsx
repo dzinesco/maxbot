@@ -1,19 +1,21 @@
+// v3.7.17 — v4 shell entry point.
+//
+// Per the Slice 4 brief (ui/v4-shell):
+// - No React.StrictMode in production. StrictMode's double-render
+//   hides timer / listener leaks that this slice is meant to expose.
+// - ErrorBoundary stays: top-level render errors must show on screen
+//   instead of producing a blank black window.
+// - The global stylesheet (./styles.css) is the OLD tree — v4
+//   surfaces import only their own per-surface stylesheets.
+
 import React from "react";
 import ReactDOM from "react-dom/client";
-import App from "./App";
+import App from "./v4/App";
 import { ErrorBoundary } from "./components/ErrorBoundary";
-import "./styles.css";
+import "./v4/styles/base.css";
 
-// v2.0.0 — wrap the App tree in an ErrorBoundary so any top-level
-// render error displays on screen instead of producing a blank
-// black window. Built during the v2.0 black-screen investigation;
-// the boundary itself is not a fix for the underlying crash (if
-// any), but it makes the error visible and copyable so the user
-// can paste the stack to the developer.
 ReactDOM.createRoot(document.getElementById("root")!).render(
-  <React.StrictMode>
-    <ErrorBoundary>
-      <App />
-    </ErrorBoundary>
-  </React.StrictMode>,
+  <ErrorBoundary>
+    <App />
+  </ErrorBoundary>,
 );

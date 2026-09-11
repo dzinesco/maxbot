@@ -1,0 +1,98 @@
+/*
+ * v4 — Computer surface styles.
+ *
+ * Frame takes the full main pane area; header has state +
+ * size + tick + Close. Footer shows vm_name + ip.
+ */
+
+.v4-computer-route {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background: var(--bg-1);
+}
+
+.v4-computer-route-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.v4-computer-route-title {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  font-size: 12px;
+  color: var(--text-2);
+}
+
+.v4-computer-route-name {
+  font-weight: 600;
+  color: var(--text-0);
+  font-size: 14px;
+}
+
+.v4-computer-route-state {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-3);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.v4-computer-route-size,
+.v4-computer-route-tick {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+
+.v4-computer-route-close {
+  flex-shrink: 0;
+}
+
+.v4-computer-route-error {
+  padding: 8px 16px;
+  background: rgba(239, 68, 68, 0.1);
+  border-bottom: 1px solid var(--danger);
+  color: var(--danger);
+  font-size: 12px;
+}
+
+.v4-computer-route-frame-wrap {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #000;
+  overflow: auto;
+  min-height: 0;
+}
+
+.v4-computer-route-frame {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  image-rendering: pixelated;
+}
+
+.v4-computer-route-placeholder {
+  color: var(--text-3);
+  font-style: italic;
+  font-size: 13px;
+}
+
+.v4-computer-route-footer {
+  display: flex;
+  gap: 16px;
+  padding: 6px 16px;
+  border-top: 1px solid var(--border);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-3);
+  flex-shrink: 0;
+}

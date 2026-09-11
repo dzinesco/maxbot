@@ -1,0 +1,242 @@
+/*
+ * v4 — Loop surface styles.
+ *
+ * Two components:
+ * - LoopChip: pill + Start/Stop buttons. Always rendered.
+ * - LoopExpanded: TASK.md + journal. Mounted only when open.
+ *
+ * Vocabulary: same as the v3 Slice 3 LoopPanel so the colors
+ * stay consistent for users moving between the v3 dev build
+ * and the v4 shell.
+ */
+
+.v4-loop-chip {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 12px;
+  border-top: 1px solid var(--border);
+}
+
+.v4-loop-chip-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: 1px solid transparent;
+  padding: 4px 6px;
+  border-radius: var(--radius-sm);
+}
+
+.v4-loop-chip-toggle:hover {
+  background: var(--bg-2);
+}
+
+.v4-loop-chip-toggle.is-open {
+  background: var(--bg-2);
+}
+
+.v4-loop-chip-indicator {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: var(--text-3);
+}
+
+.v4-loop-chip-indicator--alive {
+  background: var(--success);
+  box-shadow: 0 0 6px rgba(34, 197, 94, 0.5);
+}
+
+.v4-loop-chip-indicator--dead {
+  background: var(--danger);
+}
+
+.v4-loop-chip-indicator--idle {
+  background: var(--warn);
+}
+
+.v4-loop-chip-indicator--unknown {
+  background: var(--text-3);
+}
+
+.v4-loop-chip-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--text-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.v4-loop-chip-caret {
+  color: var(--text-3);
+  font-size: 10px;
+  flex-shrink: 0;
+}
+
+.v4-loop-chip-actions {
+  display: flex;
+  gap: 6px;
+  padding: 0 6px;
+}
+
+.v4-loop-chip-action {
+  flex: 1;
+  font-size: 12px;
+  padding: 4px 8px;
+}
+
+.v4-loop-chip-action.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--text-0);
+}
+
+.v4-loop-chip-action.danger {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+/* Expanded panel — slides in below the chip. */
+
+.v4-loop-expanded {
+  padding: 8px 12px 12px;
+  border-top: 1px dashed var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12px;
+}
+
+.v4-loop-expanded-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.v4-loop-expanded-title {
+  font-weight: 600;
+  color: var(--text-2);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-size: 10px;
+}
+
+.v4-loop-expanded-refresh {
+  flex-shrink: 0;
+}
+
+.v4-loop-expanded-task {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  line-height: 1.4;
+}
+
+.v4-loop-expanded-pill {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  background: var(--bg-3);
+  color: var(--text-2);
+  border: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.v4-loop-expanded-pill--running {
+  background: rgba(34, 197, 94, 0.15);
+  color: var(--success);
+  border-color: rgba(34, 197, 94, 0.4);
+}
+
+.v4-loop-expanded-pill--done {
+  background: rgba(148, 163, 184, 0.15);
+  color: var(--text-2);
+}
+
+.v4-loop-expanded-pill--blocked {
+  background: rgba(251, 191, 36, 0.15);
+  color: var(--warn);
+  border-color: rgba(251, 191, 36, 0.4);
+}
+
+.v4-loop-expanded-pill--idle {
+  background: rgba(148, 163, 184, 0.1);
+  color: var(--text-3);
+}
+
+.v4-loop-expanded-task-body {
+  flex: 1 1 auto;
+  min-width: 0;
+  word-break: break-word;
+  white-space: pre-wrap;
+}
+
+.v4-loop-expanded-journal {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.v4-loop-expanded-journal--empty {
+  color: var(--text-3);
+  font-style: italic;
+}
+
+.v4-loop-expanded-journal-heading {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.v4-loop-expanded-journal-actions {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.v4-loop-expanded-journal-actions li {
+  font-size: 11px;
+  color: var(--text-2);
+  padding-left: 8px;
+  position: relative;
+}
+
+.v4-loop-expanded-journal-actions li::before {
+  content: "›";
+  position: absolute;
+  left: 0;
+  color: var(--text-3);
+}
+
+.v4-loop-expanded-journal-note {
+  font-size: 11px;
+  color: var(--text-3);
+  font-style: italic;
+}
+
+.v4-loop-expanded-empty {
+  color: var(--text-3);
+  font-style: italic;
+}
+
+.v4-loop-expanded-error {
+  color: var(--danger);
+  font-size: 11px;
+  word-break: break-word;
+}

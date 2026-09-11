@@ -1,0 +1,91 @@
+/*
+ * v4 — Roster styles.
+ *
+ * Plain list of bots. No previews, no journal entries.
+ * Selected row gets a left accent stripe + bg tint.
+ */
+
+.v4-roster {
+  list-style: none;
+  padding: 4px 0;
+  margin: 0;
+  flex: 1 1 auto;
+  overflow-y: auto;
+}
+
+.v4-roster--empty {
+  padding: 16px 12px;
+  color: var(--text-3);
+}
+
+.v4-roster-empty-text {
+  font-size: 12px;
+  font-style: italic;
+  line-height: 1.45;
+}
+
+.v4-roster-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 12px;
+  text-align: left;
+  background: transparent;
+  border: none;
+  border-left: 2px solid transparent;
+  color: var(--text-1);
+  cursor: pointer;
+  transition: background-color 60ms ease;
+}
+
+.v4-roster-row:hover {
+  background: var(--bg-2);
+}
+
+.v4-roster-row.is-selected {
+  background: var(--accent-soft);
+  border-left-color: var(--accent);
+}
+
+.v4-roster-presence {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: var(--text-3);
+}
+
+.v4-roster-presence--busy {
+  background: var(--accent);
+  box-shadow: 0 0 6px rgba(37, 99, 235, 0.4);
+}
+
+.v4-roster-presence--blocked {
+  background: var(--warn);
+  box-shadow: 0 0 6px rgba(251, 191, 36, 0.4);
+}
+
+.v4-roster-presence--done {
+  background: var(--success);
+}
+
+.v4-roster-presence--idle {
+  background: var(--text-3);
+}
+
+.v4-roster-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+}
+
+.v4-roster-when {
+  font-size: 11px;
+  color: var(--text-3);
+  flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
+}

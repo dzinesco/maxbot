@@ -1,0 +1,158 @@
+/*
+ * v4 shell — base stylesheet.
+ *
+ * v3.7.17 (ui/v4-shell) — the new shell rebuilds on top of these
+ * tokens. Per-surface stylesheets (roster.css, chat.css, ...) only
+ * need to reference these vars. The full v3 stylesheet dump is
+ * gone; nothing in v4 imports from `src/styles.css`.
+ *
+ * Token names mirror the existing styles.css so the per-surface
+ * sheets can share vocabulary (--bg-2, --text-1, --accent, etc.).
+ */
+
+:root {
+  /* Surface */
+  --bg-0: #0e0e10;
+  --bg-1: #18181b;
+  --bg-2: #1f1f23;
+  --bg-3: #2a2a2f;
+  --border: #2d2d33;
+  --border-strong: #3f3f46;
+  /* Text */
+  --text-0: #fafafa;
+  --text-1: #d4d4d8;
+  --text-2: #a1a1aa;
+  --text-3: #71717a;
+  /* Accent */
+  --accent: #2563eb;
+  --accent-hover: #1d4ed8;
+  --accent-soft: rgba(37, 99, 235, 0.18);
+  --danger: #ef4444;
+  --success: #22c55e;
+  --warn: #fbbf24;
+  /* Tool category palette (carried forward from v3 — same hue
+     family for tool-call cards on the chat surface). */
+  --tool-browser: #06b6d4;
+  --tool-code: #f59e0b;
+  --tool-fs: #a78bfa;
+  --tool-default: var(--text-3);
+  /* Geometry */
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  /* Type */
+  --font-display: "Avenir Next", "Avenir Next Condensed Demi Bold",
+    "Avenir", system-ui, sans-serif;
+  --font-sans: "Public Sans", "Outfit", "SF Pro Text",
+    -apple-system, BlinkMacSystemFont, "Segoe UI",
+    system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", "SF Mono", "Menlo", "Consolas", monospace;
+  /* Layout */
+  --sidebar-w: 280px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background: var(--bg-0);
+  color: var(--text-1);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+button,
+input,
+select,
+textarea {
+  font-family: inherit;
+  font-size: inherit;
+  color: inherit;
+}
+
+button {
+  cursor: pointer;
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-1);
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  transition: background-color 80ms ease, border-color 80ms ease;
+}
+
+button:hover:not(:disabled) {
+  background: var(--bg-2);
+  border-color: var(--border-strong);
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+button.ghost {
+  background: transparent;
+  border-color: transparent;
+}
+
+button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--text-0);
+}
+
+button.primary:hover:not(:disabled) {
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
+}
+
+button.danger {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+button.small {
+  font-size: 12px;
+  padding: 4px 8px;
+}
+
+a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+a:hover {
+  text-decoration: underline;
+}
+
+/* Scrollbars — match the v3 dark theme. */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--bg-0);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--bg-3);
+  border-radius: var(--radius-sm);
+  border: 2px solid var(--bg-0);
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--border-strong);
+}
