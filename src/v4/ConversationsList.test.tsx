@@ -107,8 +107,11 @@ describe("ConversationsList — S2 contract", () => {
       />,
     );
     await waitFor(() => screen.getByText("Newest chat"));
-    // Scope to row titles only (not the "New chat" button).
-    const rows = container.querySelectorAll(".v4-conv-list-row-title");
+    // Scope to the threads list (not the "+ New chat" button, which
+    // lives in its own .v4-conv-list-new row).
+    const rows = container.querySelectorAll(
+      ".v4-conv-list-rows .v4-conv-list-row-title",
+    );
     const titles = Array.from(rows).map((n) => n.textContent);
     expect(titles).toEqual(["Newest chat", "Current chat", "Old chat"]);
   });
@@ -143,7 +146,10 @@ describe("ConversationsList — S2 contract", () => {
       />,
     );
     await waitFor(() => screen.getByText(/no threads yet/i));
-    const btn = screen.getByText(/^New chat$/);
+    // S2.5 — the "New chat" button lives in its own row under the
+    // threads list. Class on the row is .v4-conv-list-new so it's
+    // distinguishable from real conversation rows.
+    const btn = screen.getByText(/\+ New chat/);
     fireEvent.click(btn);
     expect(onNew).toHaveBeenCalledTimes(1);
   });

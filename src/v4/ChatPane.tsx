@@ -1,38 +1,30 @@
 /*
- * v4 — ChatPane (S2)
+ * v4 — ChatPane (S2.5 — Grok Bot look)
  *
- * v3.7.17 Slice S2 — session, not a demo.
+ * S2.5 changes from S3:
+ *   - Header: bot name + one status word + Stop. Drop the
+ *     8-char conv-id hex (Grok doesn't show it).
+ *   - Per-message meta (role + timestamp uppercase) DROPPED.
+ *     No "ASSISTANT 12:34:56 PM" rows. Just the body.
+ *   - User messages: right-aligned, muted (text-2).
+ *   - Assistant messages: left-aligned, full width, 16px,
+ *     1.5 line-height, near-white.
+ *   - No bubbles. Plain text rows, role-coded only by
+ *     alignment + color.
+ *   - Composer: 44px pill, 12px radius, border #2a2a2c, sits
+ *     16px off the bottom.
+ *   - <think>…</think> blocks hidden in render (defensive
+ *     even though .think has display:none in CSS).
  *
- * Per the S2 brief:
- *   - New chat button creates a conversation for the selected bot
- *     and switches to it (handled in App.tsx; this pane just
- *     renders whatever conversationId is passed in).
- *   - Conversation list for the selected bot only, fetched on
- *     bot select, not at boot (handled by ConversationsList).
- *   - Clicking a thread loads that conversation (App.tsx sets
- *     `selectedConvId`; this pane reacts).
- *
- * What changed from S1:
- *   - Pane now takes `conversationId` as a prop. No more
- *     auto-loading the latest conversation on mount — that was
- *     S1's "session, not a demo" placeholder.
- *   - When `conversationId` is null, the pane shows a
- *     "select a thread or start a new chat" empty state.
- *   - When `conversationId` changes, history is reloaded for
- *     that conversation; the active stream is unaffected
- *     (request_id filtering).
- *   - Listeners (onChunk/onDone/onError) are still mounted
- *     with the bot; switching conversations doesn't re-register
- *     listeners. The pending stream (if any) continues across
- *     thread switches — but S1 already prevents history polling
- *     while streaming, so the stale state is bounded.
+ * S3 tool-call behavior preserved: name + one-line result
+ * under the owning assistant message, no JSON in state.
  *
  * Hard rules (v4):
  *   - Mount only when botId is provided.
  *   - Listeners paired with unlistens in the same useEffect.
  *   - No setInterval — all timers are recursive setTimeout.
  *   - No history polling while a stream is active.
- *   - No screenshot bytes / tool JSON / journal text in
+ *   - No screenshot bytes / tool arguments JSON / journal text in
  *     React state beyond the visible slice.
  */
 
@@ -48,10 +40,12 @@ import {
 } from "../lib/tauri";
 import type {
   Bot,
+  BotState,
   ChunkEvent,
   DoneEvent,
   ErrorEvent,
   Message,
+  PersistedToolCall,
 } from "../lib/api";
 import "./styles/chat.css";
 
@@ -74,6 +68,105 @@ interface AssistantDraft {
   pending: boolean;
 }
 
+/** A compact view of a tool call for rendering — name + one-line
+ *  result, nothing else. Built from history (post-Done) and
+ *  augmented by `liveToolCalls` during streaming. */
+interface ToolCallRow {
+  /** Persisted tool_call id from the wire. */
+  id: string;
+  /** Tool name. */
+  name: string;
+  /** One-line result summary. `null` while the call is still in
+   *  flight (no result message has arrived yet). */
+  result: string | null;
+}
+
+/**
+ * Walk `messages` and build a positional map of every tool call
+ * and its one-line result. The pairing rule: for each assistant
+ * message at index `i` with `tool_calls` of length `n`, the next
+ * `n` consecutive `role: "tool"` messages are its results, paired
+ * positionally. The map key is the `PersistedToolCall.id`.
+ *
+ * Pure function. No IPC. Runs in render and after history loads.
+ */
+function summarizeToolCalls(messages: Message[]): Map<string, ToolCallRow> {
+  const out = new Map<string, ToolCallRow>();
+  for (let i = 0; i < messages.length; i++) {
+    const m = messages[i];
+    if (m.role !== "assistant" || m.tool_calls.length === 0) continue;
+    const calls = m.tool_calls;
+    let toolCursor = i + 1;
+    for (let k = 0; k < calls.length; k++) {
+      const call = calls[k];
+      let resultText: string | null = null;
+      // Walk forward to find the k-th role=tool message after
+      // this assistant message.
+      let found = 0;
+      for (let j = toolCursor; j < messages.length; j++) {
+        if (messages[j].role === "tool") {
+          if (found === k) {
+            resultText = messages[j].content;
+            toolCursor = j + 1;
+            break;
+          }
+          found++;
+        }
+      }
+      out.set(call.id, {
+        id: call.id,
+        name: call.name,
+        result: resultText,
+      });
+    }
+  }
+  return out;
+}
+
+/** Truncate a one-line result summary for the chat row. Aggressive
+ *  cap so a runaway JSON payload can't blow up render cost. */
+function truncateResult(text: string | null, max = 80): string {
+  if (text === null) return "running…";
+  // Collapse newlines so the row stays single-line.
+  const flat = text.replace(/\s+/g, " ").trim();
+  if (flat.length <= max) return flat;
+  return flat.slice(0, max) + "…";
+}
+
+/**
+ * Strip <think>…</think> reasoning blocks from assistant content.
+ * S2.5 hides them in CSS (`.think { display: none }`), but we also
+ * drop them in render so the DOM stays clean and the truncated
+ * preview shows what the user actually said. Strips both
+ * block-form `<think>...</think>` and the newer `<think>\n...</think>\n`
+ * variant some providers emit.
+ */
+function stripThinkBlocks(text: string): string {
+  if (!text) return text;
+  // Match the full block including the tags.
+  return text.replace(/<think>[\s\S]*?<\/think>/g, "").trim();
+}
+
+/** Single status word for the chat header. */
+function botStatusWord(
+  state: BotState | undefined,
+  isStreaming: boolean,
+): string {
+  if (isStreaming) return "Writing…";
+  switch (state) {
+    case "thinking":
+    case "working":
+      return "Working";
+    case "blocked":
+    case "waiting":
+      return "Blocked";
+    case "done":
+      return "Done";
+    default:
+      return "Online";
+  }
+}
+
 function generateRequestId(): string {
   if (
     typeof crypto !== "undefined" &&
@@ -90,6 +183,11 @@ export function ChatPane({ bot, conversationId }: ChatPaneProps) {
   const [draft, setDraft] = useState<AssistantDraft | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // S3 — live tool-call tracking during streaming. Name only.
+  // Cleared on conversation switch + on every new send.
+  const [liveToolCalls, setLiveToolCalls] = useState<
+    Map<string, { name: string }>
+  >(new Map());
   // Track the current conversation id in a ref so listeners
   // and the history-refresh tick ignore stale state when the
   // conversation changes mid-stream.
@@ -102,6 +200,9 @@ export function ChatPane({ bot, conversationId }: ChatPaneProps) {
   // History load — keyed on conversationId. When the user
   // switches threads via App.tsx, this fires and reloads.
   useEffect(() => {
+    // Conversation switch — wipe the live tool map; it belongs to
+    // the previous thread's stream.
+    setLiveToolCalls(new Map());
     if (!conversationId) {
       setMessages([]);
       return;
@@ -129,13 +230,54 @@ export function ChatPane({ bot, conversationId }: ChatPaneProps) {
     (async () => {
       const u1 = await onChunk((ev: ChunkEvent) => {
         if (cancelled) return;
-        setDraft((prev) => {
-          if (!prev || prev.requestId !== ev.request_id) return prev;
-          if (ev.chunk.kind === "text") {
-            return { ...prev, text: prev.text + ev.chunk.delta };
-          }
-          return prev;
-        });
+        // Narrow on the destructured chunk so TypeScript keeps
+        // the narrowed type through the setDraft / setLiveToolCalls
+        // closures below. (Property-narrowing across a closure is
+        // not always preserved; destructuring is.)
+        const { chunk, request_id } = ev;
+        if (chunk.kind === "text") {
+          const delta = chunk.delta;
+          setDraft((prev) => {
+            if (!prev || prev.requestId !== request_id) return prev;
+            return { ...prev, text: prev.text + delta };
+          });
+          return;
+        }
+        if (chunk.kind === "tool_call_delta") {
+          // S3 — record the name only. We don't accumulate the
+          // arguments_delta; the renderer never holds the tool's
+          // argument JSON.
+          const id = chunk.id;
+          const incomingName = chunk.name ?? null;
+          if (!id) return;
+          setLiveToolCalls((prev) => {
+            if (prev.has(id)) {
+              // Already have this id — the name may have arrived
+              // in a later chunk (some providers send the name
+              // after the first arguments_delta). Merge but don't
+              // overwrite a non-empty name with an empty one.
+              if (!incomingName) return prev;
+              const existing = prev.get(id);
+              if (existing && existing.name) return prev;
+              const next = new Map(prev);
+              next.set(id, { name: incomingName });
+              return next;
+            }
+            if (!incomingName) {
+              // No name yet — track the id with a placeholder so
+              // a later chunk can fill in the name.
+              const next = new Map(prev);
+              next.set(id, { name: "" });
+              return next;
+            }
+            const next = new Map(prev);
+            next.set(id, { name: incomingName });
+            return next;
+          });
+          return;
+        }
+        // StreamChunk kind "done" — ignored on the chunk channel;
+        // the dedicated DoneEvent handler is the source of truth.
       });
       const u2 = await onDone((ev: DoneEvent) => {
         if (cancelled) return;
@@ -223,6 +365,10 @@ export function ChatPane({ bot, conversationId }: ChatPaneProps) {
     setBusy(true);
     setComposer("");
     setError(null);
+    // S3 — clear the live tool map for the new turn. The previous
+    // turn's tools either landed in history (and render from
+    // there) or didn't happen.
+    setLiveToolCalls(new Map());
     setDraft({
       id: `local-${requestId}`,
       requestId,
@@ -279,22 +425,37 @@ export function ChatPane({ bot, conversationId }: ChatPaneProps) {
   const showStop = !!draft && draft.pending && !!draft.assistantMessageId;
   const showEmpty =
     !conversationId || (messages.length === 0 && !draft);
+  const headerStatus = botStatusWord(bot.state, !!showStop);
+
+  // S3 — tool row rendering. Build the persisted map once per
+  // render; live entries that aren't in the map show as
+  // `running…`. Empty placeholder names are dropped so the row
+  // doesn't say ` · running…` before the name chunk arrives.
+  const persistedTools = summarizeToolCalls(messages);
+  const liveToolRows: ToolCallRow[] = [];
+  for (const [id, entry] of liveToolCalls.entries()) {
+    if (!entry.name) continue;
+    const persisted = persistedTools.get(id);
+    liveToolRows.push({
+      id,
+      name: entry.name,
+      result: persisted?.result ?? null,
+    });
+  }
 
   return (
     <div className="v4-chat-pane" aria-label={`Chat with ${bot.name}`}>
       <header className="v4-chat-pane-header">
         <div className="v4-chat-pane-bot">
           <span className="v4-chat-pane-name">{bot.name}</span>
-          {conversationId && (
-            <span className="v4-chat-pane-conv-id" title={conversationId}>
-              {conversationId.slice(0, 8)}
-            </span>
-          )}
+          <span className="v4-chat-pane-status" aria-live="polite">
+            {headerStatus}
+          </span>
         </div>
         {showStop && (
           <button
             type="button"
-            className="v4-chat-pane-stop danger small"
+            className="v4-chat-pane-stop small"
             onClick={handleStop}
             title="Stop the running assistant response"
           >
@@ -323,26 +484,30 @@ export function ChatPane({ bot, conversationId }: ChatPaneProps) {
               key={m.id}
               className={`v4-chat-pane-msg v4-chat-pane-msg--${m.role}`}
             >
-              <div className="v4-chat-pane-msg-meta">
-                <span className="v4-chat-pane-msg-role">{m.role}</span>
-                <span className="v4-chat-pane-msg-when">
-                  {new Date(m.created_at).toLocaleTimeString()}
-                </span>
+              {/* S2.5 — strip <think> blocks in render. CSS also
+                  hides .think as a defensive fallback. */}
+              <div className="v4-chat-pane-msg-body">
+                {m.role === "assistant"
+                  ? stripThinkBlocks(m.content)
+                  : m.content}
               </div>
-              <div className="v4-chat-pane-msg-body">{m.content}</div>
+              {m.role === "assistant" && m.tool_calls.length > 0 && (
+                <ToolRows
+                  calls={m.tool_calls}
+                  persisted={persistedTools}
+                />
+              )}
             </div>
           ))}
         {draft && (
           <div className="v4-chat-pane-msg v4-chat-pane-msg--assistant v4-chat-pane-msg--draft">
-            <div className="v4-chat-pane-msg-meta">
-              <span className="v4-chat-pane-msg-role">assistant</span>
-              <span className="v4-chat-pane-msg-when">
-                {draft.pending ? "writing…" : "done"}
-              </span>
-            </div>
             <div className="v4-chat-pane-msg-body">
-              {draft.text || (draft.pending ? "…" : "")}
+              {/* S2.5 — strip <think> blocks from the live draft
+                  text as well, so reasoning chunks the LLM emits
+                  mid-stream never surface to the user. */}
+              {stripThinkBlocks(draft.text)}
             </div>
+            {liveToolRows.length > 0 && <ToolRows rows={liveToolRows} />}
           </div>
         )}
       </div>
@@ -355,11 +520,11 @@ export function ChatPane({ bot, conversationId }: ChatPaneProps) {
           onKeyDown={handleComposerKey}
           placeholder={
             conversationId
-              ? `Message ${bot.name}… (Enter to send, Shift+Enter for newline)`
+              ? `Message ${bot.name}…`
               : "Pick a thread or start a new chat."
           }
           disabled={busy || !conversationId}
-          rows={3}
+          rows={1}
         />
         <button
           type="button"
@@ -367,9 +532,51 @@ export function ChatPane({ bot, conversationId }: ChatPaneProps) {
           onClick={handleSend}
           disabled={busy || composer.trim().length === 0 || !conversationId}
         >
-          {busy ? "Sending…" : "Send"}
+          {busy ? "…" : "Send"}
         </button>
       </footer>
     </div>
+  );
+}
+
+/** Renders the compact tool-call rows under an assistant message.
+ *  Two call shapes:
+ *    - `<ToolRows calls={...} persisted={...} />` for messages
+ *      loaded from history: walks the `PersistedToolCall[]`,
+ *      looks up each id in `persisted` for the result.
+ *    - `<ToolRows rows={...} />` for the in-flight draft: rows
+ *      are already ToolCallRow-shaped (built in render). */
+function ToolRows({
+  calls,
+  persisted,
+  rows,
+}: {
+  calls?: PersistedToolCall[];
+  persisted?: Map<string, ToolCallRow>;
+  rows?: ToolCallRow[];
+}) {
+  const items: ToolCallRow[] = rows
+    ? rows
+    : (calls ?? []).map((c) => {
+        const hit = persisted?.get(c.id);
+        return {
+          id: c.id,
+          name: c.name,
+          result: hit?.result ?? null,
+        };
+      });
+  if (items.length === 0) return null;
+  return (
+    <ul className="v4-chat-pane-tools" aria-label="Tool calls">
+      {items.map((it) => (
+        <li key={it.id} className="v4-chat-pane-tool-row">
+          <span className="v4-chat-pane-tool-name">{it.name}</span>
+          <span className="v4-chat-pane-tool-sep">·</span>
+          <span className="v4-chat-pane-tool-result">
+            {truncateResult(it.result)}
+          </span>
+        </li>
+      ))}
+    </ul>
   );
 }

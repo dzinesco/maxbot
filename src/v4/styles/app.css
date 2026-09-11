@@ -1,10 +1,18 @@
 /*
- * v4 — App layout styles.
+ * v4 — App layout styles (S2.5 — Grok Bot look).
  *
- * Two-column shell: sidebar (roster + loop chip) | main
+ * Two-column shell: sidebar (roster + threads) | main
  * (chat / computer / empty state). Per-surface CSS lives
  * next to each surface component; this file owns only
  * layout.
+ *
+ * S2.5 changes:
+ *   - Sidebar 260px (driven by --sidebar-w token).
+ *   - Sidebar background = main background; the divider
+ *     is a thin border, no raised panel.
+ *   - Toolbar above the chat is GONE. ChatPane owns its
+ *     own header. The Computer route is parked — the
+ *     button moved out of idle layout per the S2.5 brief.
  */
 
 .v4-app {
@@ -18,7 +26,7 @@
   display: flex;
   flex-direction: column;
   border-right: 1px solid var(--border);
-  background: var(--bg-1);
+  background: var(--bg-0);
   min-width: 0;
   overflow: hidden;
 }
@@ -27,23 +35,21 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 12px 16px;
-  border-bottom: 1px solid var(--border);
+  padding: 14px 16px 8px;
   flex-shrink: 0;
 }
 
 .v4-app-brand {
   font-family: var(--font-display);
-  font-weight: 700;
-  font-size: 14px;
-  letter-spacing: 0.04em;
+  font-weight: 600;
+  font-size: 15px;
+  letter-spacing: 0.01em;
   color: var(--text-0);
 }
 
 .v4-app-loading {
-  color: var(--text-3);
+  color: var(--text-2);
   font-size: 12px;
-  font-style: italic;
 }
 
 .v4-app-sidebar-bottom {
@@ -56,16 +62,19 @@
   flex-direction: column;
   min-width: 0;
   overflow: hidden;
+  background: var(--bg-0);
 }
 
-.v4-app-toolbar {
+/* v4 S3 — Chat area wraps ChatPane + ApprovalSheet. The
+   wrapper is the positioning context for the absolutely-
+   positioned sheet (so it overlays the chat without breaking
+   the toolbar's flex layout). */
+.v4-app-chat-area {
+  flex: 1 1 auto;
   display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 6px 16px;
-  border-bottom: 1px solid var(--border);
-  background: var(--bg-2);
-  flex-shrink: 0;
+  flex-direction: column;
+  min-height: 0;
+  position: relative;
 }
 
 .v4-app-empty {
@@ -74,12 +83,11 @@
   align-items: center;
   justify-content: center;
   background: var(--bg-0);
-  color: var(--text-3);
+  color: var(--text-2);
 }
 
 .v4-app-empty-text {
   font-size: 13px;
-  font-style: italic;
   text-align: center;
   padding: 32px;
   max-width: 480px;

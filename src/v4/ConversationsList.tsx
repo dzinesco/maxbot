@@ -1,16 +1,17 @@
 /*
- * v4 — ConversationsList
+ * v4 — ConversationsList (S2.5 — Grok Bot look)
  *
  * v3.7.17 Slice S2 — conversation list per selected bot.
+ * S2.5 — drop the uppercase "Threads" label. The list sits
+ *        under the bot name; the bot name above already
+ *        identifies what this section is.
  *
  * - Fetches `listConversations(bot.id)` ONCE when the bot is
  *   selected (NOT at boot — boot stays at listBots + getSettings).
  * - Re-fetches if `bot.id` changes (user picked a different bot).
  * - Renders one row per conversation, sorted by `updated_at` desc.
- *   The "New chat" button is rendered at the top of the list.
  * - Clicking a row calls `onSelectConv(convId)`.
- * - No setInterval. The list is fetched once per bot; re-sorting
- *   on every assistant message is a polish item.
+ * - No setInterval. The list is fetched once per bot.
  */
 
 import { useEffect, useRef, useState } from "react";
@@ -108,21 +109,11 @@ export function ConversationsList({
 
   if (!botId) return null;
 
+  // S2.5 — no "Threads" header. The "+ New chat" row always sits
+  // below the threads (or in the empty state) so users can start
+  // a fresh conversation even when no threads exist yet.
   return (
     <div className="v4-conv-list" aria-label="Conversations">
-      <div className="v4-conv-list-header">
-        <span className="v4-conv-list-title">Threads</span>
-        <button
-          type="button"
-          className="v4-conv-list-new primary small"
-          onClick={onNewChat}
-          disabled={newChatBusy}
-          title="Start a new conversation with this bot"
-        >
-          {newChatBusy ? "…" : "New chat"}
-        </button>
-      </div>
-
       {error && (
         <div className="v4-conv-list-error" role="alert">
           {error}
@@ -160,6 +151,20 @@ export function ConversationsList({
           })}
         </ul>
       )}
+
+      {/* "+ New chat" — always visible when a bot is selected.
+          Below the threads (or below the empty-state message). */}
+      <button
+        type="button"
+        className="v4-conv-list-row v4-conv-list-new"
+        onClick={onNewChat}
+        disabled={newChatBusy}
+        title="Start a new conversation with this bot"
+      >
+        <span className="v4-conv-list-new-label">
+          {newChatBusy ? "…" : "+ New chat"}
+        </span>
+      </button>
     </div>
   );
 }

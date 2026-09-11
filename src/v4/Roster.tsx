@@ -1,23 +1,21 @@
 /*
- * v4 — Roster
+ * v4 — Roster (S2.5 — Grok Bot look)
  *
- * The bot list. Always rendered. No preview, no journal,
- * no chat content — just the bot name, presence dot, and
- * "last active" relative time.
+ * Per the S2.5 brief:
+ *   - 32px circle avatar (initials or emoji icon).
+ *   - 14px name.
+ *   - 12px muted status word — no rainbow presence dot.
+ *   - Selected row: subtle lighter fill, NO left accent stripe.
  *
- * Per Tyler's v4 hard rules: "no activity feed, no loop
+ * Per the v4 hard rules: "no activity feed, no loop
  * journal, no preview" in the Roster. Click → App.tsx sets
  * `selectedBotId` and `view = "chat"`; ChatPane takes over.
  *
- * No setInterval. The presence dot uses the bot's `state`
- * field as last persisted by the daemon (the v1 schema
- * already updates this). Relative timestamps re-render
- * only on mount; if the user wants fresher data, they
- * focus the window (App.tsx handles refetch) — but the
- * roster itself does no polling.
+ * No setInterval. Relative timestamps re-render only on
+ * mount; the roster itself does no polling.
  */
 
-import type { Bot } from "../lib/api";
+import type { Bot, BotState } from "../lib/api";
 import "./styles/roster.css";
 
 export interface RosterProps {
@@ -37,19 +35,71 @@ function relativeTime(iso: string | null | undefined): string {
   return `${Math.floor(diff / (24 * 60 * 60_000))}d ago`;
 }
 
-function presenceTone(state: Bot["state"] | undefined): string {
+/** Single muted status word for the roster row. One color, one tone. */
+function statusWord(state: BotState | undefined): string {
   switch (state) {
     case "thinking":
     case "working":
-      return "busy";
+      return "Working";
     case "blocked":
     case "waiting":
-      return "blocked";
+      return "Blocked";
     case "done":
-      return "done";
+      return "Done";
     default:
-      return "idle";
+      return "Idle";
   }
+}
+
+/** Initials fallback: first letter of the first two words,
+ *  uppercased. "Alpha" → "A". "Test Bot" → "TB". */
+function initialsFor(name: string): string {
+  const trimmed = (name || "").trim();
+  if (!trimmed) return "?";
+  const parts = trimmed.split(/\s+/).slice(0, 2);
+  return parts.map((p) => p[0] || "").join("").toUpperCase() || "?";
+}
+
+/** True when the icon string looks like an emoji (one grapheme
+ *  cluster, no ASCII letters). Lets us render emoji icons at a
+ *  larger size without falling back to initials. */
+function isEmojiIcon(icon: string | undefined): boolean {
+  if (!icon) return false;
+  if (/[a-zA-Z0-9]/.test(icon)) return false;
+  // Trim to one grapheme-ish chunk: anything beyond the first
+  // cluster gets ignored. Cheap heuristic — good enough for the
+  // emoji set used by the Bot editor (single-glyph picker).
+  return icon.length > 0;
+}
+
+interface AvatarProps {
+  name: string;
+  icon: string | undefined;
+  color: string | undefined;
+}
+
+/** 32px circle avatar — emoji icon if it looks like one, else
+ *  initials on a tinted background (bot.color or default). */
+function Avatar({ name, icon, color }: AvatarProps) {
+  if (icon && isEmojiIcon(icon)) {
+    return (
+      <span
+        className="v4-roster-avatar v4-roster-avatar--emoji"
+        aria-hidden
+      >
+        {icon}
+      </span>
+    );
+  }
+  const bg = color && /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.test(color) ? color : undefined;
+  const style = bg
+    ? { background: bg, color: "var(--bg-0)" }
+    : undefined;
+  return (
+    <span className="v4-roster-avatar" style={style} aria-hidden>
+      {initialsFor(name)}
+    </span>
+  );
 }
 
 export function Roster({ bots, selectedBotId, onSelectBot }: RosterProps) {
@@ -66,8 +116,9 @@ export function Roster({ bots, selectedBotId, onSelectBot }: RosterProps) {
   return (
     <ul className="v4-roster" role="list" aria-label="Bots">
       {bots.map((bot) => {
-        const tone = presenceTone(bot.state);
         const selected = bot.id === selectedBotId;
+        const status = statusWord(bot.state);
+        const when = relativeTime(bot.last_active_at);
         return (
           <li key={bot.id}>
             <button
@@ -75,15 +126,14 @@ export function Roster({ bots, selectedBotId, onSelectBot }: RosterProps) {
               className={`v4-roster-row ${selected ? "is-selected" : ""}`}
               onClick={() => onSelectBot(bot.id)}
               aria-current={selected ? "true" : undefined}
+              title={`${bot.name} · ${status}`}
             >
-              <span
-                className={`v4-roster-presence v4-roster-presence--${tone}`}
-                data-state={tone}
-                aria-hidden
-              />
-              <span className="v4-roster-name">{bot.name}</span>
-              <span className="v4-roster-when">
-                {relativeTime(bot.last_active_at)}
+              <Avatar name={bot.name} icon={bot.icon} color={bot.color} />
+              <span className="v4-roster-text">
+                <span className="v4-roster-name">{bot.name}</span>
+                <span className="v4-roster-when">
+                  {status} · {when}
+                </span>
               </span>
             </button>
           </li>

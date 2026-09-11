@@ -1,45 +1,54 @@
 /*
- * v4 shell — base stylesheet.
+ * v4 shell — base stylesheet (S2.5 — Grok Bot look).
  *
  * v3.7.17 (ui/v4-shell) — the new shell rebuilds on top of these
  * tokens. Per-surface stylesheets (roster.css, chat.css, ...) only
  * need to reference these vars. The full v3 stylesheet dump is
  * gone; nothing in v4 imports from `src/styles.css`.
  *
- * Token names mirror the existing styles.css so the per-surface
- * sheets can share vocabulary (--bg-2, --text-1, --accent, etc.).
+ * v3.7.17 S2.5 — palette rewrite for the Grok Bot look:
+ *   - One near-white accent (#c4c4c8). No rainbow status colors.
+ *   - Deeper black background (#0b0b0c).
+ *   - Muted text #8b8b90 for status words / timestamps.
+ *   - Sidebar 260px (was 280px).
  */
 
 :root {
-  /* Surface */
-  --bg-0: #0e0e10;
-  --bg-1: #18181b;
-  --bg-2: #1f1f23;
-  --bg-3: #2a2a2f;
-  --border: #2d2d33;
-  --border-strong: #3f3f46;
-  /* Text */
-  --text-0: #fafafa;
-  --text-1: #d4d4d8;
-  --text-2: #a1a1aa;
-  --text-3: #71717a;
-  /* Accent */
-  --accent: #2563eb;
-  --accent-hover: #1d4ed8;
-  --accent-soft: rgba(37, 99, 235, 0.18);
-  --danger: #ef4444;
-  --success: #22c55e;
-  --warn: #fbbf24;
-  /* Tool category palette (carried forward from v3 — same hue
-     family for tool-call cards on the chat surface). */
-  --tool-browser: #06b6d4;
-  --tool-code: #f59e0b;
-  --tool-fs: #a78bfa;
-  --tool-default: var(--text-3);
-  /* Geometry */
+  /* Surface — deeper, flatter. Grok uses #0b0b0c. */
+  --bg-0: #0b0b0c;
+  --bg-1: #131316;
+  --bg-2: #1a1a1d;
+  --bg-3: #232328;
+  --border: #2a2a2c;
+  --border-strong: #3a3a3e;
+
+  /* Text — single near-white ramp. */
+  --text-0: #e8e8ea;
+  --text-1: #e8e8ea;
+  --text-2: #8b8b90;
+  --text-3: #6b6b70;
+
+  /* Accent — near-white only. No rainbow. */
+  --accent: #c4c4c8;
+  --accent-hover: #dcdce0;
+  --accent-soft: rgba(196, 196, 200, 0.08);
+
+  /* Status — single muted tone. Errors are the only escape valve. */
+  --danger: #b14545;
+  /* Per-tool palette removed for S2.5 — tool rows render monochrome. */
+  --tool-browser: var(--text-2);
+  --tool-code: var(--text-2);
+  --tool-fs: var(--text-2);
+  --tool-default: var(--text-2);
+  /* --warning kept for the parked ApprovalSheet. */
+  --warning: #b89245;
+
+  /* Geometry — pill composer uses 12px. */
   --radius-sm: 6px;
   --radius-md: 10px;
-  --radius-lg: 14px;
+  --radius-lg: 12px;
+  --radius-pill: 999px;
+
   /* Type */
   --font-display: "Avenir Next", "Avenir Next Condensed Demi Bold",
     "Avenir", system-ui, sans-serif;
@@ -47,8 +56,9 @@
     -apple-system, BlinkMacSystemFont, "Segoe UI",
     system-ui, sans-serif;
   --font-mono: "JetBrains Mono", "SF Mono", "Menlo", "Consolas", monospace;
-  /* Layout */
-  --sidebar-w: 280px;
+
+  /* Layout — S2.5 spec: sidebar 260px. */
+  --sidebar-w: 260px;
 }
 
 * {
@@ -68,7 +78,7 @@ body {
   color: var(--text-1);
   font-family: var(--font-sans);
   font-size: 14px;
-  line-height: 1.45;
+  line-height: 1.5;
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
 }
@@ -98,7 +108,7 @@ button:hover:not(:disabled) {
 }
 
 button:disabled {
-  opacity: 0.5;
+  opacity: 0.4;
   cursor: not-allowed;
 }
 
@@ -110,7 +120,7 @@ button.ghost {
 button.primary {
   background: var(--accent);
   border-color: var(--accent);
-  color: var(--text-0);
+  color: var(--bg-0);
 }
 
 button.primary:hover:not(:disabled) {
@@ -137,7 +147,7 @@ a:hover {
   text-decoration: underline;
 }
 
-/* Scrollbars — match the v3 dark theme. */
+/* Scrollbars — match the Grok dark theme. */
 ::-webkit-scrollbar {
   width: 10px;
   height: 10px;

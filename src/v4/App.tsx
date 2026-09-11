@@ -48,6 +48,7 @@ import { ComputerRoute } from "./ComputerRoute";
 import { ConversationsList } from "./ConversationsList";
 import { LoopChip } from "./LoopChip";
 import { LoopExpanded } from "./LoopExpanded";
+import { ApprovalSheet } from "./ApprovalSheet";
 import { usePersistedBotId } from "./usePersistedBotId";
 import "./styles/app.css";
 
@@ -219,17 +220,19 @@ export default function App() {
       <main className="v4-app-main">
         {view === "chat" && selectedBot && (
           <>
-            <div className="v4-app-toolbar">
-              <button
-                type="button"
-                className="ghost small"
-                onClick={handleOpenComputer}
-                title="Open Computer Use for this bot"
-              >
-                Computer
-              </button>
+            {/* S2.5 — Computer toolbar dropped from idle layout.
+                ChatPane owns its own header (bot name + status + Stop).
+                The Computer route is parked; users wanting Computer
+                Use can fall back to the daily /Applications/MaxBot.app
+                or wait for a follow-up slice that re-adds a
+                Computer button in the ChatPane header. */}
+            <div className="v4-app-chat-area">
+              <ChatPane bot={selectedBot} conversationId={selectedConvId} />
+              {/* v4 S3 — ApprovalSheet renders the first pending
+                  approval for the selected bot. Fetches on mount
+                  + window focus. No interval. */}
+              <ApprovalSheet botId={selectedBot.id} />
             </div>
-            <ChatPane bot={selectedBot} conversationId={selectedConvId} />
           </>
         )}
         {view === "computer" && selectedBot && (

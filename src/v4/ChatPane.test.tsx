@@ -282,3 +282,161 @@ describe("ChatPane — S1 no history polling while a stream is active", () => {
     expect(afterDone).toBe(duringStream + 1);
   });
 });
+
+describe("ChatPane — S3 tool calls (name + one-line result, no full JSON)", () => {
+  it("renders tool name from a tool_call_delta under the draft, no JSON", async () => {
+    invokeMock.mockImplementation((cmd: string, args?: unknown) => {
+      if (cmd === "get_messages") return Promise.resolve([userMsg, assistantMsg]);
+      if (cmd === "send_message") {
+        return Promise.resolve({
+          user_message_id: "msg-user-tc",
+          assistant_message_id: "msg-assistant-tc",
+          request_id: (args as { requestId: string })?.requestId,
+        });
+      }
+      return Promise.resolve(null);
+    });
+
+    render(<ChatPane bot={bot} conversationId="conv-1" />);
+    await waitFor(() => screen.getByText("hello!"));
+    const textarea = screen.getByPlaceholderText(/Message Alpha/i);
+    fireEvent.change(textarea, { target: { value: "go" } });
+    fireEvent.keyDown(textarea, { key: "Enter", shiftKey: false });
+    await waitFor(() => screen.getByText(/writing/i));
+
+    const reqId = (
+      invokeMock.mock.calls.find(
+        (c) => c[0] === "send_message",
+      ) as [string, { requestId: string }]
+    )[1].requestId;
+
+    // Provider sends the name in the first tool_call_delta.
+    fire("chat://chunk", {
+      request_id: reqId,
+      assistant_message_id: "msg-assistant-tc",
+      chunk: {
+        kind: "tool_call_delta",
+        id: "tc-1",
+        name: "web_search",
+        arguments_delta: '{"q":"maxbot v4"}',
+      },
+    });
+
+    // The tool name should appear under the draft. The JSON
+    // arguments_delta must NOT appear anywhere in the rendered
+    // output (the v4 rule: no tool JSON in React state).
+    await waitFor(() => {
+      expect(screen.getByText("web_search")).toBeTruthy();
+    });
+    expect(screen.queryByText(/maxbot v4/)).toBeNull();
+    expect(screen.queryByText(/"q"/)).toBeNull();
+  });
+
+  it("renders tool calls under an assistant message loaded from history (name + truncated result)", async () => {
+    // S3 history shape: assistant with tool_calls, followed by a
+    // tool result message. Pairing is positional.
+    const persistedToolCalls = [
+      { id: "tc-h1", name: "shell_run", arguments: '{"cmd":"date"}' },
+    ];
+    const assistantWithTools: Message = {
+      id: "msg-asst-tools",
+      conversation_id: "conv-1",
+      role: "assistant",
+      content: "Let me check.",
+      created_at: now,
+      tool_calls: persistedToolCalls,
+      error_message: null,
+    };
+    const longResult = "x".repeat(200);
+    const toolResult: Message = {
+      id: "msg-tool-result",
+      conversation_id: "conv-1",
+      role: "tool",
+      content: longResult,
+      created_at: now,
+      tool_calls: [],
+      error_message: null,
+    };
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "get_messages")
+        return Promise.resolve([
+          userMsg,
+          assistantWithTools,
+          toolResult,
+        ]);
+      return Promise.resolve(null);
+    });
+
+    render(<ChatPane bot={bot} conversationId="conv-1" />);
+    await waitFor(() => screen.getByText("Let me check."));
+    expect(screen.getByText("shell_run")).toBeTruthy();
+    // Truncated to 80 chars + ellipsis.
+    const resultEls = screen.getAllByText(/^x{80}…$/);
+    expect(resultEls.length).toBeGreaterThanOrEqual(1);
+  });
+});
+
+describe("ChatPane — S3a think-strip", () => {
+  it("removes <think>…</think> from a loaded assistant message", async () => {
+    const assistantWithThink: Message = {
+      id: "msg-asst-think",
+      conversation_id: "conv-1",
+      role: "assistant",
+      content:
+        "<think>I should answer the date question.</think>Today is a fine day.",
+      created_at: now,
+      tool_calls: [],
+      error_message: null,
+    };
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "get_messages") return Promise.resolve([userMsg, assistantWithThink]);
+      return Promise.resolve(null);
+    });
+    render(<ChatPane bot={bot} conversationId="conv-1" />);
+    await waitFor(() =>
+      expect(screen.getByText(/Today is a fine day\./)).toBeTruthy(),
+    );
+    // The think tag and its body must NOT appear in the DOM.
+    expect(screen.queryByText(/I should answer/)).toBeNull();
+    expect(screen.queryByText(/<think>/)).toBeNull();
+  });
+
+  it("strips think tags from the streaming draft text", async () => {
+    invokeMock.mockImplementation((cmd: string, args?: unknown) => {
+      if (cmd === "get_messages") return Promise.resolve([userMsg, assistantMsg]);
+      if (cmd === "send_message") {
+        return Promise.resolve({
+          user_message_id: "msg-user-think",
+          assistant_message_id: "msg-asst-think-live",
+          request_id: (args as { requestId: string })?.requestId,
+        });
+      }
+      return Promise.resolve(null);
+    });
+    render(<ChatPane bot={bot} conversationId="conv-1" />);
+    await waitFor(() => screen.getByText("hello!"));
+    const textarea = screen.getByPlaceholderText(/Message Alpha/i);
+    fireEvent.change(textarea, { target: { value: "what day is it?" } });
+    fireEvent.keyDown(textarea, { key: "Enter", shiftKey: false });
+    await waitFor(() => screen.getByText(/writing/i));
+
+    const reqId = (
+      invokeMock.mock.calls.find(
+        (c) => c[0] === "send_message",
+      ) as [string, { requestId: string }]
+    )[1].requestId;
+    // Stream a text chunk that contains a <think> block.
+    fire("chat://chunk", {
+      request_id: reqId,
+      assistant_message_id: "msg-asst-think-live",
+      chunk: {
+        kind: "text",
+        delta: "<think>let me check</think>Today is Wednesday.",
+      },
+    });
+    await waitFor(() =>
+      expect(screen.getByText(/Today is Wednesday\./)).toBeTruthy(),
+    );
+    expect(screen.queryByText(/let me check/)).toBeNull();
+  });
+});
