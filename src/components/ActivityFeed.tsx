@@ -357,13 +357,37 @@ export function ActivityFeed() {
 
       {state.kind === "error" && (
         <div className="activity-feed-empty" data-testid="activity-error">
-          {state.message}
+          {/* v3.7.13 — UX-1. The previous copy leaked
+              the raw Tauri error string into the
+              sidebar (e.g. "Json deserialize error:
+              EOF while parsing a value at line 1
+              column 0"). Users couldn't act on that
+              and the auto-retry wasn't discoverable.
+              The friendly line + a Retry button is
+              the same affordance the inline
+              ActivityRail used to have; the 10s
+              retry cadence is set in `refresh()`
+              below. */}
+          Couldn't load activity. Will retry in 10s.{" "}
+          <button
+            className="link"
+            type="button"
+            data-testid="activity-retry"
+            onClick={refresh}
+          >
+            Retry now
+          </button>
         </div>
       )}
 
       {state.kind === "ready" && isEmpty(state.data) && memoryWrites.length === 0 && (
         <div className="activity-feed-empty" data-testid="activity-empty">
-          No activity yet — the daemon will populate this when it fires.
+          {/* v3.7.13 — UX-1. Drop the "— the daemon
+              will populate this when it fires" hint;
+              the rail will light up on its own, and
+              the parenthetical was reading as
+              uncertain / half-implemented. */}
+          No activity yet.
         </div>
       )}
 
@@ -374,7 +398,15 @@ export function ActivityFeed() {
           role="status"
         >
           <span className="activity-feed-stale-dot" aria-hidden="true" />
-          <span>couldn't refresh — showing last good data</span>
+          {/* v3.7.13 — UX-1. The `state.message`
+              string is kept on the DOM (via
+              `data-stale-message`) for tests +
+              devtools, but the user-facing copy is
+              the same friendly line as the
+              non-stale error path. */}
+          <span data-stale-message={state.message}>
+            couldn't refresh — showing last good data
+          </span>
         </div>
       )}
 

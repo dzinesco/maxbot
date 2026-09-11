@@ -22,7 +22,7 @@
 //      against a misbehaving future emitter).
 
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { render, screen, waitFor, act } from "@testing-library/react";
+import { render, screen, waitFor, act, fireEvent } from "@testing-library/react";
 import { ActivityFeed } from "./ActivityFeed";
 
 vi.mock("../lib/tauri", () => ({
@@ -136,11 +136,61 @@ describe("ActivityFeed", () => {
     await waitFor(() => {
       expect(screen.getByTestId("activity-empty")).toBeTruthy();
     });
-    // The exact spec copy is pinned: a future rewording
-    // would need an explicit review.
+    // v3.7.13 — UX-1. The copy tightened to
+    // "No activity yet." The previous
+    // "— the daemon will populate this when it
+    // fires" parenthetical is gone: it read as
+    // uncertain / half-implemented, and the
+    // rail lights up on its own.
     expect(
-      screen.getByText(/No activity yet — the daemon will populate this when it fires\./),
+      screen.getByText(/^No activity yet\.$/),
     ).toBeTruthy();
+    // The old "— the daemon will populate this
+    // when it fires" phrase must NOT appear
+    // anywhere on the page; pinning the absence
+    // is the cleanest way to keep the rewording
+    // intentional.
+    expect(
+      screen.queryByText(/populate this when it fires/i),
+    ).toBeNull();
+  });
+
+  // v3.7.13 — UX-1. The previous error path
+  // rendered the raw `state.message` Tauri error
+  // string in the sidebar (e.g. "Json deserialize
+  // error: EOF while parsing a value at line 1
+  // column 0"). Users couldn't act on that and
+  // the auto-retry cadence wasn't discoverable.
+  // The new copy is a friendly one-liner plus a
+  // "Retry now" button that calls `refresh()`.
+  it("shows a friendly error + Retry button on load failure", async () => {
+    vi.mocked(listRecentActivity).mockRejectedValue(
+      new Error("Json deserialize error: EOF while parsing"),
+    );
+    render(<ActivityFeed />);
+    await waitFor(() => {
+      expect(screen.getByTestId("activity-error")).toBeTruthy();
+    });
+    // The friendly copy is the user-facing
+    // string; the raw Tauri error is NOT in the
+    // rendered DOM.
+    expect(
+      screen.getByText(/Couldn't load activity\. Will retry in 10s\./),
+    ).toBeTruthy();
+    expect(
+      screen.queryByText(/Json deserialize error/i),
+    ).toBeNull();
+    // The "Retry now" button is present and
+    // calls the loader again when clicked.
+    const retry = screen.getByTestId("activity-retry") as HTMLButtonElement;
+    expect(retry).toBeTruthy();
+    const before = vi.mocked(listRecentActivity).mock.calls.length;
+    fireEvent.click(retry);
+    await waitFor(() => {
+      expect(vi.mocked(listRecentActivity).mock.calls.length).toBeGreaterThan(
+        before,
+      );
+    });
   });
 
   it("shows the loading placeholder on first mount", () => {
