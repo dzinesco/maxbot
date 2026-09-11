@@ -938,8 +938,12 @@ describe("ComputerPanel — click-through takeover (v3.7.9)", () => {
     // poll is ~500ms after the first, the third is
     // ~1000ms after the first). We use 1200ms.
     await new Promise((r) => setTimeout(r, 1200));
-    // computerScreenshot should have fired ≥ 3 times.
-    expect(computerScreenshot.mock.calls.length).toBeGreaterThanOrEqual(3);
+    // computerScreenshot should have fired ≥ 3 times
+    // (the initial tick + at least 2 more within 1200ms
+    // at the 500ms cadence).
+    expect(
+      vi.mocked(computerScreenshot).mock.calls.length,
+    ).toBeGreaterThanOrEqual(3);
     // But createObjectURL was only called once — the
     // second + third frames matched the first's
     // bytes and short-circuited.
