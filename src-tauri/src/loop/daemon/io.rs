@@ -125,7 +125,7 @@ pub trait LoopIO: Send + Sync {
 #[derive(Debug, Clone)]
 pub struct FileLoopIO {
     root: PathBuf,
-    my_pid: u32,
+    pub(crate) my_pid: u32,
     compaction_bytes: u64,
     compaction_entries: usize,
 }
@@ -316,7 +316,10 @@ fn parse_task(contents: &str) -> Result<Task, LoopError> {
     let yaml = &after_open[..close_idx];
     let body_start = close_idx + 4; // skip past "\n---"
     let body = if body_start < after_open.len() {
-        after_open[body_start..].trim_start_matches('\n').to_string()
+        after_open[body_start..]
+            .trim_start_matches('\n')
+            .trim_end()
+            .to_string()
     } else {
         String::new()
     };
@@ -930,8 +933,4 @@ mod tests {
         // ops themselves would refuse. The other tests above cover
         // assert_safe directly.
     }
-
-    // Suppress unused-import warnings for items used only on certain cfgs.
-    #[allow(dead_code)]
-    fn _unused(_: &SeekFrom) {}
 }
