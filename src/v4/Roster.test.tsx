@@ -14,6 +14,8 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { Roster } from "./Roster";
 import type { Bot } from "../lib/api";
 
+const now = new Date().toISOString();
+
 const bots: Bot[] = [
   {
     id: "bot-1",
@@ -26,6 +28,8 @@ const bots: Bot[] = [
     color: "",
     state: "idle",
     last_active_at: new Date(Date.now() - 60_000).toISOString(),
+    created_at: now,
+    updated_at: now,
   },
   {
     id: "bot-2",
@@ -38,6 +42,8 @@ const bots: Bot[] = [
     color: "",
     state: "thinking",
     last_active_at: new Date(Date.now() - 5 * 60_000).toISOString(),
+    created_at: now,
+    updated_at: now,
   },
   {
     id: "bot-3",
@@ -50,6 +56,8 @@ const bots: Bot[] = [
     color: "",
     state: "blocked",
     last_active_at: new Date(Date.now() - 2 * 60 * 60_000).toISOString(),
+    created_at: now,
+    updated_at: now,
   },
 ];
 

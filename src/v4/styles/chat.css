@@ -41,6 +41,16 @@
   color: var(--text-3);
 }
 
+/* v3.7.17 Slice S1 — Stop button. Visible only while a stream
+   is active (assistant_message_id is populated). Stops the
+   server-side run via stopMessage; the existing onDone path
+   handles the resulting Done event. */
+.v4-chat-pane-stop {
+  flex-shrink: 0;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+
 .v4-chat-pane-error {
   padding: 8px 16px;
   background: rgba(239, 68, 68, 0.1);
