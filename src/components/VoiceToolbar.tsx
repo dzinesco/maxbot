@@ -117,10 +117,19 @@ export function VoiceToolbar({
 }: VoiceToolbarProps) {
   const [recording, setRecording] = useState(false);
   const [transcribing, setTranscribing] = useState(false);
-  // 0-100 RMS-like level used to fill the meter. The
-  // meter is a thin bar; an empty bar (`level=0`) is the
-  // idle visual.
-  const [level, setLevel] = useState(0);
+  // v3.7.16 smoothness: the level meter is a thin
+  // bar whose width is the only thing that changes at
+  // 60fps during recording. We used to drive it with
+  // a React `useState` and a setLevel(pct) on every
+  // RAF tick, which re-rendered the entire
+  // VoiceToolbar at 60fps. Now we drive it with a
+  // direct DOM mutation: the RAF tick writes to
+  // `fillRef.current.style.width` and React never
+  // re-renders. The `level` state was removed; the
+  // `aria-valuenow` is also handled via a ref so the
+  // accessibility tree stays in sync.
+  const fillRef = useRef<HTMLDivElement | null>(null);
+  const meterRef = useRef<HTMLDivElement | null>(null);
 
   // Mutable refs for the in-flight capture. Putting the
   // MediaStream / MediaRecorder / AudioContext into
@@ -164,7 +173,14 @@ export function VoiceToolbar({
       audioCtxRef.current = null;
     }
     analyserRef.current = null;
-    setLevel(0);
+    // v3.7.16: zero the meter via direct DOM
+    // mutation, not React state. No re-render.
+    if (fillRef.current) {
+      fillRef.current.style.width = "0%";
+    }
+    if (meterRef.current) {
+      meterRef.current.setAttribute("aria-valuenow", "0");
+    }
   }, []);
 
   const start = useCallback(async () => {
@@ -291,7 +307,22 @@ export function VoiceToolbar({
           }
           const rms = Math.sqrt(sum / data.length);
           const pct = Math.min(100, Math.round(rms * 180));
-          setLevel(pct);
+          // v3.7.16 smoothness: write the meter
+          // width directly to the DOM instead of
+          // driving a React state. The setLevel(pct)
+          // path caused 60 re-renders per second of
+          // the whole VoiceToolbar; the direct write
+          // touches only the meter fill (a single
+          // CSS property) and the aria attribute.
+          if (fillRef.current) {
+            fillRef.current.style.width = `${pct}%`;
+          }
+          if (meterRef.current) {
+            meterRef.current.setAttribute(
+              "aria-valuenow",
+              String(pct),
+            );
+          }
           rafRef.current = requestAnimationFrame(tick);
         };
         rafRef.current = requestAnimationFrame(tick);
@@ -377,16 +408,18 @@ export function VoiceToolbar({
           <span className="voice-toolbar__pulse" aria-hidden />
           <span className="voice-toolbar__label">Listening…</span>
           <div
+            ref={meterRef}
             className="voice-toolbar__meter"
             data-testid="voice-toolbar-meter"
             role="progressbar"
             aria-valuemin={0}
             aria-valuemax={100}
-            aria-valuenow={level}
+            aria-valuenow={0}
           >
             <div
+              ref={fillRef}
               className="voice-toolbar__meter-fill"
-              style={{ width: `${level}%` }}
+              style={{ width: "0%" }}
             />
           </div>
         </div>
