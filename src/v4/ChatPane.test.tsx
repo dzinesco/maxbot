@@ -1,25 +1,16 @@
-// v4 — ChatPane tests (S1).
+// v4 — ChatPane tests (S1 + S2).
 //
-// Per the Slice S1 brief: "Tests for select→load messages and
-// send wiring."
+// S1 coverage:
+//   - Send wires through sendMessage; chunks append; Done clears pending.
+//   - Stop calls stopMessage with the assistant_message_id.
+//   - No history polling while a stream is active.
 //
-// Coverage:
-//   1. Selecting a bot loads the latest conversation's messages
-//      (via listConversations → getMessages).
-//   2. If the bot has no conversations, a new one is created
-//      and its empty history is loaded.
-//   3. Sending a message wires through sendMessage; the draft
-//      shows pending until Done.
-//   4. onChunk with matching request_id appends to the draft.
-//   5. onDone clears the draft's pending flag.
-//   6. Stop calls stopMessage with the assistant_message_id
-//      returned by sendMessage.
-//   7. No history polling while a stream is active
-//      (S1 hard rule).
-//
-// The mocks live in @tauri-apps/api/core (invoke) and
-// @tauri-apps/api/event (listen). We capture the listeners
-// so individual tests can drive chunk / done / error events.
+// S2 changes:
+//   - ChatPane now takes a `conversationId` prop. When null, the
+//     pane shows an empty state. When set, it loads that
+//     conversation's history. The S1 "auto-load latest /
+//     auto-create when none" tests are replaced by the S2
+//     contract.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
@@ -46,7 +37,6 @@ vi.mock("@tauri-apps/api/event", () => ({
   },
 }));
 
-// Captured handlers per event so tests can fire them.
 const handlers: Record<string, Array<(payload: unknown) => void>> = {};
 
 const now = "2026-09-11T18:00:00+00:00";
@@ -71,14 +61,6 @@ const conv: Conversation = {
   title: "Alpha chat",
   created_at: now,
   updated_at: now,
-  bot_id: "bot-1",
-};
-
-const olderConv: Conversation = {
-  id: "conv-older",
-  title: "Old chat",
-  created_at: "2026-09-10T18:00:00+00:00",
-  updated_at: "2026-09-10T18:00:00+00:00",
   bot_id: "bot-1",
 };
 
@@ -118,72 +100,48 @@ beforeEach(() => {
       return Promise.resolve(unlistenMock);
     },
   );
+  // Default mock: listConversations, getMessages, listBots.
+  invokeMock.mockImplementation((cmd: string) => {
+    if (cmd === "list_conversations") return Promise.resolve([conv]);
+    if (cmd === "get_messages") return Promise.resolve([userMsg, assistantMsg]);
+    if (cmd === "list_bots") return Promise.resolve([bot]);
+    return Promise.resolve(null);
+  });
 });
 
 afterEach(() => cleanup());
 
-function setupLatestConversation() {
-  invokeMock.mockImplementation((cmd: string) => {
-    if (cmd === "list_conversations") {
-      return Promise.resolve([olderConv, conv]); // arbitrary order
-    }
-    if (cmd === "get_messages") {
-      return Promise.resolve([userMsg, assistantMsg]);
-    }
-    return Promise.resolve(null);
-  });
-}
-
-function setupNoConversations() {
-  invokeMock.mockImplementation((cmd: string) => {
-    if (cmd === "list_conversations") return Promise.resolve([]);
-    if (cmd === "create_conversation") return Promise.resolve(conv);
-    if (cmd === "get_messages") return Promise.resolve([]);
-    return Promise.resolve(null);
-  });
-}
-
-describe("ChatPane — S1 select → load messages", () => {
-  it("loads the latest conversation for the bot and renders its history", async () => {
-    setupLatestConversation();
-    render(<ChatPane bot={bot} />);
+describe("ChatPane — S2 contract (prop-driven conversation)", () => {
+  it("renders an empty state when conversationId is null", async () => {
+    render(<ChatPane bot={bot} conversationId={null} />);
+    // Does NOT call listConversations or getMessages on mount
+    // (S2 contract: history is prop-driven, not auto-loaded).
     await waitFor(() => {
-      expect(invokeMock).toHaveBeenCalledWith("list_conversations", {
-        botId: "bot-1",
-      });
+      // listConversations / get_messages should NOT be called.
+      const calls = invokeMock.mock.calls.map((c) => c[0]);
+      expect(calls).not.toContain("get_messages");
     });
+    expect(screen.getByText(/pick a thread/i)).toBeTruthy();
+  });
+
+  it("loads messages for the explicit conversationId prop", async () => {
+    render(<ChatPane bot={bot} conversationId="conv-1" />);
     await waitFor(() => {
       expect(invokeMock).toHaveBeenCalledWith("get_messages", {
         conversationId: "conv-1",
       });
     });
-    // Both messages visible.
     expect(screen.getByText("hi")).toBeTruthy();
     expect(screen.getByText("hello!")).toBeTruthy();
-  });
-
-  it("creates a new conversation when the bot has none", async () => {
-    setupNoConversations();
-    render(<ChatPane bot={bot} />);
-    await waitFor(() => {
-      expect(invokeMock).toHaveBeenCalledWith("create_conversation", {
-        title: null,
-        botId: "bot-1",
-      });
-    });
-    expect(screen.getByText(/empty conversation/i)).toBeTruthy();
   });
 });
 
 describe("ChatPane — S1 send wiring", () => {
   it("Send wires through sendMessage; chunks append to the draft", async () => {
-    setupLatestConversation();
     invokeMock.mockImplementation((cmd: string, args?: unknown) => {
       if (cmd === "list_conversations") return Promise.resolve([conv]);
       if (cmd === "get_messages") return Promise.resolve([userMsg, assistantMsg]);
       if (cmd === "send_message") {
-        // Echo the request_id back so the test can drive the same
-        // stream that the component listens for.
         return Promise.resolve({
           user_message_id: "msg-user-2",
           assistant_message_id: "msg-assistant-2",
@@ -193,14 +151,11 @@ describe("ChatPane — S1 send wiring", () => {
       return Promise.resolve(null);
     });
 
-    render(<ChatPane bot={bot} />);
-    // Wait for the initial history to render.
+    render(<ChatPane bot={bot} conversationId="conv-1" />);
     await waitFor(() => screen.getByText("hello!"));
-    // Type and send.
     const textarea = screen.getByPlaceholderText(/Message Alpha/i);
     fireEvent.change(textarea, { target: { value: "tell me a story" } });
     fireEvent.keyDown(textarea, { key: "Enter", shiftKey: false });
-    // sendMessage IPC fires with the typed text.
     await waitFor(() => {
       expect(invokeMock).toHaveBeenCalledWith(
         "send_message",
@@ -210,9 +165,7 @@ describe("ChatPane — S1 send wiring", () => {
         }),
       );
     });
-    // The draft's "writing…" indicator is visible.
     expect(screen.getByText(/writing/i)).toBeTruthy();
-    // Fire two text chunks.
     const reqId = (
       invokeMock.mock.calls.find(
         (c) => c[0] === "send_message",
@@ -231,24 +184,18 @@ describe("ChatPane — S1 send wiring", () => {
     await waitFor(() => {
       expect(screen.getByText(/Once upon a time/)).toBeTruthy();
     });
-    // Fire Done — pending flag clears.
     fire("chat://done", {
       request_id: reqId,
       assistant_message_id: "msg-assistant-2",
       finish_reason: "stop",
     });
     await waitFor(() => {
-      // The draft's "writing…" indicator goes away once pending=false.
-      // (We don't assert exact label; the Done handler clears the flag.)
-      expect(
-        (screen.queryByText(/writing/i) === null) ||
-          screen.queryByText(/done/i) !== null,
-      ).toBe(true);
+      // Draft's pending cleared.
+      expect(screen.queryByText(/writing/i) === null).toBe(true);
     });
   });
 
   it("Stop calls stopMessage with the assistant_message_id", async () => {
-    setupLatestConversation();
     invokeMock.mockImplementation((cmd: string, args?: unknown) => {
       if (cmd === "list_conversations") return Promise.resolve([conv]);
       if (cmd === "get_messages") return Promise.resolve([userMsg, assistantMsg]);
@@ -263,14 +210,11 @@ describe("ChatPane — S1 send wiring", () => {
       return Promise.resolve(null);
     });
 
-    render(<ChatPane bot={bot} />);
+    render(<ChatPane bot={bot} conversationId="conv-1" />);
     await waitFor(() => screen.getByText("hello!"));
     const textarea = screen.getByPlaceholderText(/Message Alpha/i);
     fireEvent.change(textarea, { target: { value: "go" } });
     fireEvent.keyDown(textarea, { key: "Enter", shiftKey: false });
-
-    // Wait for the Stop button to appear (it appears once the
-    // assistant_message_id is set by sendMessage's response).
     const stopBtn = await screen.findByText(/^Stop$/);
     fireEvent.click(stopBtn);
     await waitFor(() => {
@@ -283,8 +227,6 @@ describe("ChatPane — S1 send wiring", () => {
 
 describe("ChatPane — S1 no history polling while a stream is active", () => {
   it("does not call get_messages on the idle tick while a stream is pending", async () => {
-    setupLatestConversation();
-    // sendMessage resolves slowly so the pending flag stays true.
     let sendResolve!: (v: unknown) => void;
     invokeMock.mockImplementation((cmd: string, args?: unknown) => {
       if (cmd === "list_conversations") return Promise.resolve([conv]);
@@ -297,16 +239,14 @@ describe("ChatPane — S1 no history polling while a stream is active", () => {
       return Promise.resolve(null);
     });
 
-    render(<ChatPane bot={bot} />);
+    render(<ChatPane bot={bot} conversationId="conv-1" />);
     await waitFor(() => screen.getByText("hello!"));
 
-    // Snapshot get_messages calls BEFORE sending.
     const beforeSend = invokeMock.mock.calls.filter(
       (c) => c[0] === "get_messages",
     ).length;
-    expect(beforeSend).toBeGreaterThanOrEqual(1); // at least the initial load
+    expect(beforeSend).toBeGreaterThanOrEqual(1);
 
-    // Send a message — pending stays true until we resolve.
     const textarea = screen.getByPlaceholderText(/Message Alpha/i);
     fireEvent.change(textarea, { target: { value: "x" } });
     fireEvent.keyDown(textarea, { key: "Enter", shiftKey: false });
@@ -314,18 +254,13 @@ describe("ChatPane — S1 no history polling while a stream is active", () => {
       expect(invokeMock).toHaveBeenCalledWith("send_message", expect.anything()),
     );
 
-    // Wait long enough that an idle 15s tick would have fired.
-    // We use vi's fake timers below — for this test we rely on
-    // the implementation's gating (the tick checks pendingRef and
-    // re-checks in 5s; that doesn't fetch history). To verify the
-    // "no fetch" rule, we count get_messages calls across the
-    // window during which a pending stream exists.
+    // While pending, no new get_messages calls from the idle tick.
     const duringStream = invokeMock.mock.calls.filter(
       (c) => c[0] === "get_messages",
     ).length;
-    expect(duringStream).toBe(beforeSend); // no new fetches while pending
+    expect(duringStream).toBe(beforeSend);
 
-    // Resolve sendMessage so the stream finishes.
+    // Resolve sendMessage + fire Done — exactly one post-Done refresh.
     const reqId = (
       invokeMock.mock.calls.find(
         (c) => c[0] === "send_message",
@@ -336,7 +271,6 @@ describe("ChatPane — S1 no history polling while a stream is active", () => {
       assistant_message_id: "msg-assistant-4",
       request_id: reqId,
     });
-    // Done event fires the single post-Done refresh.
     fire("chat://done", {
       request_id: reqId,
       assistant_message_id: "msg-assistant-4",
@@ -345,6 +279,6 @@ describe("ChatPane — S1 no history polling while a stream is active", () => {
     const afterDone = invokeMock.mock.calls.filter(
       (c) => c[0] === "get_messages",
     ).length;
-    expect(afterDone).toBe(duringStream + 1); // exactly one post-Done refresh
+    expect(afterDone).toBe(duringStream + 1);
   });
 });

@@ -1,40 +1,40 @@
 /*
- * v4 — App
+ * v4 — App (S2)
  *
- * Top-level state machine for the renderer shell.
+ * v3.7.17 Slice S2 — session, not a demo.
  *
- * Boot (first paint):
- *   - Promise.all([listBots, getSettings])
- *   - No listeners. No intervals.
- *   - Two IPC calls total. That's it.
+ * State machine:
+ *   - `bots`: full bot list (from boot `listBots`).
+ *   - `settings`: app settings (from boot `getSettings`).
+ *   - `selectedBotId`: persisted via `usePersistedBotId`. Restored
+ *     on next launch so the user lands on the same bot.
+ *   - `selectedConvId`: thread within the selected bot. Reset to
+ *     null when the user picks a different bot.
  *
- * Views:
- *   - "roster"  — no bot selected, no surface open. Always
- *                 rendered when no chat/computer/drawer.
- *   - "chat"    — ChatPane mounts for selectedBotId.
- *   - "computer"— ComputerRoute mounts for selectedBotId.
- *   - "approvals" / "settings" — drawer; mount when opened.
+ * Per the S2 brief:
+ *   - New chat button creates a conversation for the selected
+ *     bot and switches to it.
+ *   - Conversation list for the selected bot only, fetched on
+ *     bot select (not at boot). Lives in `ConversationsList`.
+ *   - Clicking a thread loads that conversation; last selected
+ *     bot id persisted.
+ *   - Boot remains exactly listBots + getSettings.
+ *   - No setInterval; no history poll while streaming.
  *
- * Loop surface (always present):
- *   - LoopChip — status only, no interval.
- *   - LoopExpanded — on-demand full task + journal.
- *
- * Per Tyler's v4 hard rules:
+ * Per the v4 hard rules:
  *   - First paint = 2 IPC calls.
- *   - No setInterval anywhere in this file.
- *   - No Tauri listen anywhere in this file (loopd IPC
- *     doesn't need listen; chat listeners live in ChatPane;
- *     computer state listeners live in ComputerRoute).
+ *   - No setInterval anywhere.
+ *   - No Tauri listen anywhere in this file (chat listeners live
+ *     in ChatPane; computer state listeners live in ComputerRoute).
  *
- * Out of scope for v4: the original App.tsx's many surfaces
- * (BotInbox, GroupChatView, SendToBotModal, MemoryPanel,
- * SkillsPanel, RoutinesPanel, BotEditor, Welcome overlays)
- * are not ported. v4 is a stability shell; full surface
- * rebuild is a follow-up.
+ * Layout:
+ *   sidebar: brand → Roster → (if a bot) ConversationsList → LoopChip + LoopExpanded
+ *   main:    ChatPane (when bot + conv) | ComputerRoute (when bot + view=computer) | empty state
  */
 
 import { useCallback, useEffect, useState } from "react";
 import {
+  createConversation,
   getSettings,
   listBots,
   loopdStart,
@@ -45,8 +45,10 @@ import type { Bot, Settings } from "../lib/api";
 import { Roster } from "./Roster";
 import { ChatPane } from "./ChatPane";
 import { ComputerRoute } from "./ComputerRoute";
+import { ConversationsList } from "./ConversationsList";
 import { LoopChip } from "./LoopChip";
 import { LoopExpanded } from "./LoopExpanded";
+import { usePersistedBotId } from "./usePersistedBotId";
 import "./styles/app.css";
 
 type View = "roster" | "chat" | "computer" | "approvals" | "settings";
@@ -55,7 +57,12 @@ export default function App() {
   const [bots, setBots] = useState<Bot[] | null>(null);
   const [settings, setSettings] = useState<Settings | null>(null);
   const [bootError, setBootError] = useState<string | null>(null);
-  const [selectedBotId, setSelectedBotId] = useState<string | null>(null);
+  // Persisted bot selection. The hook reads localStorage on mount
+  // and writes on every change. We seed with `null` until the
+  // bot list arrives (so we can validate the stored id).
+  const [persistedBotId, setPersistedBotId] = usePersistedBotId();
+  const [selectedConvId, setSelectedConvId] = useState<string | null>(null);
+  const [newChatBusy, setNewChatBusy] = useState(false);
   const [view, setView] = useState<View>("roster");
   const [loopExpanded, setLoopExpanded] = useState(false);
   const [loopBusy, setLoopBusy] = useState<"start" | "stop" | null>(null);
@@ -68,6 +75,15 @@ export default function App() {
         if (cancelled) return;
         setBots(bs);
         setSettings(ss);
+        // Validate the persisted bot id now that we have the list.
+        // If the stored bot was deleted, drop the persisted value
+        // and clear selectedBotId. If valid, restore it.
+        if (persistedBotId && bs.find((b) => b.id === persistedBotId)) {
+          // already set; nothing to do.
+        } else if (persistedBotId) {
+          // stored id isn't in the bot list anymore; clear it.
+          setPersistedBotId(null);
+        }
       })
       .catch((e) => {
         if (cancelled) return;
@@ -76,17 +92,38 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []); // boot once; persistedBotId is read at mount via the hook.
 
   const handleSelectBot = useCallback((botId: string) => {
-    setSelectedBotId(botId);
+    setPersistedBotId(botId);
+    setSelectedConvId(null);
+    setView("chat");
+  }, [setPersistedBotId]);
+
+  const handleSelectConv = useCallback((convId: string) => {
+    setSelectedConvId(convId);
     setView("chat");
   }, []);
 
+  const handleNewChat = useCallback(async () => {
+    if (!persistedBotId) return;
+    setNewChatBusy(true);
+    try {
+      const conv = await createConversation(undefined, persistedBotId);
+      setSelectedConvId(conv.id);
+      setView("chat");
+    } catch (e) {
+      console.error("createConversation failed:", e);
+    } finally {
+      setNewChatBusy(false);
+    }
+  }, [persistedBotId]);
+
   const handleOpenComputer = useCallback(() => {
-    if (!selectedBotId) return;
+    if (!persistedBotId) return;
     setView("computer");
-  }, [selectedBotId]);
+  }, [persistedBotId]);
 
   const handleCloseComputer = useCallback(() => {
     setView("chat");
@@ -101,8 +138,6 @@ export default function App() {
     try {
       await loopdStart();
     } catch (e) {
-      // Surface error in console; the chip's own re-fetch
-      // path will show a fresh status.
       console.error("loopdStart failed:", e);
     } finally {
       setLoopBusy(null);
@@ -120,10 +155,6 @@ export default function App() {
     }
   }, []);
 
-  // Render — top-level layout: sidebar | main.
-  // Sidebar: roster + loop chip + (optional) loop expanded.
-  // Main:    chat pane or computer route, or empty state.
-
   if (bootError) {
     return (
       <div className="v4-app v4-app--boot-error">
@@ -134,7 +165,6 @@ export default function App() {
             type="button"
             className="primary"
             onClick={() => {
-              // Reload the window to retry boot.
               window.location.reload();
             }}
           >
@@ -146,7 +176,7 @@ export default function App() {
   }
 
   const isLoading = bots === null || settings === null;
-  const selectedBot = bots?.find((b) => b.id === selectedBotId) ?? null;
+  const selectedBot = bots?.find((b) => b.id === persistedBotId) ?? null;
 
   return (
     <div className="v4-app">
@@ -159,8 +189,18 @@ export default function App() {
         {bots && (
           <Roster
             bots={bots}
-            selectedBotId={selectedBotId}
+            selectedBotId={persistedBotId}
             onSelectBot={handleSelectBot}
+          />
+        )}
+
+        {persistedBotId && bots && (
+          <ConversationsList
+            botId={persistedBotId}
+            selectedConvId={selectedConvId}
+            onSelectConv={handleSelectConv}
+            onNewChat={handleNewChat}
+            newChatBusy={newChatBusy}
           />
         )}
 
@@ -189,7 +229,7 @@ export default function App() {
                 Computer
               </button>
             </div>
-            <ChatPane bot={selectedBot} />
+            <ChatPane bot={selectedBot} conversationId={selectedConvId} />
           </>
         )}
         {view === "computer" && selectedBot && (

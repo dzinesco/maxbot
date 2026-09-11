@@ -1,0 +1,104 @@
+/*
+ * v4 — Conversations surface styles.
+ *
+ * Per-thread list with a "New chat" button at the top. Mounted
+ * only when a bot is selected. No setInterval.
+ */
+
+.v4-conv-list {
+  display: flex;
+  flex-direction: column;
+  border-top: 1px solid var(--border);
+  background: var(--bg-1);
+  max-height: 40%;
+  min-height: 80px;
+  overflow: hidden;
+}
+
+.v4-conv-list-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px 6px;
+  flex-shrink: 0;
+}
+
+.v4-conv-list-title {
+  font-weight: 600;
+  color: var(--text-2);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-size: 10px;
+}
+
+.v4-conv-list-new {
+  flex-shrink: 0;
+  font-size: 11px;
+  padding: 3px 8px;
+}
+
+.v4-conv-list-error {
+  padding: 6px 12px;
+  background: rgba(239, 68, 68, 0.1);
+  color: var(--danger);
+  font-size: 11px;
+  flex-shrink: 0;
+}
+
+.v4-conv-list-loading,
+.v4-conv-list-empty {
+  padding: 8px 12px;
+  color: var(--text-3);
+  font-style: italic;
+  font-size: 11px;
+  flex-shrink: 0;
+}
+
+.v4-conv-list-rows {
+  list-style: none;
+  padding: 0 0 4px;
+  margin: 0;
+  overflow-y: auto;
+  flex: 1 1 auto;
+}
+
+.v4-conv-list-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 12px;
+  text-align: left;
+  background: transparent;
+  border: none;
+  border-left: 2px solid transparent;
+  color: var(--text-1);
+  cursor: pointer;
+  transition: background-color 60ms ease;
+}
+
+.v4-conv-list-row:hover {
+  background: var(--bg-2);
+}
+
+.v4-conv-list-row.is-selected {
+  background: var(--accent-soft);
+  border-left-color: var(--accent);
+}
+
+.v4-conv-list-row-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+}
+
+.v4-conv-list-row-when {
+  font-size: 10px;
+  color: var(--text-3);
+  flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
+}
