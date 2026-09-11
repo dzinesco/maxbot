@@ -160,8 +160,30 @@ export function BotRoster({
                     <div className="bot-roster__name" title={bot.name}>
                       {bot.name || "Unnamed Bot"}
                     </div>
-                    <div className="bot-roster__last-active">
-                      {formatLastActive(bot.last_active_at)}
+                    {/* v3.7.13 — UX-2. Replace the
+                        "2m ago" timestamp with a
+                        presence word derived from the
+                        Bot's most-recent run. The
+                        timestamp was confusing
+                        because a Bot with a recent
+                        "succeeded" run and a Bot
+                        with a recent "errored" run
+                        both said "just now" — the
+                        user couldn't tell what the
+                        Bot was actually doing.
+                        `presence()` is the same
+                        state vocabulary the avatar
+                        uses; the row subtitle is
+                        now a one-word verb that
+                        matches the avatar's color
+                        (Working/amber, Waiting/blue,
+                        Queued/neutral, Idle/grey). */}
+                    <div
+                      className="bot-roster__last-active"
+                      data-testid="bot-roster-presence"
+                      data-presence={presence(lastRun)}
+                    >
+                      {presence(lastRun)}
                     </div>
                   </div>
                   <ComputerChip
@@ -340,6 +362,42 @@ function computerStateLabel(state: ComputerState | string): string {
   }
 }
 
+// ---- v3.7.13 — UX-2. Presence word ----
+
+/**
+ * Derive a one-word presence label from the Bot's
+ * most-recent run status. Returns `"Idle"` when the
+ * Bot has never run, which is the most accurate
+ * state for a fresh install (vs. the previous
+ * `"—"` placeholder, which read as
+ * missing/broken).
+ *
+ * The four states match the `BotAvatar` 6-state
+ * indicator: a running run → "Working" (amber);
+ * an awaiting-approval run → "Waiting" (blue);
+ * a queued run → "Queued" (neutral); anything
+ * else (succeeded, failed, no run at all) →
+ * "Idle" (grey). The mapping is intentionally
+ * lossy: a "succeeded 3 minutes ago" run and a
+ * "failed 3 minutes ago" run both read "Idle",
+ * because the roster is a navigation list, not an
+ * activity log — the Activity rail carries the
+ * per-run detail.
+ */
+export function presence(run: BotRun | undefined): string {
+  if (!run) return "Idle";
+  switch (run.status) {
+    case "running":
+      return "Working";
+    case "awaiting_approval":
+      return "Waiting";
+    case "queued":
+      return "Queued";
+    default:
+      return "Idle";
+  }
+}
+
 // ---- "2m ago" formatting ----
 
 /**
@@ -347,6 +405,13 @@ function computerStateLabel(state: ComputerState | string): string {
  * ("just now", "5m ago", "2h ago", "3d ago"). Returns "—"
  * for null/empty inputs so a brand-new Bot doesn't render
  * a misleading "0s ago".
+ *
+ * v3.7.13 — UX-2. The roster's row subtitle no
+ * longer uses this; it's still here for
+ * backwards-compat callers (the BotEditor's
+ * detail view, for example) and for the
+ * `formatLastActive` test below, which pins the
+ * shape against a future rewording.
  */
 function formatLastActive(iso: string | null | undefined): string {
   if (!iso) return "—";

@@ -238,3 +238,126 @@ describe("BotRoster — destroy button (v3.7.6)", () => {
     expect(screen.queryByTestId("bot-roster-destroy")).toBeNull();
   });
 });
+
+// v3.7.13 — UX-2. The roster's row subtitle is
+// now a one-word presence verb derived from the
+// Bot's most-recent run, not a "2m ago" timestamp.
+// The four states (Working / Waiting / Queued /
+// Idle) match the avatar's color so the user can
+// tell what the Bot is doing at a glance.
+describe("BotRoster — presence (v3.7.13)", () => {
+  it("shows 'Idle' when the Bot has no run at all", () => {
+    render(
+      <BotRoster
+        bots={[blankBot({ name: "Fresh" })]}
+        selectedBotId={null}
+        onSelectBot={() => {}}
+        onCreateBot={() => {}}
+        lastRunsByBot={{}}
+      />,
+    );
+    const presence = screen.getByTestId("bot-roster-presence");
+    expect(presence.textContent).toBe("Idle");
+    expect(presence.dataset.presence).toBe("Idle");
+  });
+
+  it("shows 'Working' for a running run", () => {
+    render(
+      <BotRoster
+        bots={[blankBot({ id: "run-bot", name: "Working Bot" })]}
+        selectedBotId={null}
+        onSelectBot={() => {}}
+        onCreateBot={() => {}}
+        lastRunsByBot={{
+          "run-bot": {
+            id: "r-1",
+            bot_id: "run-bot",
+            conversation_id: "c-1",
+            status: "running",
+            started_at: "2026-01-01T00:00:00Z",
+            finished_at: null,
+            error: null,
+          },
+        }}
+      />,
+    );
+    const presence = screen.getByTestId("bot-roster-presence");
+    expect(presence.textContent).toBe("Working");
+    expect(presence.dataset.presence).toBe("Working");
+  });
+
+  it("shows 'Waiting' for an awaiting_approval run", () => {
+    render(
+      <BotRoster
+        bots={[blankBot({ id: "wait-bot", name: "Waiting Bot" })]}
+        selectedBotId={null}
+        onSelectBot={() => {}}
+        onCreateBot={() => {}}
+        lastRunsByBot={{
+          "wait-bot": {
+            id: "r-2",
+            bot_id: "wait-bot",
+            conversation_id: "c-2",
+            status: "awaiting_approval",
+            started_at: "2026-01-01T00:00:00Z",
+            finished_at: null,
+            error: null,
+          },
+        }}
+      />,
+    );
+    const presence = screen.getByTestId("bot-roster-presence");
+    expect(presence.textContent).toBe("Waiting");
+    expect(presence.dataset.presence).toBe("Waiting");
+  });
+
+  it("shows 'Queued' for a queued run", () => {
+    render(
+      <BotRoster
+        bots={[blankBot({ id: "q-bot", name: "Queued Bot" })]}
+        selectedBotId={null}
+        onSelectBot={() => {}}
+        onCreateBot={() => {}}
+        lastRunsByBot={{
+          "q-bot": {
+            id: "r-3",
+            bot_id: "q-bot",
+            conversation_id: "c-3",
+            status: "queued",
+            started_at: "2026-01-01T00:00:00Z",
+            finished_at: null,
+            error: null,
+          },
+        }}
+      />,
+    );
+    const presence = screen.getByTestId("bot-roster-presence");
+    expect(presence.textContent).toBe("Queued");
+    expect(presence.dataset.presence).toBe("Queued");
+  });
+
+  it("falls back to 'Idle' for a succeeded/failed/canceled run", () => {
+    render(
+      <BotRoster
+        bots={[blankBot({ id: "done-bot", name: "Done Bot" })]}
+        selectedBotId={null}
+        onSelectBot={() => {}}
+        onCreateBot={() => {}}
+        lastRunsByBot={{
+          "done-bot": {
+            id: "r-4",
+            bot_id: "done-bot",
+            conversation_id: "c-4",
+            status: "succeeded",
+            started_at: "2026-01-01T00:00:00Z",
+            finished_at: "2026-01-01T00:01:00Z",
+            error: null,
+          },
+        }}
+      />,
+    );
+    const presence = screen.getByTestId("bot-roster-presence");
+    expect(presence.textContent).toBe("Idle");
+    expect(presence.dataset.presence).toBe("Idle");
+  });
+});
