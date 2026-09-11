@@ -1464,10 +1464,18 @@ function ComputerToolbar({
   return (
     <div className="computer-panel__toolbar">
       <span className={stateClassName} title={state ?? "unknown"} />
+      {/* v3.7.16: the toolbar used to show
+          `${state} · ${vm_ip} · up ${formatUptime(null)}` but
+          `formatUptime(null)` returns `"—"` (see line 234), so
+          the "up" was always "—" — broken, confusing, and
+          duplicate with `ComputerFooter` (which shows the
+          real `up {formatUptime(uptime)}`). Drop the
+          state + uptime from the title; the dot's tooltip +
+          footer handle both. The IP is the one piece of info
+          the toolbar can show that the footer doesn't repeat
+          on every render. */}
       <span className="computer-panel__toolbar-title">
-        {computer
-          ? `${state ?? "unknown"} · ${computer.vm_ip ?? "no ip"} · up ${formatUptime(null)}`
-          : "No computer"}
+        {computer ? computer.vm_ip ?? "no ip" : "No computer"}
       </span>
       <span className="computer-panel__toolbar-spacer" />
       <button
