@@ -1,0 +1,92 @@
+/*
+ * v4 — ApprovalSheet styles (S3)
+ *
+ * Minimal MVP: fixed card overlay anchored to the top of the
+ * chat area. Approve / Deny only. No payload editor.
+ *
+ * The card is rendered inside .v4-app-chat-area which is
+ * `position: relative` (see app.css), so this absolute
+ * positioning overlays the chat without re-parenting.
+ */
+
+.v4-approval-sheet {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(560px, calc(100% - 32px));
+  background: var(--bg-2);
+  border: 1px solid var(--warning);
+  border-radius: var(--radius-md);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  z-index: 50;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 14px;
+  font-size: 12px;
+}
+
+.v4-approval-sheet-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.v4-approval-sheet-tool {
+  font-family: var(--font-mono);
+  font-weight: 600;
+  color: var(--warning);
+  font-size: 13px;
+}
+
+.v4-approval-sheet-when {
+  font-size: 10px;
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+
+.v4-approval-sheet-reason {
+  font-size: 12px;
+  color: var(--text-1);
+  line-height: 1.4;
+}
+
+.v4-approval-sheet-args {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-2);
+  background: var(--bg-1);
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.v4-approval-sheet-error {
+  font-size: 11px;
+  color: var(--danger);
+  background: rgba(239, 68, 68, 0.1);
+  padding: 4px 8px;
+  border-radius: var(--radius-sm);
+}
+
+.v4-approval-sheet-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.v4-approval-sheet-deny,
+.v4-approval-sheet-approve {
+  min-width: 96px;
+  font-weight: 600;
+}
+
+.v4-approval-sheet-deny:disabled,
+.v4-approval-sheet-approve:disabled {
+  opacity: 0.6;
+}
