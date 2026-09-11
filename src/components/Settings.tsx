@@ -432,17 +432,40 @@ export function Settings({ initial, onClose, onSave, initialTab }: SettingsProps
   const isReady = isConfigured(base);
 
   return (
-    <div className="modal-overlay" onClick={onClose}>
-      <div
-        className="modal-stacked modal-stacked-wide"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="modal-stacked-header">
+    // v3.7.13 — UX-6. The pre-v3.7.13 Settings
+    // modal was a `modal-overlay` + `modal-stacked`
+    // centered dialog. The modal-overlay is
+    // replaced with a slide-in right-drawer
+    // pattern: the settings panel is a fixed
+    // side-panel that doesn't block the chat, and
+    // outside-clicks do NOT close it (the user has
+    // to explicitly close with the × button or the
+    // bottom Cancel / Save button). The
+    // content area is `overflow-y: auto` so the
+    // long Computer Use tab scrolls inside the
+    // panel instead of forcing the page to scroll.
+    <div
+      className="settings-drawer"
+      data-testid="settings-drawer"
+      role="dialog"
+      aria-label="Settings"
+    >
+      <div className="settings-drawer__panel">
+        <div className="settings-drawer__header">
           <h2>Settings — MaxBot</h2>
+          <button
+            type="button"
+            className="settings-drawer__close"
+            data-testid="settings-close"
+            onClick={onClose}
+            aria-label="Close settings"
+          >
+            ×
+          </button>
         </div>
 
         <div
-          className="modal-tabs"
+          className="settings-drawer__tabs"
           ref={tabBarRef}
           role="tablist"
           aria-label="Settings categories"
@@ -454,7 +477,9 @@ export function Settings({ initial, onClose, onSave, initialTab }: SettingsProps
               role="tab"
               aria-selected={activeTab === t.id}
               tabIndex={activeTab === t.id ? 0 : -1}
-              className={`modal-tab${activeTab === t.id ? " active" : ""}`}
+              className={`settings-drawer__tab${
+                activeTab === t.id ? " active" : ""
+              }`}
               onClick={() => setActiveTab(t.id)}
             >
               {t.label}
@@ -462,9 +487,9 @@ export function Settings({ initial, onClose, onSave, initialTab }: SettingsProps
           ))}
         </div>
 
-        <div className="modal-stacked-body">
+        <div className="settings-drawer__body">
           {activeTab === "general" && (
-            <div role="tabpanel" className="modal-tab-pane">
+            <div role="tabpanel" className="settings-drawer__pane">
               <div className="field">
                 <label>Status</label>
                 <div
@@ -672,7 +697,7 @@ export function Settings({ initial, onClose, onSave, initialTab }: SettingsProps
           )}
 
           {activeTab === "providers" && (
-            <div role="tabpanel" className="modal-tab-pane">
+            <div role="tabpanel" className="settings-drawer__pane">
               {PROVIDER_PRESETS.map((p) => {
                 const isActive = p.kind === providerKind;
                 return (
@@ -739,7 +764,7 @@ export function Settings({ initial, onClose, onSave, initialTab }: SettingsProps
           )}
 
           {activeTab === "tts" && (
-            <div role="tabpanel" className="modal-tab-pane">
+            <div role="tabpanel" className="settings-drawer__pane">
               <div className="field">
                 <label>Voice</label>
                 <input
@@ -788,7 +813,7 @@ export function Settings({ initial, onClose, onSave, initialTab }: SettingsProps
           )}
 
           {activeTab === "browser" && (
-            <div role="tabpanel" className="modal-tab-pane">
+            <div role="tabpanel" className="settings-drawer__pane">
               <div className="field">
                 <label>ego-browser path (optional)</label>
                 <input
@@ -829,7 +854,7 @@ export function Settings({ initial, onClose, onSave, initialTab }: SettingsProps
           )}
 
           {activeTab === "computer" && (
-            <div role="tabpanel" className="modal-tab-pane settings__computer-tab">
+            <div role="tabpanel" className="settings-drawer__pane settings__computer-tab">
               {computerServerHost.trim() === "" ? (
                 <div
                   className="settings__computer-empty-state"
@@ -1158,7 +1183,7 @@ export function Settings({ initial, onClose, onSave, initialTab }: SettingsProps
           )}
 
           {activeTab === "grok" && (
-            <div role="tabpanel" className="modal-tab-pane">
+            <div role="tabpanel" className="settings-drawer__pane">
               <div className="field">
                 <label>Binary path</label>
                 <input
@@ -1245,7 +1270,7 @@ export function Settings({ initial, onClose, onSave, initialTab }: SettingsProps
           {error && <div className="error">{error}</div>}
         </div>
 
-        <div className="modal-stacked-footer">
+        <div className="settings-drawer__footer">
           <button onClick={onClose} disabled={saving}>
             Cancel
           </button>

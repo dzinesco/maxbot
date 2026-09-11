@@ -452,22 +452,35 @@ export function BotEditor({
   }
 
   return (
-    <div className="modal-backdrop" onClick={onClose}>
-      <div
-        className="modal bot-editor"
-        onClick={(e) => e.stopPropagation()}
-        role="dialog"
-        aria-modal="true"
-        aria-label={isNew ? "New bot" : "Edit bot"}
-      >
-        <header className="modal-header">
+    // v3.7.13 — UX-6. The pre-v3.7.13 BotEditor
+    // was a centered modal (`.modal-backdrop > .modal
+    // .bot-editor`). The modal is replaced with a
+    // full-height side panel (480px wide) — the
+    // same drawer pattern as the Settings panel.
+    // Outside clicks do NOT close (the user is in
+    // flow, the chat is interactive behind the
+    // panel). The content area scrolls
+    // independently.
+    <div
+      className="bot-editor-drawer"
+      data-testid="bot-editor-drawer"
+      role="dialog"
+      aria-label={isNew ? "New bot" : "Edit bot"}
+    >
+      <div className="bot-editor-drawer__panel">
+        <header className="bot-editor-drawer__header">
           <h2>{isNew ? "New bot" : "Edit bot"}</h2>
-          <button className="ghost small" onClick={onClose} aria-label="Close">
+          <button
+            className="bot-editor-drawer__close"
+            onClick={onClose}
+            aria-label="Close"
+            data-testid="bot-editor-close"
+          >
             ✕
           </button>
         </header>
 
-        <div className="modal-body">
+        <div className="bot-editor-drawer__body">
           {/* Identity */}
           <section className="form-section">
             <h3>Identity</h3>
@@ -1317,7 +1330,7 @@ export function BotEditor({
           </section>
         </div>
 
-        <footer className="modal-footer">
+        <footer className="bot-editor-drawer__footer">
           {!isNew && onDelete && (
             <button
               className="danger"
