@@ -24,7 +24,8 @@ vi.mock("../lib/tauri", () => ({
   cancelGoogleOauth: vi.fn(),
   disconnectGoogleOauth: vi.fn(),
   googleOauthStatus: vi.fn(),
-  // v3.7.14 — Voice section. `getSettings` is called on
+  // v3.7.14 / v3.7.16 — Voice / STT section.
+  // `getSettings` is called on
   // mount to pre-fill the masked key status; `saveSettings`
   // is called when the user clicks "Save OpenAI API key".
   // The existing palette tests don't exercise this path,

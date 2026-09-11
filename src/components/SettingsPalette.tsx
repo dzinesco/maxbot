@@ -858,10 +858,21 @@ function GoogleAccountSection() {
   );
 }
 
-/** v3.7.14 — Voice section. The user can paste an OpenAI
- *  API key (`sk-…`) without leaving the command palette.
- *  The key is read by the Rust `audio_to_text` command
- *  when the chat-header mic dispatches audio to Whisper.
+/** v3.7.14 — Voice section. The user can paste their
+ *  STT API key (MiniMax `asr-1.0` per v3.7.15, was
+ *  OpenAI Whisper in v3.7.14) without leaving the
+ *  command palette. The key is read by the Rust
+ *  `audio_to_text` command when the chat-header mic
+ *  dispatches audio to the STT endpoint.
+ *
+ *  v3.7.16 smoothness: the leftover v3.7.14 copy
+ *  ("OpenAI API key", "Whisper transcriptions") was
+ *  misleading — the STT provider was swapped in
+ *  v3.7.15 but the UI text wasn't. Replaced with
+ *  provider-neutral copy. The DB column name
+ *  (`openai_api_key`) is unchanged because (a) it's
+ *  the same key the OpenAI chat provider reuses, and
+ *  (b) renaming the column would require a migration.
  *
  *  Persistence: the component loads the current Settings
  *  on mount, then saves via the same `save_settings` Tauri
@@ -908,6 +919,22 @@ function VoiceSection() {
   const onSave = async () => {
     setError(null);
     setPhase("saving");
+    // v3.7.16 smoothness: optimistic update. The user
+    // sees the "Saved" pill and the field clears
+    // immediately. The SQLite write runs in the
+    // background. If the write fails, the error state
+    // is restored and the user can retry. This avoids
+    // the modal staying in "saving…" for 50-200ms
+    // (Tauri IPC + SQLite), which is a perceptible
+    // hitch for a one-line input.
+    const trimmed = key.trim();
+    const masked = trimmed ? maskKey(trimmed) : null;
+    setSavedKeyMask(masked);
+    setKey("");
+    setPhase("saved");
+    setTimeout(() => {
+      setPhase((p) => (p === "saved" ? "idle" : p));
+    }, 1500);
     try {
       // Read the current Settings, mutate
       // `openai_api_key`, then save. The Settings
@@ -916,21 +943,22 @@ function VoiceSection() {
       const current = await getSettings();
       const next = {
         ...current,
-        openai_api_key: key.trim() || null,
+        openai_api_key: trimmed || null,
       };
       await saveSettings(next);
-      const trimmed = key.trim();
-      setSavedKeyMask(trimmed ? maskKey(trimmed) : null);
-      setKey("");
-      setPhase("saved");
-      // Auto-clear the "Saved" pill so it doesn't
-      // linger forever.
-      setTimeout(() => {
-        setPhase((p) => (p === "saved" ? "idle" : p));
-      }, 1500);
     } catch (e) {
+      // Roll back the optimistic update.
       setError(String(e));
       setPhase("error");
+      // Re-read the saved key to keep the UI honest.
+      try {
+        const s = await getSettings();
+        const k = (s.openai_api_key ?? "").trim();
+        setSavedKeyMask(k ? maskKey(k) : null);
+      } catch {
+        // ignore — the error state is the user-facing
+        // signal
+      }
     }
   };
 
@@ -946,12 +974,12 @@ function VoiceSection() {
         data-testid="settings-palette-voice-status"
       >
         {savedKeyMask
-          ? `OpenAI API key set: ${savedKeyMask}`
-          : "OpenAI API key not set."}
+          ? `STT API key set: ${savedKeyMask}`
+          : "STT API key not set. (MiniMax asr-1.0)"}
       </p>
       <input
         type="password"
-        placeholder="sk-…  (Whisper transcriptions)"
+        placeholder="API key  (STT — MiniMax asr-1.0)"
         value={key}
         onChange={(e) => setKey(e.target.value)}
         data-testid="settings-palette-voice-api-key"
@@ -977,7 +1005,7 @@ function VoiceSection() {
           ? "Saving…"
           : phase === "saved"
             ? "Saved"
-            : "Save OpenAI API key"}
+            : "Save STT API key"}
       </button>
     </section>
   );

@@ -1,9 +1,11 @@
 // v2.7.0 — Voice (bidirectional).
 //
-// Hold-to-talk mic button that ships audio to OpenAI Whisper
-// via the Rust `transcribe_audio` command and feeds the
-// transcript back into the parent (the Composer) so the user
-// can review before sending.
+// Hold-to-talk mic button that ships audio to the STT
+// endpoint via the Rust `transcribe_audio` command and
+// feeds the transcript back into the parent (the Composer)
+// so the user can review before sending. The STT
+// provider is MiniMax `asr-1.0` per v3.7.15; the
+// v2.7.0–v3.7.14 path was OpenAI Whisper.
 //
 // Why MediaRecorder in the webview instead of a Tauri mic
 // plugin? The webview inherits the system TCC for microphone
@@ -46,8 +48,10 @@ interface VoiceButtonProps {
  * preferred MIME type for the user's runtime (webm/opus on
  * Chromium, ogg on Firefox). The wrapper falls back to the
  * default if the preference isn't supported. We don't
- * negotiate a specific codec beyond that — Whisper accepts
- * both webm and ogg as multipart `file` uploads. */
+ * negotiate a specific codec beyond that — the MiniMax
+ * `asr-1.0` endpoint (was OpenAI Whisper in v3.7.14 and
+ * earlier) accepts both webm and ogg as multipart `file`
+ * uploads. */
 function pickRecorderMime(): string | undefined {
   if (typeof MediaRecorder === "undefined") return undefined;
   const candidates = [
