@@ -17,6 +17,13 @@ pub mod bots;
 pub mod computer;
 pub mod connectors;
 pub mod groups;
+// v3.8.0 — Slice 1 (keep-alive loop) supervisor. The
+// `maxbot_loopd` binary consumes `crate::r#loop::daemon`.
+// `loop` is a Rust keyword, so the module is exposed under
+// its raw-identifier form; the directory on disk stays as
+// `loop/` per the brief's filesystem contract.
+#[path = "loop/mod.rs"]
+pub mod r#loop;
 pub mod memory;
 pub mod mcp;
 pub mod skills;
