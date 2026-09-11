@@ -32,7 +32,9 @@ pub mod tools;
 mod commands;
 mod env_loader;
 mod grok_build;
-mod llm;
+// v4 S3a — test_turn harness reuses the LLM provider crate
+// directly (no Tauri), so the module has to be pub.
+pub mod llm;
 // Slice 1 — keep-alive loop module root (file I/O + supervisor + sandbox).
 // Sub-slices delivered as PRs onto the release branch.
 // `loop` is a Rust keyword — call sites use the raw-identifier form:

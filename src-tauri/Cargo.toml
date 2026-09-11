@@ -35,6 +35,14 @@ path = "src/bin/maxbotd.rs"
 name = "maxbot_loopd"
 path = "src/bin/maxbot_loopd.rs"
 
+# v4 S3a — Test harness. Headlessly drives a single chat
+# turn (no Tauri, no UI) and writes the captured response +
+# tool_calls + errors to JSON. Used by the agent to verify
+# the bug fix end-to-end without driving the native UI.
+[[bin]]
+name = "test_turn"
+path = "src/bin/test_turn.rs"
+
 [build-dependencies]
 tauri-build = { version = "2.0", features = [] }
 
