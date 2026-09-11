@@ -246,7 +246,9 @@ export default function App() {
   const [groupRunByBot, setGroupRunByBot] = useState<Record<string, string>>(
     {},
   );
-  const groupStreaming = Object.keys(groupRunByBot).length > 0;
+  const [groupSending, setGroupSending] = useState(false);
+  const groupSendingRef = useRef(false);
+  const groupStreaming = groupSending || Object.keys(groupRunByBot).length > 0;
   // v2.4.0 — full metadata for the active group. Set
   // alongside `activeGroupId` so the header can render
   // the group name and the rail can list members
@@ -279,23 +281,33 @@ export default function App() {
    */
   const handleGroupSend = useCallback(
     async (body: string, mentionedBotIds: string[]) => {
-      if (!activeGroupIdRef.current) return;
+      if (!activeGroupIdRef.current || groupSendingRef.current) return;
       const gid = activeGroupIdRef.current;
+      groupSendingRef.current = true;
+      setGroupSending(true);
+      const refresh = async () => {
+        const history = await groupHistory(gid, 50);
+        if (activeGroupIdRef.current === gid) setGroupMessages(history);
+      };
       try {
         await groupSend(gid, body, mentionedBotIds);
-        // Refetch so the user message lands in the
-        // transcript immediately, then start the runs.
-        const history = await groupHistory(gid, 50);
-        setGroupMessages(history);
+        await refresh();
         for (const botId of mentionedBotIds) {
-          // The executor does its own validation;
-          // errors bubble up via the bot-error event.
-          const runId = await groupRunTurn(gid, botId, undefined);
-          setGroupRunByBot((prev) => ({ ...prev, [botId]: runId }));
+          if (activeGroupIdRef.current === gid) {
+            setGroupRunByBot({ [botId]: "pending" });
+          }
+          // This command resolves after persistence, returning a message id.
+          // Refresh after it resolves, not from the earlier bot-done event.
+          await groupRunTurn(gid, botId, undefined);
+          await refresh();
+          if (activeGroupIdRef.current === gid) setGroupRunByBot({});
         }
       } catch (e) {
-        // Surface as a banner — for v2.4 we just log.
-        console.warn("group send failed:", e);
+        setBootError(`Group send failed: ${String(e)}`);
+      } finally {
+        groupSendingRef.current = false;
+        setGroupSending(false);
+        if (activeGroupIdRef.current === gid) setGroupRunByBot({});
       }
     },
     [],
@@ -340,6 +352,7 @@ export default function App() {
     summary: string;
   } | null>(null);
   const requestSeq = useRef(0);
+  const selectionSeq = useRef(0);
 
   // v3.4.0 (Phase 5) — On app launch, fetch the
   // per-Bot takeover state. If a daemon-driven run
@@ -382,16 +395,17 @@ export default function App() {
       setSearchResults([]);
       return;
     }
+    let cancelled = false;
     const handle = setTimeout(async () => {
       try {
         const results = await searchMessages(q, 100);
-        setSearchResults(results);
+        if (!cancelled) setSearchResults(results);
       } catch (e) {
         console.error("search failed:", e);
-        setSearchResults([]);
+        if (!cancelled) setSearchResults([]);
       }
     }, 250);
-    return () => clearTimeout(handle);
+    return () => { cancelled = true; clearTimeout(handle); };
   }, [searchQuery]);
 
   // --- bootstrap ---
@@ -509,6 +523,10 @@ export default function App() {
   useEffect(() => {
     const unlistens: Array<() => void> = [];
     let cancelled = false;
+    const track = (unlisten: () => void) => {
+      if (cancelled) unlisten();
+      else unlistens.push(unlisten);
+    };
     (async () => {
       const u1 = await onChunk((event: ChunkEvent) => {
         const pending = pendingRef.current;
@@ -538,6 +556,7 @@ export default function App() {
           pending.toolCalls.set(tc.id, existing);
         }
       });
+      track(u1);
       const u2 = await onDone((_event: DoneEvent) => {
         const pending = pendingRef.current;
         if (pending) {
@@ -555,6 +574,7 @@ export default function App() {
         pendingRef.current = null;
         setStreamingId(null);
       });
+      track(u2);
       const u3 = await onError((event: ErrorEvent) => {
         const pending = pendingRef.current;
         const message = event.message;
@@ -577,6 +597,7 @@ export default function App() {
       });
       // Bot events: route into the active conversation's messages so the
       // user sees the bot streaming into its own thread in the chat view.
+      track(u3);
       const u4 = await onBotChunk((event: BotChunkEvent) => {
         // Only render the bot's stream if the user is currently looking
         // at the bot's conversation; otherwise we'd be writing into the
@@ -608,9 +629,10 @@ export default function App() {
           p.toolCalls.set(tc.id, existing);
         }
       });
+      track(u4);
       const u5 = await onBotDone((event: BotDoneEvent) => {
         const pending = botPendingRef.current;
-        if (pending) {
+        if (event.conversation_id === activeIdRef.current && pending) {
           setMessages((prev) =>
             upsertBotStreamMessage(
               prev,
@@ -620,30 +642,19 @@ export default function App() {
             ),
           );
         }
-        botPendingRef.current = null;
-        setRunningBotId(null);
+        if (event.conversation_id === activeIdRef.current) {
+          botPendingRef.current = null;
+          getMessages(event.conversation_id).then((messages) => {
+            if (activeIdRef.current === event.conversation_id) setMessages(messages.map(splitLegacyErrorSuffix));
+          }).catch((error) => setBootError(String(error)));
+        }
+        setRunningBotId((current) => current === event.bot_id ? null : current);
         setActiveRunByBot((prev) => {
           if (!(event.bot_id in prev)) return prev;
           const next = { ...prev };
           delete next[event.bot_id];
           return next;
         });
-        // v2.4.0 — group turns also use
-        // `bot://done` to signal completion. Clear
-        // the per-Bot `groupRunByBot` entry and
-        // refetch the active group's transcript so
-        // the new assistant + handoff rows land.
-        setGroupRunByBot((prev) => {
-          if (!(event.bot_id in prev)) return prev;
-          const next = { ...prev };
-          delete next[event.bot_id];
-          return next;
-        });
-        if (activeGroupIdRef.current) {
-          groupHistory(activeGroupIdRef.current, 50)
-            .then(setGroupMessages)
-            .catch(() => {});
-        }
         setLastBotFinish({
           botId: event.bot_id,
           runId: event.bot_run_id,
@@ -662,6 +673,7 @@ export default function App() {
           .then(setConversations)
           .catch(() => {});
       });
+      track(u5);
       const u6 = await onBotError((event: BotErrorEvent) => {
         setLastBotFinish({
           botId: event.bot_id,
@@ -669,33 +681,26 @@ export default function App() {
           conversationId: event.conversation_id,
           summary: `[error] ${event.message}`,
         });
-        botPendingRef.current = null;
-        setRunningBotId(null);
+        if (event.conversation_id === activeIdRef.current) {
+          botPendingRef.current = null;
+          getMessages(event.conversation_id).then((messages) => {
+            if (activeIdRef.current === event.conversation_id) setMessages(messages.map(splitLegacyErrorSuffix));
+          }).catch((error) => setBootError(String(error)));
+        }
+        setRunningBotId((current) => current === event.bot_id ? null : current);
         setActiveRunByBot((prev) => {
           if (!(event.bot_id in prev)) return prev;
           const next = { ...prev };
           delete next[event.bot_id];
           return next;
         });
-        // v2.4.0 — also clear the group-run map.
-        setGroupRunByBot((prev) => {
-          if (!(event.bot_id in prev)) return prev;
-          const next = { ...prev };
-          delete next[event.bot_id];
-          return next;
-        });
+
       });
-      if (cancelled) {
-        u1();
-        u2();
-        u3();
-        u4();
-        u5();
-        u6();
-      } else {
-        unlistens.push(u1, u2, u3, u4, u5, u6);
-      }
-    })();
+      track(u6);
+    })().catch((error) => {
+      for (const unlisten of unlistens.splice(0)) unlisten();
+      if (!cancelled) setBootError(`Event connection failed: ${error}`);
+    });
     return () => {
       cancelled = true;
       for (const u of unlistens) u();
@@ -718,6 +723,9 @@ export default function App() {
 
   // --- load messages when active conversation changes ---
   useEffect(() => {
+    let cancelled = false;
+    botPendingRef.current = null;
+    setMessages([]);
     if (!activeId) {
       setMessages([]);
       return;
@@ -725,6 +733,7 @@ export default function App() {
     (async () => {
       try {
         const m = await getMessages(activeId);
+        if (cancelled) return;
         // v0.7.6 migration: messages that pre-date the friendly
         // error UX still carry the old "[error] …" suffix appended
         // to their `content`. On first load after upgrade, split
@@ -755,6 +764,7 @@ export default function App() {
         console.error("load messages failed:", e);
       }
     })();
+    return () => { cancelled = true; };
   }, [activeId]);
 
   // --- handlers ---
@@ -768,10 +778,10 @@ export default function App() {
   }, []);
 
   const handleNewConversation = useCallback(async () => {
-    const created = await createConversation(undefined, undefined);
+    const created = await createConversation(undefined, selectedBotId ?? undefined);
     await refreshConversations();
     setActiveId(created.id);
-  }, [refreshConversations]);
+  }, [refreshConversations, selectedBotId]);
 
   // v2.0 Slice E: per-Bot chat scoping. Selecting a Bot in
   // the roster either opens the most-recent conversation for
@@ -779,7 +789,10 @@ export default function App() {
   // chat list shown in ChatView is filtered to this Bot.
   const handleSelectBot = useCallback(
     async (botId: string) => {
+      const selection = ++selectionSeq.current;
+      setMainView("chat");
       setSelectedBotId(botId);
+      setActiveId(null);
       const matching = conversations
         .filter((c) => c.bot_id === botId)
         .sort((a, b) => (a.updated_at < b.updated_at ? 1 : -1));
@@ -792,7 +805,7 @@ export default function App() {
       // show "no conversations for this Bot" forever.
       const created = await createConversation(undefined, botId);
       await refreshConversations();
-      setActiveId(created.id);
+      if (selection === selectionSeq.current) setActiveId(created.id);
     },
     [conversations, refreshConversations],
   );
@@ -822,16 +835,17 @@ export default function App() {
       const remaining = conversations.filter((c) => c.id !== id);
       setConversations(remaining);
       if (activeId === id) {
-        if (remaining.length > 0) {
-          setActiveId(remaining[0].id);
+        const scoped = remaining.filter((c) => c.bot_id === selectedBotId);
+        if (scoped.length > 0) {
+          setActiveId(scoped[0].id);
         } else {
-          const created = await createConversation(undefined, undefined);
-          setConversations([created]);
+          const created = await createConversation(undefined, selectedBotId ?? undefined);
+          setConversations([...remaining, created]);
           setActiveId(created.id);
         }
       }
     },
-    [activeId, conversations],
+    [activeId, conversations, selectedBotId],
   );
 
   const handleRenameConversation = useCallback(
@@ -1054,18 +1068,22 @@ export default function App() {
       const groupId = custom.detail?.groupId;
       if (!groupId) return;
       setMainView("group");
+      activeGroupIdRef.current = groupId;
       setActiveGroupId(groupId);
+      setActiveGroup(null);
+      setGroupMessages([]);
+      setGroupRunByBot({});
       // Fire-and-forget history fetch. The setState
       // for `groupMessages` is a top-level update;
       // we don't await so the UI switches view
       // immediately and the transcript streams in.
       groupGet(groupId)
         .then((g) => {
-          if (g) setActiveGroup(g);
+          if (g && activeGroupIdRef.current === groupId) setActiveGroup(g);
         })
         .catch((e) => console.warn("group get failed:", e));
       groupHistory(groupId, 50)
-        .then(setGroupMessages)
+        .then((history) => { if (activeGroupIdRef.current === groupId) setGroupMessages(history); })
         .catch((e) => console.warn("group history failed:", e));
     };
     window.addEventListener(
@@ -1848,6 +1866,7 @@ export default function App() {
         onCreateGroup={() => setCreateGroupOpen(true)}
       />
       <main className="main">
+        {bootError && <div role="alert" className="bot-finish-banner error">{bootError}<button className="ghost small" onClick={() => setBootError(null)}>Dismiss</button></div>}
         {mainView === "skills" ? (
           <SkillsPanel
             bots={bots}
@@ -1892,6 +1911,8 @@ export default function App() {
               setTakeoverPanel({ botId, approvalId })
             }
           />
+        ) : mainView === "group" && !activeGroup ? (
+          <div role="status" className="main-empty">Loading group…</div>
         ) : mainView === "group" && activeGroup ? (
           // v2.4.0 — multi-Bot group view. Renders the
           // active group's transcript with a participant
@@ -1912,7 +1933,7 @@ export default function App() {
               onStop={() => {}}
               onOpenSendToBot={() => {}}
               hasBots={false}
-              streaming={false}
+              streaming={groupStreaming}
               lastAssistantText={null}
               ttsSpeaking={false}
               onToggleSpeakLast={() => {}}

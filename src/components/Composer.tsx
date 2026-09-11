@@ -192,7 +192,7 @@ export function Composer({
                 {ttsSpeaking ? "⏹ Stop" : "🔊 Speak"}
               </button>
             )}
-            {streaming ? (
+            {streaming && !isGroup ? (
               <button className="send stop" onClick={onStop}>
                 Stop
               </button>
@@ -200,10 +200,10 @@ export function Composer({
               <button
                 className="send"
                 onClick={submit}
-                disabled={!value.trim() || (isGroup && !hasMention)}
+                disabled={streaming || !value.trim() || (isGroup && !hasMention)}
                 data-testid="group-composer-send"
               >
-                Send
+                {streaming ? "Working…" : "Send"}
               </button>
             )}
           </div>

@@ -69,9 +69,30 @@ pub struct McpServer {
     name: String,
     stdin: tokio::process::ChildStdin,
     next_id: i64,
-    pending: Arc<Mutex<HashMap<i64, oneshot::Sender<Value>>>>,
+    pending: Arc<std::sync::Mutex<HashMap<i64, oneshot::Sender<Value>>>>,
     _child: Arc<Mutex<Child>>,
     _reader: tokio::task::JoinHandle<()>,
+    stderr_task: Option<tokio::task::JoinHandle<()>>,
+}
+
+struct PendingRequest {
+    id: i64,
+    pending: Arc<std::sync::Mutex<HashMap<i64, oneshot::Sender<Value>>>>,
+}
+
+impl Drop for PendingRequest {
+    fn drop(&mut self) {
+        self.pending.lock().unwrap().remove(&self.id);
+    }
+}
+
+impl Drop for McpServer {
+    fn drop(&mut self) {
+        self._reader.abort();
+        if let Some(task) = &self.stderr_task {
+            task.abort();
+        }
+    }
 }
 
 impl McpServer {
@@ -108,17 +129,17 @@ impl McpServer {
         // oneshot. The pending map is shared with McpServer so
         // requests issued after start can register entries the
         // reader will see.
-        let pending: Arc<Mutex<HashMap<i64, oneshot::Sender<Value>>>> =
-            Arc::new(Mutex::new(HashMap::new()));
+        let pending: Arc<std::sync::Mutex<HashMap<i64, oneshot::Sender<Value>>>> =
+            Arc::new(std::sync::Mutex::new(HashMap::new()));
         let (init_tx, init_rx) = oneshot::channel::<Value>();
-        pending.lock().await.insert(1, init_tx);
+        pending.lock().unwrap().insert(1, init_tx);
         let pending_for_reader = pending.clone();
         let reader = tokio::spawn(read_responses(stdout, pending_for_reader));
 
         // Background task: forward child stderr to log::warn! at info
         // level so a misbehaving server is visible without crashing
         // the app.
-        if let Some(stderr) = stderr {
+        let stderr_task = stderr.map(|stderr| {
             let server_name = config.name.clone();
             tokio::spawn(async move {
                 let mut reader = BufReader::new(stderr);
@@ -135,8 +156,8 @@ impl McpServer {
                         }
                     }
                 }
-            });
-        }
+            })
+        });
 
         let mut server = Self {
             name: config.name.clone(),
@@ -145,6 +166,7 @@ impl McpServer {
             pending: pending.clone(),
             _child: child_arc,
             _reader: reader,
+            stderr_task,
         };
 
         // Send initialize request.
@@ -220,12 +242,18 @@ impl McpServer {
             "method": method,
             "params": params,
         });
-        self.write_request(&request).await?;
-
         let (tx, rx) = oneshot::channel();
-        self.pending.lock().await.insert(id, tx);
-        let resp = tokio::time::timeout(REQUEST_TIMEOUT, rx)
-            .await
+        // Register before writing: a local server can reply immediately.
+        self.pending.lock().unwrap().retain(|_, sender| !sender.is_closed());
+        self.pending.lock().unwrap().insert(id, tx);
+        let _registration = PendingRequest { id, pending: self.pending.clone() };
+        if let Err(error) = self.write_request(&request).await {
+            self.pending.lock().unwrap().remove(&id);
+            return Err(error);
+        }
+        let response = tokio::time::timeout(REQUEST_TIMEOUT, rx).await;
+        self.pending.lock().unwrap().remove(&id);
+        let resp = response
             .map_err(|_| {
                 format!(
                     "{}: request {} timed out after {}s",
@@ -359,6 +387,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn immediate_replies_and_cancelled_requests_release_resources() {
+        let server = McpServer::start(McpServerConfig {
+            name: "regression".into(),
+            command: "python3".into(),
+            args: vec!["-u".into(), "-c".into(), r#"
+import sys, json
+for line in sys.stdin:
+    request = json.loads(line)
+    if "id" in request and request["method"] != "hang":
+        print(json.dumps({"jsonrpc":"2.0", "id":request["id"], "result":{}}), flush=True)
+"#.into()],
+            env: HashMap::new(),
+        }).await.unwrap();
+        let mut locked = server.lock().await;
+        for _ in 0..100 {
+            locked.request("echo", json!({})).await.unwrap();
+        }
+        for _ in 0..10 {
+            assert!(tokio::time::timeout(Duration::from_millis(10), locked.request("hang", json!({}))).await.is_err());
+            assert!(locked.pending.lock().unwrap().is_empty());
+        }
+        let reader = locked._reader.abort_handle();
+        let stderr = locked.stderr_task.as_ref().unwrap().abort_handle();
+        drop(locked);
+        drop(server);
+        tokio::task::yield_now().await;
+        assert!(reader.is_finished());
+        assert!(stderr.is_finished());
+    }
+
+    #[tokio::test]
     async fn timeout_when_server_doesnt_respond() {
         // Sleep is the simplest "doesn't respond" server. We expect
         // the start handshake to time out, not hang forever.
@@ -377,7 +436,7 @@ mod tests {
 
 async fn read_responses<R>(
     stdout: R,
-    pending: Arc<Mutex<HashMap<i64, oneshot::Sender<Value>>>>,
+    pending: Arc<std::sync::Mutex<HashMap<i64, oneshot::Sender<Value>>>>,
 ) where
     R: tokio::io::AsyncRead + Unpin + Send + 'static,
 {
@@ -397,7 +456,7 @@ async fn read_responses<R>(
                     Err(_) => continue,
                 };
                 if let Some(id) = v.get("id").and_then(|x| x.as_i64()) {
-                    if let Some(tx) = pending.lock().await.remove(&id) {
+                    if let Some(tx) = pending.lock().unwrap().remove(&id) {
                         let _ = tx.send(v);
                     }
                 }
@@ -409,7 +468,7 @@ async fn read_responses<R>(
     }
     // Drain any pending requests with an EOF error so callers don't
     // hang forever.
-    let mut p = pending.lock().await;
+    let mut p = pending.lock().unwrap();
     for (_, tx) in p.drain() {
         let _ = tx.send(json!({ "error": { "code": -1, "message": "EOF" } }));
     }

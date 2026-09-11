@@ -92,18 +92,30 @@ enum WriteCommand {
 #[derive(Clone)]
 pub struct GrokSession {
     inner: Arc<Inner>,
+    _owner: Arc<SessionOwner>,
     binary_path: Arc<str>,
     model_alias: Arc<str>,
     cwd: PathBuf,
 }
 
 struct Inner {
+    tasks: StdMutex<Vec<tokio::task::AbortHandle>>,
     child: StdMutex<Option<Child>>,
     writer_tx: mpsc::UnboundedSender<WriteCommand>,
     pending: StdMutex<HashMap<u64, oneshot::Sender<Result<Value, String>>>>,
     next_id: AtomicU64,
     session_id: StdRwLock<Option<String>>,
     event_tx: broadcast::Sender<SessionEvent>,
+}
+
+struct RequestRegistration<'a> {
+    inner: &'a Inner,
+    id: u64,
+}
+impl Drop for RequestRegistration<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut pending) = self.inner.pending.lock() { pending.remove(&self.id); }
+    }
 }
 
 impl GrokSession {
@@ -135,7 +147,7 @@ impl GrokSession {
         cmd.stdin(Stdio::piped());
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
-        cmd.kill_on_drop(false);
+        cmd.kill_on_drop(true);
         let mut child: Child = cmd
             .spawn()
             .map_err(|e| format!("spawn '{}': {e}", binary_path))?;
@@ -148,13 +160,13 @@ impl GrokSession {
             .take()
             .ok_or_else(|| "could not capture child stdout".to_string())?;
         // Drain stderr so the child doesn't block on a full pipe.
-        if let Some(se) = child.stderr.take() {
+        let stderr_task = child.stderr.take().map(|se| {
             tokio::spawn(async move {
                 let mut lines = BufReader::new(se).lines();
                 while let Ok(Some(_line)) = lines.next_line().await {}
-            });
-        }
-        Self::start_with_io(
+            })
+        });
+        let result = Self::start_with_io(
             stdout,
             stdin,
             binary_path,
@@ -162,7 +174,20 @@ impl GrokSession {
             model_alias,
             resume_session_id,
         )
-        .await
+        .await;
+        match result {
+            Ok(session) => {
+                *session.inner.child.lock().unwrap() = Some(child);
+                if let Some(task) = stderr_task {
+                    session.inner.tasks.lock().unwrap().push(task.abort_handle());
+                }
+                Ok(session)
+            }
+            Err(error) => {
+                if let Some(task) = stderr_task { task.abort(); }
+                Err(error)
+            }
+        }
     }
 
     /// Lower-level constructor that takes the subprocess's stdout
@@ -185,6 +210,7 @@ impl GrokSession {
         let (writer_tx, writer_rx) = mpsc::unbounded_channel::<WriteCommand>();
         let (event_tx, _) = broadcast::channel::<SessionEvent>(EVENT_CHANNEL_CAPACITY);
         let inner = Arc::new(Inner {
+            tasks: StdMutex::new(Vec::new()),
             child: StdMutex::new(None), // no Child in the IO-only path
             writer_tx,
             pending: StdMutex::new(HashMap::new()),
@@ -193,12 +219,14 @@ impl GrokSession {
             event_tx: event_tx.clone(),
         });
         // Writer task: dumb byte pump.
-        tokio::spawn(writer_task(writer, writer_rx));
+        let writer = tokio::spawn(writer_task(writer, writer_rx));
         // Read task: NDJSON parser, dispatches responses to
         // `pending` and notifications to `event_tx`.
-        tokio::spawn(read_task(inner.clone(), reader));
+        let reader = tokio::spawn(read_task(inner.clone(), reader));
+        inner.tasks.lock().unwrap().extend([writer.abort_handle(), reader.abort_handle()]);
         let session = Self {
             inner: inner.clone(),
+            _owner: Arc::new(SessionOwner(inner.clone())),
             binary_path,
             model_alias,
             cwd,
@@ -311,6 +339,7 @@ impl GrokSession {
             .lock()
             .map_err(|e| format!("pending lock poisoned: {e}"))?
             .insert(id, response_tx);
+        let _registration = RequestRegistration { inner: &self.inner, id };
         let payload = serde_json::json!({
             "jsonrpc": "2.0",
             "id": id,
@@ -415,18 +444,25 @@ impl GrokSession {
     /// Send a shutdown signal to the writer and kill the
     /// subprocess. Idempotent.
     pub fn close(&self) {
-        let _ = self.inner.writer_tx.send(WriteCommand::Shutdown);
-        if let Ok(mut g) = self.inner.child.lock() {
-            if let Some(mut c) = g.take() {
-                let _ = c.start_kill();
-            }
-        }
+        close_inner(&self.inner);
     }
 }
 
-impl Drop for GrokSession {
-    fn drop(&mut self) {
-        self.close();
+// Reader tasks retain Inner, but only user-facing session clones retain this
+// owner. Its final drop releases IO even when a peer never closes stdout.
+struct SessionOwner(Arc<Inner>);
+impl Drop for SessionOwner {
+    fn drop(&mut self) { close_inner(&self.0); }
+}
+
+fn close_inner(inner: &Inner) {
+    let _ = inner.writer_tx.send(WriteCommand::Shutdown);
+    if let Ok(mut tasks) = inner.tasks.lock() {
+        for task in tasks.drain(..) { task.abort(); }
+    }
+    if let Ok(mut pending) = inner.pending.lock() { pending.clear(); }
+    if let Ok(mut child) = inner.child.lock() {
+        if let Some(mut child) = child.take() { let _ = child.start_kill(); }
     }
 }
 
@@ -686,6 +722,26 @@ mod tests {
         let server = server_rx.await.expect("server back");
         let _ = server_task.await;
         (session, server)
+    }
+
+    #[tokio::test]
+    async fn clone_drop_preserves_session_and_final_drop_releases_io() {
+        let (session, mut server) = boot_with_handshake().await;
+        let weak = Arc::downgrade(&session.inner);
+        drop(session.clone());
+        let reply = async {
+            let request = server.recv_request().await;
+            server.send_result(request["id"].as_u64().unwrap(), json!({"ok": true})).await;
+        };
+        let (result, _) = tokio::join!(session.send_request("echo", json!({}), std::time::Duration::from_secs(1)), reply);
+        assert_eq!(result.unwrap()["ok"], true);
+        for _ in 0..10 {
+            assert!(tokio::time::timeout(std::time::Duration::from_millis(1), session.send_request("hang", json!({}), std::time::Duration::from_secs(1))).await.is_err());
+            assert!(session.inner.pending.lock().unwrap().is_empty());
+        }
+        drop(session);
+        tokio::task::yield_now().await;
+        assert!(weak.upgrade().is_none());
     }
 
     #[tokio::test]

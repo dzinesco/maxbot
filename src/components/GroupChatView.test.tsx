@@ -1,16 +1,5 @@
-// v2.4.0 — GroupChatView tests.
-//
-// The handoff-card shape is the only DOM-level
-// assertion the plan calls for; the rest of the
-// component is mechanical (header + rail + message
-// rows) and exercised in the integration test in
-// `app-integration.test.tsx`. The component reads
-// `event.chunk.Text` for live streaming, which is
-// a passthrough from `onBotChunk`; we don't try to
-// simulate a live run here.
-
 import { describe, expect, it, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { act, render, screen } from "@testing-library/react";
 
 // v2.4.0 — the GroupChatView subscribes to the
 // `bot://chunk` / `bot://done` / `bot://error` event
@@ -20,8 +9,9 @@ import { render, screen } from "@testing-library/react";
 // dependency). We mock the three `on*` entry points
 // we use so the effect resolves cleanly and the
 // DOM-level assertions can run.
+const events = vi.hoisted(() => ({ chunk: null as null | ((event: any) => void), unlisten: vi.fn() }));
 vi.mock("../lib/tauri", () => ({
-  onBotChunk: () => Promise.resolve(() => {}),
+  onBotChunk: (handler: (event: any) => void) => { events.chunk = handler; return Promise.resolve(events.unlisten); },
   onBotDone: () => Promise.resolve(() => {}),
   onBotError: () => Promise.resolve(() => {}),
 }));
@@ -139,4 +129,17 @@ describe("GroupChatView", () => {
     // @BotName hint.
     expect(screen.getByText(/@BotName/)).toBeInTheDocument();
   });
+});
+
+it("streams real chunk payloads and releases finished response buffers", async () => {
+  const view = render(<GroupChatView group={group} messages={[]} bots={bots} activeRunByBot={{ b1: "pending" }} />);
+  await act(async () => {});
+  act(() => events.chunk?.({ bot_id: "b1", bot_run_id: "r1", conversation_id: "c1", chunk: { kind: "text", delta: "Live answer" } }));
+  expect(screen.getByTestId("group-live-response")).toHaveTextContent("Live answer");
+  view.rerender(<GroupChatView group={group} messages={[]} bots={bots} activeRunByBot={{}} />);
+  expect(screen.queryByTestId("group-live-response")).toBeNull();
+  view.rerender(<GroupChatView group={group} messages={[]} bots={bots} activeRunByBot={{ b1: "pending" }} />);
+  expect(screen.getByTestId("group-live-response")).not.toHaveTextContent("Live answer");
+  view.unmount();
+  expect(events.unlisten).toHaveBeenCalled();
 });

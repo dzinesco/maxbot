@@ -1,24 +1,10 @@
-// v2.4.0 — Multi-Bot group chat view.
-//
-// A variant of `ChatView` that renders the
-// `group_messages` transcript with speaker attribution
-// per message, a participant side rail, and a distinct
-// card for handoff rows. Subscribes to `bot://chunk` /
-// `bot://done` / `bot://error` to stream live bot runs;
-// concurrent bot streams are demuxed by `bot_run_id`
-// so two Bots running back-to-back in the same group
-// don't bleed into each other's bubble.
-//
-// The component is data-only: the parent owns the
-// message list + the active stream map. We pass them
-// in as props so the React side can re-use this
-// component for both the live group view and the
-// vitest test that asserts on the handoff-card shape.
+// Group transcripts are persisted by the parent; live chunks are temporary
+// and released when each command finishes or this view unmounts.
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { Bot, GroupMessage } from "../lib/api";
 import { BotAvatar } from "./BotAvatar";
-import { onBotChunk, onBotDone, onBotError } from "../lib/tauri";
+import { onBotChunk } from "../lib/tauri";
 
 interface GroupChatViewProps {
   /** The group metadata. The header reads `chat.name` and
@@ -35,10 +21,7 @@ interface GroupChatViewProps {
    *  streaming text into the matching assistant row and
    *  shows a `…` cursor. */
   activeBotRunIds?: string[];
-  /** Set of bot_run_ids that the parent knows about, keyed
-   *  by bot_id. Populated by `groupRunTurn`; cleared by
-   *  the `bot://done` listener. We use this to demux
-   *  concurrent streams. */
+  /** Bots whose group command is awaiting completion. */
   activeRunByBot?: Record<string, string>;
 }
 
@@ -46,127 +29,44 @@ export function GroupChatView({
   group,
   messages,
   bots,
-  activeBotRunIds = [],
+  activeBotRunIds: _activeBotRunIds = [],
   activeRunByBot = {},
 }: GroupChatViewProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
-  // Live streaming text keyed by assistant message id. We
-  // use the row id (a per-turn uuid) instead of `bot_run_id`
-  // so the in-progress text lands in the right row even
-  // after the assistant message has been persisted.
-  const [streamByMsg, setStreamByMsg] = useState<Record<string, string>>(
-    {},
-  );
-  const [streaming, setStreaming] = useState<Set<string>>(new Set());
+  const [live, setLive] = useState<Record<string, { runId: string; text: string }>>({});
+  const activeRef = useRef(activeRunByBot);
+  activeRef.current = activeRunByBot;
+  const botById = useMemo(() => Object.fromEntries(bots.map((bot) => [bot.id, bot])), [bots]);
 
-  // Map bot_id -> Bot for O(1) speaker lookup.
-  const botById = useMemo(() => {
-    const m: Record<string, Bot> = {};
-    for (const b of bots) m[b.id] = b;
-    return m;
-  }, [bots]);
-
-  // Auto-scroll on new content / streaming chunks.
   useEffect(() => {
-    const el = scrollRef.current;
-    if (!el) return;
-    el.scrollTop = el.scrollHeight;
-  }, [messages, streamByMsg]);
+    setLive((previous) => Object.fromEntries(Object.entries(previous).filter(([id]) => id in activeRunByBot)));
+  }, [activeRunByBot]);
 
-  // Subscribe to the existing bot event stream and
-  // demux by bot_run_id → bot_id → assistant message id.
-  // The parent already has the bot_run_id → bot_id map;
-  // we re-derive the message id by looking at the latest
-  // assistant row for that bot in the transcript. The
-  // contract: the executor emits the assistant row's id
-  // as the message id for the chunk events, but the
-  // chunk event itself only carries bot_run_id, so we
-  // match by bot + recent timestamp via a side channel:
-  // the parent sets `activeRunByBot[bot_id] = run_id`
-  // when `groupRunTurn` returns, and clears it on done.
   useEffect(() => {
     let cancelled = false;
-    const unsubs: Array<() => void> = [];
-    Promise.all([
-      onBotChunk((event) => {
-        if (cancelled) return;
-        // Find the bot_id for this run id by inverting
-        // the parent's `activeRunByBot` map.
-        const botId = Object.entries(activeRunByBot).find(
-          ([, runId]) => runId === event.bot_run_id,
-        )?.[0];
-        if (!botId) return;
-        // Find the most-recent (in-flight) assistant
-        // row for this bot. The parent appends a
-        // placeholder row before kicking off
-        // `groupRunTurn`, so we can match by recency.
-        const assistantRow = [...messages]
-          .reverse()
-          .find(
-            (m) =>
-              m.bot_id === botId &&
-              m.role === "assistant" &&
-              streaming.has(m.id),
-          );
-        const targetId = assistantRow?.id;
-        if (!targetId) return;
-        const payload = event.chunk as unknown;
-        if (
-          payload &&
-          typeof payload === "object" &&
-          "Text" in (payload as Record<string, unknown>)
-        ) {
-          const text = (payload as { Text: string }).Text;
-          setStreamByMsg((prev) => ({
-            ...prev,
-            [targetId]: (prev[targetId] ?? "") + text,
-          }));
-        }
-      }),
-      onBotDone(() => {
-        // The parent clears `activeRunByBot` for this
-        // bot on the done event; we just stop tracking
-        // the streaming state. The persisted message
-        // arrives via a separate `groupHistory` refetch
-        // in the parent, so we don't try to finalize
-        // `streamByMsg` here.
-      }),
-      onBotError(() => {
-        // Same as done — the parent's run id map clears
-        // on the error event.
-      }),
-    ]).then(([u1, u2, u3]) => {
-      if (cancelled) {
-        u1();
-        u2();
-        u3();
-        return;
-      }
-      unsubs.push(u1, u2, u3);
-    });
-    return () => {
-      cancelled = true;
-      for (const u of unsubs) u();
-    };
-  }, [activeRunByBot, messages, streaming]);
+    let unsubscribe: (() => void) | undefined;
+    setLive({});
+    onBotChunk((event) => {
+      if (cancelled || !(event.bot_id in activeRef.current) || event.chunk.kind !== "text") return;
+      const delta = event.chunk.delta;
+      setLive((previous) => {
+        const old = previous[event.bot_id];
+        return { ...previous, [event.bot_id]: {
+          runId: event.bot_run_id,
+          text: (old?.runId === event.bot_run_id ? old.text : "") + delta,
+        } };
+      });
+    }).then((unlisten) => {
+      if (cancelled) unlisten();
+      else unsubscribe = unlisten;
+    }).catch((error) => console.warn("Group stream connection failed:", error));
+    return () => { cancelled = true; unsubscribe?.(); };
+  }, [group.id]);
 
-  // Mark every persisted assistant row that's still
-  // being streamed into as "in flight". The parent
-  // adds new rows to `messages` on done; we use the
-  // intersection with `activeBotRunIds` to decide.
   useEffect(() => {
-    setStreaming((prev) => {
-      const next = new Set(prev);
-      // We don't have a direct link from
-      // activeBotRunIds (which is a list of bot ids)
-      // to a specific message id, so we keep the
-      // existing set as-is. The streaming marker is
-      // cleared by the parent when the new
-      // (persisted) message arrives and the live
-      // stream row is no longer in the transcript.
-      return next;
-    });
-  }, [activeBotRunIds]);
+    const el = scrollRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [messages, live]);
 
   return (
     <div className="chat-view group-chat-view" data-testid="group-chat-view">
@@ -206,13 +106,18 @@ export function GroupChatView({
                 key={m.id}
                 message={m}
                 bot={m.bot_id ? botById[m.bot_id] : undefined}
-                streamingText={streamByMsg[m.id]}
                 targetBot={
                   m.handoff_to ? botById[m.handoff_to] : undefined
                 }
               />
             ))
           )}
+          {Object.keys(activeRunByBot).map((botId) => (
+            <div className="message assistant" key={`live-${botId}`} data-testid="group-live-response">
+              <div className="avatar">{botById[botId]?.name ?? botId}</div>
+              <div className="body">{live[botId]?.text || "Thinking…"}</div>
+            </div>
+          ))}
         </div>
       </div>
     </div>
