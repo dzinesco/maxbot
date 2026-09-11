@@ -230,4 +230,12 @@ out what the per-Bot VM does and does not protect against. For the
   the browser, and the refresh token is stored. See
   [user-guide.md#google-account-v3712](user-guide.md#google-account-v3712)
   for the full flow + revocation instructions.
+- The **VoiceMode (v3.7.14)** mic in the chat header lets you
+  dictate a message hands-free: click the <kbd>🎤</kbd>, speak,
+  click again to stop, and the transcript auto-sends. It needs an
+  OpenAI API key (paste it into the **Voice** section of the same
+  settings palette; same key as the chat provider) and macOS
+  microphone permission (the first click prompts). See
+  [user-guide.md#voicemode-v3714](user-guide.md#voicemode-v3714)
+  for the full flow.
   notes)
