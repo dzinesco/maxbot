@@ -878,6 +878,35 @@ impl Database {
         Ok(out)
     }
 
+    /// v3.7.17 — S3a-real. Fetch a single conversation by id.
+    /// Used by the chat path to resolve the conversation's
+    /// owning bot so the per-bot tool allowlist can be
+    /// enforced inside `run_agent_loop`.
+    pub fn get_conversation(
+        &self,
+        id: &str,
+    ) -> rusqlite::Result<Option<Conversation>> {
+        let conn = self.conn.lock().expect("db lock poisoned");
+        let row: Option<Conversation> = conn
+            .query_row(
+                "SELECT id, title, created_at, updated_at, bot_id
+                 FROM conversations
+                 WHERE id = ?",
+                params![id],
+                |row| {
+                    Ok(Conversation {
+                        id: row.get(0)?,
+                        title: row.get(1)?,
+                        created_at: parse_dt(row.get::<_, String>(2)?),
+                        updated_at: parse_dt(row.get::<_, String>(3)?),
+                        bot_id: row.get(4)?,
+                    })
+                },
+            )
+            .optional()?;
+        Ok(row)
+    }
+
     pub fn create_conversation(
         &self,
         title: Option<String>,

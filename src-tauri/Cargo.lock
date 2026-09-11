@@ -2502,6 +2502,7 @@ dependencies = [
  "env_logger",
  "eventsource-stream",
  "futures-util",
+ "iana-time-zone",
  "image",
  "libc",
  "log",

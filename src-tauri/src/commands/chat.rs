@@ -52,6 +52,12 @@ const TOOL_FAILURE_AUTO_STOP: u32 = 2;
 /// renderer mirrors this list in
 /// `src/v4/lib/toolAllowlist.ts` — adding a tool here should
 /// land in both places.
+///
+/// v3.7.17 — S3a-real. shell_run REMOVED from this list. The
+/// model kept calling it for "what day is it?" instead of
+/// answering in text from the date header. Per-bot tool
+/// enforcement now happens via the bot's `allowed_tools`
+/// list inside `run_agent_loop`, not as a hardcoded global.
 const TOOL_PERMISSION_ALLOWLIST: &[&str] = &[
     // Mail / Gmail — outbound email.
     "mail_draft",
@@ -71,38 +77,6 @@ const TOOL_PERMISSION_ALLOWLIST: &[&str] = &[
     "ego_browser",
 ];
 
-/// v3.7.17 — S3a follow-up. Tools the model is NEVER allowed
-/// to call. A denylisted tool:
-///   - On the FIRST call: returns the synthetic message
-///     "invalid tool; answer in text" (no consent dialog, no
-///     execution).
-///   - On any subsequent call this turn: cancels the turn
-///     and surfaces the partial text answer to the user.
-///
-/// shell_run sits on this list because it's overkill for the
-/// questions the model actually asks it for ("what day is
-/// it?", "what time is it?"). The date_header_for_now system
-/// message gives the model the answer in text; the denylist
-/// is the safety net when the model ignores that header.
-const TOOL_DENYLIST: &[&str] = &[
-    "shell_run",
-];
-
-/// Synthetic error string for the FIRST call to a denylisted
-/// tool this turn. The model is told to answer in text.
-const TOOL_DENY_FIRST: &str = "invalid tool; answer in text";
-
-/// Synthetic error string for ANY subsequent call to the same
-/// denylisted tool this turn. Turn is cancelled after this is
-/// emitted; the user sees the partial text answer instead of
-/// another tool error.
-fn tool_deny_repeat_msg(name: &str) -> String {
-    format!(
-        "Tool '{}' is not available this turn. Answer without it.",
-        name
-    )
-}
-
 /// Per-chunk streaming timeout. If the provider goes silent for this
 /// long between chunks (cold start, TCP half-open, hung model), we
 /// surface a `stream stalled` error and let the UI recover. 90s
@@ -112,29 +86,38 @@ pub(crate) const STREAM_CHUNK_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// v3.7.16 — S3a. Build the per-turn date header that gets
 /// prepended to the chat's system messages. Includes the rule
-/// the LLM must follow ("do not use tools for the current
+/// the LLM must follow ("do not call tools for the current
 /// date") so the model doesn't burn a tool roundtrip on a
 /// calendar question. The header is rebuilt on every send — the
 /// date stays fresh across long-lived conversations.
 ///
-/// v3.7.17 — S3a follow-up. Format changed from the bracketed
-/// key-value form to the natural-language form the model
-/// follows more reliably. Per Tyler's S3a brief: "Today is
-/// {local date, weekday, timezone}. Do not use tools to answer
-/// the current date or time."
+/// v3.7.17 — S3a-real. Per Tyler's brief: the header is the
+/// two-line form `Today is {Weekday}, {Month} {Day}, {Year}
+/// ({IANA tz}).` followed by `Do not call tools for the
+/// current date or time.` The IANA timezone (e.g. "America/
+/// Denver") comes from `iana-time-zone` — the system TZ env
+/// var on macOS / Linux, the Windows equivalent on Windows.
+/// Falls back to the chrono `%Z` abbreviation if the IANA
+/// lookup fails (e.g. minimal containers).
 fn date_header_for_now() -> String {
     let now = chrono::Local::now();
+    let day = now
+        .format("%d")
+        .to_string()
+        .trim_start_matches('0')
+        .to_string();
+    let tz = iana_time_zone::get_timezone()
+        .ok()
+        .or_else(|| Some(now.format("%Z").to_string()))
+        .unwrap_or_else(|| "UTC".to_string());
     format!(
-        "Today is {}, {} {}, {}, {}. \
-         Do not use tools to answer the current date or time. \
-         When the user asks for today's date, the current day of the \
-         week, or the current time, answer directly from this header — \
-         do not call shell_run, vm_computer_use, or any other tool.\n",
+        "Today is {}, {} {}, {} ({}).\n\
+         Do not call tools for the current date or time.\n",
         now.format("%A"),   // Friday
         now.format("%B"),   // September
-        now.format("%d"),   // 11
+        day,                // 11
         now.format("%Y"),   // 2026
-        now.format("%Z"),   // MDT
+        tz,                 // America/Denver (or fallback)
     )
 }
 
@@ -445,6 +428,31 @@ async fn prepare_and_spawn_loop(
         state.mcp.tool_adapters(),
     ));
 
+    // v3.7.17 — S3a-real. Resolve the bot for this conversation
+    // so the agent loop can enforce the per-bot tool allowlist.
+    // If the bot is gone (deleted mid-send) we fall back to an
+    // empty allowlist — every tool call becomes "unknown
+    // tool; reply in text". That's the safest default: the
+    // model can still answer in text from the system prompt +
+    // history.
+    let db_for_bot = state.db.clone();
+    let convo_id_for_bot = conversation_id.clone();
+    let allowed_tools: Vec<String> = tokio::task::spawn_blocking(move || {
+        let convo = db_for_bot.get_conversation(&convo_id_for_bot).ok().flatten();
+        let bot_id = convo.and_then(|c| c.bot_id);
+        match bot_id {
+            Some(bid) => db_for_bot
+                .get_bot(&bid)
+                .ok()
+                .flatten()
+                .map(|b| b.allowed_tools)
+                .unwrap_or_default(),
+            None => Vec::new(),
+        }
+    })
+    .await
+    .unwrap_or_default();
+
     // Register a cancellation token keyed by the user message id.
     let cancel = CancellationToken::new();
     {
@@ -472,6 +480,7 @@ async fn prepare_and_spawn_loop(
             conversation_id,
             request_id,
             model,
+            allowed_tools,
             cancel,
         )
         .await;
@@ -542,6 +551,12 @@ async fn run_agent_loop(
     conversation_id: String,
     request_id: String,
     model: String,
+    // v3.7.17 — S3a-real. The bot's per-instance tool
+    // allowlist. Any tool call whose `name` is not in this
+    // list is short-circuited with a synthetic error before
+    // consent / dedupe / execution. The check runs at the
+    // start of every tool iteration.
+    allowed_tools: Vec<String>,
     cancel: CancellationToken,
 ) {
     let tool_definitions = registry.definitions();
@@ -758,63 +773,59 @@ async fn run_agent_loop(
         // a denylisted tool. First call returns a synthetic error
         // ("invalid tool; answer in text"); any subsequent call
         // cancels the turn. The count is per tool name (NOT per
-        // args hash) because we want to catch the model retrying
-        // the same tool with slightly different args.
-        let mut denied_tool_count: HashMap<String, u32> = HashMap::new();
+        // v3.7.17 — S3a-real. Per-turn count of calls to a tool
+        // NOT in this bot's allowed_tools list. The map is keyed
+        // on tool NAME (not per args hash) because we want to
+        // catch the model retrying the same tool with slightly
+        // different args. First call returns a synthetic
+        // `{"error":"unknown tool; reply in text"}`; the second
+        // call this turn cancels.
+        //
+        // The denial is pushed to `messages[]` so the model
+        // sees it on the next iteration. We deliberately do
+        // NOT persist a `tool`-role row in the DB — the
+        // renderer filters those rows in ChatPane, and the
+        // user doesn't need to see "unknown tool; reply in
+        // text" as a chat bubble.
+        let mut unknown_tool_count: HashMap<String, u32> = HashMap::new();
         for tc in &tool_calls {
             if cancel.is_cancelled() {
                 stop_reason = "cancelled".to_string();
                 break;
             }
-            // v3.7.17 — S3a follow-up. Denylist short-circuit.
-            // Runs BEFORE consent / dedupe / execution so a
-            // denylisted tool never opens the Allow dialog, never
-            // reaches the registry, and never counts toward the
-            // generic dedupe map.
-            if TOOL_DENYLIST.contains(&tc.name.as_str()) {
+            // v3.7.17 — S3a-real. Per-bot tool allowlist.
+            // If the tool is not in this bot's `allowed_tools`,
+            // return a synthetic JSON error to the model and do
+            // NOT execute / persist / emit an approval.
+            if !allowed_tools.iter().any(|t| t == &tc.name) {
                 let count = {
-                    let entry = denied_tool_count
+                    let entry = unknown_tool_count
                         .entry(tc.name.clone())
                         .or_insert(0);
                     *entry += 1;
                     *entry
                 };
                 let synthetic = if count == 1 {
-                    TOOL_DENY_FIRST.to_string()
+                    // The exact JSON shape the user asked for.
+                    // The model sees this and is told to reply
+                    // in text (not call tools).
+                    "{\"error\":\"unknown tool; reply in text\"}".to_string()
                 } else {
-                    tool_deny_repeat_msg(&tc.name)
-                };
-                // Persist as a `tool` role message so the model
-                // sees the denial in its history on the next
-                // iteration.
-                let db_clone = db.clone();
-                let convo_clone = conversation_id.clone();
-                let tc_id_clone = tc.id.clone();
-                let content_clone = synthetic.clone();
-                let _ = tokio::task::spawn_blocking(move || {
-                    db_clone.insert_message(
-                        &convo_clone,
-                        MessageRole::Tool,
-                        &content_clone,
-                        &[PersistedToolCall {
-                            id: tc_id_clone,
-                            name: String::new(),
-                            arguments: String::new(),
-                        }],
+                    // Second call to the same unknown tool
+                    // this turn → cancel.
+                    format!(
+                        "Tool '{}' is not enabled for this bot. \
+                         Answer without it.",
+                        tc.name
                     )
-                })
-                .await;
+                };
                 messages.push(ChatMessage::Tool {
                     tool_call_id: tc.id.clone(),
                     content: synthetic,
                 });
                 if count >= 2 {
-                    // Second (or later) call to a denylisted
-                    // tool this turn → cancel so the user sees
-                    // the partial text answer instead of more
-                    // tool errors.
                     cancel.cancel();
-                    stop_reason = "denied_tool_repeated".to_string();
+                    stop_reason = "unknown_tool_repeated".to_string();
                     break;
                 }
                 continue;
@@ -1412,10 +1423,11 @@ mod tests {
     /// here should land in
     /// `src/v4/lib/toolAllowlist.ts` too.
     ///
-    /// v3.7.17 — S3a follow-up. shell_run is no longer in
-    /// this allowlist; it moved to TOOL_DENYLIST because the
-    /// model kept calling it for "what day is it?" instead of
-    /// answering in text from the date header.
+    /// v3.7.17 — S3a-real. shell_run REMOVED from this list.
+    /// Per-bot tool enforcement now happens inside
+    /// `run_agent_loop` against the bot's `allowed_tools` —
+    /// the model can't call shell_run unless the user has
+    /// explicitly added it to the bot's allowlist.
     #[test]
     fn tool_permission_allowlist_contains_expected_world_touching_tools() {
         for tool in [
@@ -1436,66 +1448,49 @@ mod tests {
                 "expected {tool} in TOOL_PERMISSION_ALLOWLIST"
             );
         }
-        // shell_run is intentionally NOT here — see TOOL_DENYLIST.
+        // shell_run is intentionally NOT here — per-bot
+        // allowed_tools is the gate now.
         assert!(
             !TOOL_PERMISSION_ALLOWLIST.contains(&"shell_run"),
-            "shell_run should be in TOOL_DENYLIST, not TOOL_PERMISSION_ALLOWLIST"
+            "shell_run should be per-bot, not global"
         );
     }
 
-    // ---- v3.7.17 — S3a follow-up. TOOL_DENYLIST ----
+    // ---- v3.7.17 — S3a-real. date_header_for_now ----
 
-    /// shell_run is on the denylist. Any other tool the model
-    /// might emit should NOT be on this list — denylisting is
-    /// intentionally narrow.
-    #[test]
-    fn tool_denylist_contains_shell_run() {
-        assert!(TOOL_DENYLIST.contains(&"shell_run"));
-        assert_eq!(TOOL_DENYLIST.len(), 1);
-    }
-
-    // ---- v3.7.16 — S3a. date_header_for_now ----
-
-    /// The date header contains today's date in
-    /// natural-language form (weekday, month, day, year, TZ)
-    /// AND the rule telling the LLM not to call tools for the
-    /// current date. v3.7.17 changed the format from
-    /// bracketed YYYY-MM-DD to the natural-language form the
-    /// model follows more reliably.
+    /// The date header uses the natural-language form
+    /// `Today is {Weekday}, {Month} {Day}, {Year} ({IANA tz}).`
+    /// plus the rule "Do not call tools for the current date
+    /// or time." The renderer never displays this header; it's
+    /// the system message injected into every send.
     #[test]
     fn date_header_for_now_contains_today_and_rule() {
         let header = date_header_for_now();
-        // Year + day-of-month are still present (just inside
-        // the natural-language form, not as ISO YYYY-MM-DD).
+        // Natural-language date fragments.
         let year = chrono::Local::now().format("%Y").to_string();
         let month = chrono::Local::now().format("%B").to_string();
         let day = chrono::Local::now().format("%d").to_string();
-        assert!(
-            header.contains(&year),
-            "expected year ({year}) in header: {header}"
-        );
-        assert!(
-            header.contains(&month),
-            "expected month ({month}) in header: {header}"
-        );
-        assert!(
-            header.contains(&day.trim_start_matches('0')),
-            "expected day-of-month ({day}) in header: {header}"
-        );
-        // Weekday — e.g. "Friday".
         let weekday = chrono::Local::now().format("%A").to_string();
+        assert!(header.contains(&year), "missing year: {header}");
+        assert!(header.contains(&month), "missing month: {header}");
         assert!(
-            header.contains(&weekday),
-            "expected weekday ({weekday}) in header: {header}"
+            header.contains(day.trim_start_matches('0')),
+            "missing day: {header}"
         );
-        // The "don't call tools for date" rule.
+        assert!(header.contains(&weekday), "missing weekday: {header}");
+        // The exact "Today is ..." prefix the user spec'd.
         assert!(
-            header.to_lowercase().contains("do not use tools"),
-            "expected no-tools-for-date rule in header: {header}"
+            header.starts_with("Today is "),
+            "expected 'Today is ...' prefix: {header:?}"
+        );
+        // The rule against tool calls for date/time.
+        assert!(
+            header.to_lowercase().contains("do not call tools"),
+            "missing 'do not call tools' rule: {header}"
         );
     }
 
-    // ---- v3.7.17 — S3a follow-up. truncate_title_for_storage ----
+    // ---- v3.7.17 — S3a-real. truncate_title_for_storage ----
 
     #[test]
     fn truncate_title_short_text_returned_unchanged() {
@@ -1504,20 +1499,10 @@ mod tests {
 
     #[test]
     fn truncate_title_long_text_breaks_at_word_boundary() {
-        // Use a sentence whose 20-char prefix ends mid-word
-        // (after "lon" of "long"), so the boundary-cut rule
-        // must fire — otherwise the cut would slice "long"
-        // into "lon" + ellipsis.
         let s = "this is a fairly long first user message";
         let out = truncate_title_for_storage(s, 20);
-        // Ellipsis terminates the cut.
         assert!(out.ends_with('…'), "expected ellipsis: {out:?}");
-        // Cut is at most 20 chars + ellipsis.
         assert!(out.chars().count() <= 21, "too long: {out:?}");
-        // The cut text (without the trailing ellipsis) must
-        // end at a word boundary — the next char in the source
-        // string must be whitespace, otherwise we sliced a
-        // word in half.
         let cut_part: String = out.chars().take_while(|c| *c != '…').collect();
         let next_char = s.chars().nth(cut_part.chars().count());
         assert!(
