@@ -829,4 +829,67 @@ describe("ComputerPanel — click-through takeover (v3.7.9)", () => {
       expect(interval).toBeGreaterThanOrEqual(200);
     }
   });
+
+  it("toolbar title shows the VM IP and never shows the broken 'up —' uptime", async () => {
+    // v3.7.16 regression: the toolbar title used to render
+    // `${state} · ${vm_ip} · up ${formatUptime(null)}`, but
+    // `formatUptime(null)` returns `"—"`. The user saw
+    // "running · 192.168.0.50 · up —" — broken, confusing,
+    // and duplicative with `ComputerFooter` (which shows
+    // the real `up {formatUptime(uptime)}`). The fix drops
+    // the state + uptime from the title; the dot's tooltip +
+    // footer handle both. The IP is the one piece of info
+    // the toolbar can show that the footer doesn't repeat.
+    vi.mocked(computerGet).mockResolvedValue({
+      ...runningComputer,
+      vm_ip: "192.168.0.50",
+    });
+    vi.mocked(computerScreenshot).mockResolvedValue(FAKE_JPEG);
+    const { container } = render(
+      <ComputerPanel
+        botId="bot-1"
+        mode="preview"
+        pollIntervalMs={60000}
+      />,
+    );
+    // Wait for the panel to render the toolbar (the
+    // loading state lands first, then the full panel).
+    await waitFor(() => {
+      const title = container.querySelector(
+        ".computer-panel__toolbar-title",
+      );
+      expect(title).toBeTruthy();
+    });
+    const title = container.querySelector(
+      ".computer-panel__toolbar-title",
+    )!;
+    // v3.7.16 contract: just the IP, nothing else.
+    expect(title.textContent).toBe("192.168.0.50");
+    // Lock the broken shape so a future refactor that
+    // re-adds "up —" or "up 0s" fails this test loudly.
+    expect(title.textContent).not.toMatch(/up /);
+    expect(title.textContent).not.toMatch(/—/);
+  });
+
+  it("toolbar title shows 'No computer' when no computer is provisioned", async () => {
+    // v3.7.16: the "no computer" path (loading + no-row
+    // branches) renders ComputerToolbar with `computer={null}`.
+    // The title should be the literal "No computer" —
+    // not a broken "no computer · 0.0.0.0 · up —" string.
+    vi.mocked(computerGet).mockResolvedValue(null);
+    vi.mocked(computerScreenshot).mockResolvedValue(FAKE_JPEG);
+    const { container } = render(
+      <ComputerPanel
+        botId="bot-1"
+        mode="preview"
+        pollIntervalMs={60000}
+      />,
+    );
+    await waitFor(() => {
+      const title = container.querySelector(
+        ".computer-panel__toolbar-title",
+      );
+      expect(title?.textContent).toBe("No computer");
+    });
+  });
 });
