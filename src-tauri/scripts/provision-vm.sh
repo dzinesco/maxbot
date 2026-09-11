@@ -79,6 +79,15 @@
 #      ssh (safety net for if the openssh-server package
 #      install ever disrupts the manually-started sshd).
 #
+# v3.7.16: 6th positional arg is the VNC display number
+# (0..=99 → TCP port 5900..=5999). The Mac side picks a
+# free display by reading the `computers.vnc_port` rows
+# and passes it explicitly so multiple Bots get sequential
+# ports instead of all colliding on 5900. Defaults to 0
+# when called by hand (so existing single-VM usage keeps
+# working). The previous v3.7.5 hard-coded `127.0.0.1:0`
+# is replaced with `127.0.0.1:${VNC_DISPLAY}`.
+#
 # Implementation note: the user-data heredoc uses plain <<EOF
 # (NOT <<'EOF') so $SSH_PUB and $VM_NAME still expand, but
 # that means backticks in comments would be evaluated as
@@ -91,6 +100,10 @@ DISK_GB="$2"
 RAM_MB="$3"
 SSH_PUB="$4"
 # VNC_PASSWORD="$5"  # ignored — see header comment
+# v3.7.16: VNC display number. Defaults to 0 so a
+# hand-call (e.g. while debugging) keeps the v3.7.5
+# behavior of binding to 127.0.0.1:0.
+VNC_DISPLAY="${6:-0}"
 
 # 1. Download a base image (Ubuntu 24.04 cloud) if not cached
 BASE_IMAGE="/var/lib/maxbot/base/ubuntu-24.04-cloud.img"
@@ -278,7 +291,10 @@ genisoimage -output "$VM_DIR/seed.iso" -volid cidata -joliet -rock "$USER_DATA" 
 #    NO libvirt VNC. We use `--graphics none` so QEMU does NOT start
 #    a libvirt-managed VNC server with default DES auth. The only
 #    VNC server is the one injected via `<qemu:commandline>` below
-#    (`-vnc 127.0.0.1:0,password=off,to=5999`) with no auth.
+#    (`-vnc 127.0.0.1:<VNC_DISPLAY>,password=off,to=5999`) with no
+#    auth. v3.7.16: the `0` is now the `VNC_DISPLAY` shell var
+#    (the Mac side picks a free display 0..=99, default 0 for
+#    hand-calls); v3.7.5 hard-coded it.
 #
 #    Why this matters: if BOTH libvirt's VNC and qemu:commandline's
 #    VNC run, QEMU starts two VNC servers — one on the libvirt
@@ -287,8 +303,9 @@ genisoimage -output "$VM_DIR/seed.iso" -volid cidata -joliet -rock "$USER_DATA" 
 #    so the Mac app's SSH tunnel goes to the wrong (auth-required)
 #    VNC. macOS Screen Sharing then prompts for a password. With
 #    `--graphics none`, only the no-auth VNC exists, and the
-#    Mac app's `poll_for_vnc_port` falls back to 5900 (the fixed
-#    port from the qemu:commandline's `127.0.0.1:0`).
+#    Mac app's `poll_for_vnc_port` fallback is gone (v3.7.16) —
+#    the port is now `5900 + VNC_DISPLAY`, picked up-front on
+#    the Mac side.
 #
 #    `--noreboot` is load-bearing: virt-install's default is to
 #    define + start the VM in one step, but the qemu:commandline
@@ -299,9 +316,10 @@ genisoimage -output "$VM_DIR/seed.iso" -volid cidata -joliet -rock "$USER_DATA" 
 #    VM, with the patched XML in place.
 #
 #    v3.7.5: the libvirt domain XML gets a `<qemu:commandline>`
-#    block with `-vnc 127.0.0.1:0,password=off,to=5999`. This
-#    disables VNC password auth so macOS Screen Sharing connects
-#    without prompting. Why `password=off` via qemu:commandline:
+#    block with `-vnc 127.0.0.1:<VNC_DISPLAY>,password=off,to=5999`.
+#    This disables VNC password auth so macOS Screen Sharing
+#    connects without prompting. Why `password=off` via
+#    qemu:commandline:
 #      - libvirt 11.6.0 doesn't accept `auth` as a `<graphics>`
 #        attribute (only `vnc` and `sasl` are valid).
 #      - QEMU 9.x on Ubuntu 25.10 rejects `auth=none` as an
@@ -309,7 +327,9 @@ genisoimage -output "$VM_DIR/seed.iso" -volid cidata -joliet -rock "$USER_DATA" 
 #      - QEMU 9.x accepts `password=off`. RFB handshake
 #        advertises VNC_AUTH_NONE only (verified end-to-end
 #        against maxbot-bot-8eb75d73 on 2026-09-10).
-#      - The `to=5999` lets QEMU pick any free port in 5900-5999.
+#      - The `to=5999` lets QEMU pick any free port in 5900-5999
+#        (v3.7.16: still useful as a safety net if the display
+#        number we pass happens to be busy).
 #    Trust model unchanged: SSH-gated tunnel + libvirt loopback
 #    bind is the only real gate. macOS Screen Sharing no longer
 #    prompts.
@@ -333,8 +353,8 @@ virt-install \
 # 4a. Patch the domain XML to add a `<video>` element (so the
 #     VM has a virtual VGA that `virsh screenshot` can poll)
 #     AND a `<qemu:commandline>` block with
-#     `-vnc 127.0.0.1:0,password=off,to=5999` (so the VNC
-#     server is no-auth).
+#     `-vnc 127.0.0.1:<VNC_DISPLAY>,password=off,to=5999` (so
+#     the VNC server is no-auth and on the Mac-picked port).
 #
 #     The `<video>` element is required because `--graphics none`
 #     tells libvirt not to add any display device. Without an
@@ -351,10 +371,10 @@ virt-install \
 #     11.6 doesn't accept `auth` as a `<graphics>` attribute
 #     (only `vnc` and `sasl` are valid) and QEMU 9.x rejects
 #     `auth=none` on the `-vnc` option. The working path is
-#     `password=off` via qemu:commandline, on a port the app
-#     knows via the `poll_for_vnc_port` Rust fallback (5900
-#     for the first VM; multi-VM port allocation is a future
-#     enhancement noted in the Rust code).
+#     `password=off` via qemu:commandline. v3.7.16: the
+#     `<VNC_DISPLAY>` slot is the Mac-picked display number
+#     (0..=99), so the second Bot gets port 5901 instead of
+#     colliding on 5900.
 #
 #     Uses Python (always present on Ubuntu) for the multi-line
 #     regex; sed can't handle the namespace + the <video>
@@ -376,22 +396,28 @@ if 'xmlns:qemu' not in x:
 # </devices> tag, so libvirt allocates a PCI slot for the VGA
 # without colliding with the pcie-root-port it allocated.
 x = x.replace('</devices>', \"<video><model type='vga'/></video></devices>\", 1)
+# v3.7.16: substitute the VNC display number from argv[1]
+# (the Mac side picks a free display 0..=99; defaults to 0
+# at the top of the script for hand-calls). The
+# `to=5999` knob still gives QEMU room to pick the next
+# free port if the exact display is busy for any reason.
+vnc_display = sys.argv[1] if len(sys.argv) > 1 else '0'
 qemu_block = (
     '<qemu:commandline>'
     \"<qemu:arg value='-vnc'/>\"
-    \"<qemu:arg value='127.0.0.1:0,password=off,to=5999'/>\"
+    \"<qemu:arg value='127.0.0.1:' + vnc_display + ',password=off,to=5999'/>\"
     '</qemu:commandline>'
     '</domain>'
 )
 x = x.replace('</domain>', qemu_block, 1)
 sys.stdout.write(x)
-" | virsh define /dev/stdin
+" "$VNC_DISPLAY" | virsh define /dev/stdin
 
 # 4b. Start the VM now that the qemu:commandline patch is in the
 #     persistent config. `--noreboot` above left it shut off; this
 #     is where it actually boots, with QEMU picking up the
-#     `-vnc 127.0.0.1:0,password=off,to=5999` arg from the
-#     qemu:commandline block.
+#     `-vnc 127.0.0.1:<VNC_DISPLAY>,password=off,to=5999` arg from
+#     the qemu:commandline block.
 virsh start "$VM_NAME"
 
 # 5. Return the libvirt domain name

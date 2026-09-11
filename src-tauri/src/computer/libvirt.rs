@@ -165,6 +165,23 @@ impl LibvirtClient {
             .map(|_| ())
     }
 
+    /// `virsh domstate <name>` — return the domain's current
+    /// state. v3.7.16 uses this in `poll_for_vm_running` to
+    /// confirm `provision-vm.sh`'s `virsh start` actually
+    /// landed the VM in the `running` state before we trust
+    /// the VNC port we picked. We don't use this for the
+    /// renderer's ComputerPanel status — the panel asks
+    /// `list_domains` for the whole roster at once. This is
+    /// strictly the "did the just-provisioned VM boot?" check.
+    pub async fn domstate(
+        &self,
+        pool: &SshPool,
+        name: &str,
+    ) -> Result<DomainState, LibvirtError> {
+        let out = run_virsh(pool, &["domstate", name]).await?;
+        Ok(DomainState::from_libvirt(&out))
+    }
+
     /// `virsh vncdisplay <name>` — returns the VNC display
     /// number, e.g. `:0` or `:5`. We add 5900 to get the TCP
     /// port the VNC server is bound on (libvirt's VNC is

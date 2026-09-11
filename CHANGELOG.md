@@ -4,6 +4,118 @@ All notable changes to MaxBot are documented in this file. The format
 follows [Keep a Changelog](https://keepachangelog.com/) and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## v3.7.16 — 2026-09-10
+
+### Changed — Multi-VM VNC port allocation (Hardening item #3)
+
+The v3.7.5 VNC auth fix hard-coded the qemu:commandline
+`-vnc 127.0.0.1:0,password=off,to=5999` and the Rust side
+fell back to port 5900 whenever `virsh vncdisplay` failed
+(`<graphics none>` means libvirt doesn't know about the
+no-auth VNC, so `virsh vncdisplay` always failed).
+That worked for VM #1 — QEMU's `to=5999` knob picked 5900
+because it was the first free port. For VM #2, QEMU would
+pick 5901 (first free after 5900) but the Mac side still
+tried to SSH-tunnel to 5900, and the user got a black
+screen. The "5900 fallback" comment in
+`src-tauri/src/computer/provision.rs` explicitly noted
+"Multiple VMs would need sequential port allocation
+(future work; v3.7.5 is a single-VM slice per Tyler's
+'lets use one vm' direction 2026-09-10)".
+
+v3.7.16 makes the allocation explicit and Mac-side-driven:
+
+- **`src-tauri/src/computer/mod.rs`** — `ComputerManager::provision`
+  now reads the current `computers.vnc_port` values (via
+  `db.list_computers()`), filters to `Option<u16>`, and
+  hands the list to `next_free_vnc_display`. The chosen
+  display is passed to `provision_vm` as a new
+  `vnc_display: u8` parameter. If the 5900-5999 range
+  is full (101 Bots provisioned), provisioning errors
+  with a clear "VNC port range 5900-5999 is fully in use;
+  destroy a Bot before provisioning another" message.
+  v3.7.16 only reads the `vnc_port` column — the
+  `state` field is irrelevant (a Destroyed Bot has its
+  row removed, not set to a tombstone state, so the
+  freed port automatically reappears as a candidate).
+
+- **`src-tauri/src/computer/provision.rs`** —
+  - `next_free_vnc_display(in_use, range_lo, range_hi)`
+    is a new pure function. Returns the lowest display
+    number in `[lo, hi]` not in `in_use - 5900`.
+    Out-of-range entries in `in_use` are ignored. Returns
+    `None` if the range is exhausted. Picks the lowest
+    free slot — a Destroyed Bot's port gets reused
+    immediately.
+  - `vnc_port_from_display(display: u8) -> u16` is the
+    `5900 + display` math, saturating to avoid
+    overflowing u16 on a stray 255.
+  - `poll_for_vnc_port` is replaced by
+    `poll_for_vm_running` — same retry shape (10×500ms)
+    but asks `virsh domstate` for the `running` state
+    instead of `virsh vncdisplay`. The qemu:commandline
+    VNC isn't visible to libvirt (no `<graphics>`
+    element), so the old `vncdisplay` path was
+    guaranteed to fail; the new path is a real "is the
+    VM alive" check, and the port is the one we passed
+    in. The 5900 fallback is gone.
+  - The script call adds a 6th positional arg:
+    `sudo -n /opt/maxbot/provision-vm.sh <name> <disk_gb>
+    <ram_mb> <pubkey> '' <vnc_display>`. The empty 5th
+    arg is the v3.7.5 preserved-and-ignored
+    `<vnc_password>` slot — kept untouched for API
+    stability. The new 6th arg carries the display
+    number.
+  - 9 new unit tests cover the free-display
+    selection (empty list, skip in-use, lowest-free
+    wins, full range returns None, range respected,
+    invalid range returns None) and the
+    display-to-port math (inverse, saturation).
+
+- **`src-tauri/src/computer/libvirt.rs`** — new
+  `LibvirtClient::domstate(pool, name)` wraps
+  `virsh domstate <name>`. The result is parsed via the
+  existing `DomainState::from_libvirt` (which already
+  maps `running`, `shut off`, `crashed`, etc.). The
+  renderer's ComputerPanel status path is unaffected
+  (it still uses `list_domains` for the roster);
+  `domstate` is strictly the "did the just-provisioned
+  VM boot?" check.
+
+- **`src-tauri/scripts/provision-vm.sh`** —
+  - New 6th positional arg `VNC_DISPLAY="${6:-0}"`.
+    Default `0` preserves the v3.7.5 behavior for
+    hand-calls (debugging).
+  - The qemu:commandline patch now substitutes
+    `127.0.0.1:<VNC_DISPLAY>` instead of the hard-coded
+    `127.0.0.1:0`. The Python heredoc gets
+    `vnc_display` from `sys.argv[1]` and concatenates
+    it into the `<qemu:arg value='...'/>` element.
+  - The `to=5999` knob stays so QEMU can still
+    auto-pick the next free port if the display number
+    we pass is busy for any reason (it shouldn't be
+    unless the host has other QEMU VMs outside MaxBot).
+  - Header comment gains a v3.7.16 block explaining
+    the new arg + the multi-VM rationale. The
+    section-4 doc comment is updated to reference
+    `<VNC_DISPLAY>` instead of `:0` and to note that
+    the `poll_for_vnc_port` fallback is gone.
+
+- **Wire shape unchanged.** `ProvisionResult.vnc_port`
+  is still `u16`; the only thing that changed is where
+  the value comes from (Mac-picked + Mac-confirmed
+  vs. hard-coded 5900 fallback). Existing
+  `db.list_computers` is the only DB call added.
+- **Trust model unchanged.** Same SSH-gated tunnel,
+  same libvirt loopback bind, same `password=off`
+  qemu:commandline.
+- **Migration.** Existing single-VM installs are
+  unaffected: the script's `VNC_DISPLAY` defaults to
+  `0`, and the Mac side picks `0` when no other rows
+  exist. Re-provisioning an existing VM is not
+  required (the port on its existing `computers` row
+  stays the same).
+
 ## v3.7.5 — 2026-09-10
 
 ### Changed — QEMU VNC `auth=none`; macOS Screen Sharing no longer prompts for a password (Hardening item #1)

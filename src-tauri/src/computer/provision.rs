@@ -11,21 +11,30 @@
 //!    `provision-vm.sh` does the genisoimage + virt-install).
 //! 4. SSH to the server and run
 //!    `sudo -n /opt/maxbot/provision-vm.sh <name> <disk_gb>
-//!    <ram_mb> <ssh_pubkey>`. The script handles the
+//!    <ram_mb> <ssh_pubkey> [vnc_password=ignored]
+//!    [vnc_display=N]`. The script handles the
 //!    qcow2 overlay, ISO generation, and `virt-install --import`.
 //!    It returns the libvirt domain name on stdout.
-//!    (v3.7.5: the 5th positional arg `<vnc_password>` is gone.
-//!    The QEMU VNC server now runs with `auth=none` — the
-//!    SSH-tunnel + loopback-bind is the only gate, same as
-//!    before, but the macOS Screen Sharing takeover no longer
-//!    prompts for a password the user has to hunt down.)
+//!    (v3.7.5: the 5th positional arg `<vnc_password>` is gone
+//!    but the slot is preserved-and-ignored for API
+//!    compatibility. v3.7.16: the 6th positional arg
+//!    `<vnc_display>` carries the display number we picked
+//!    on the Mac side so multiple VMs get sequential ports in
+//!    5900-5999 instead of all colliding on 5900.)
 //! 5. Poll `virsh net-dhcp-leases default` every 2s up to
 //!    90s for the VM's IP. dnsmasq returns the lease as
 //!    soon as the VM's NIC comes up — much faster than
 //!    `virsh domifaddr` which requires qemu-guest-agent
 //!    (only starts after cloud-init's apt install finishes,
 //!    3-5 minutes).
-//! 6. `virsh vncdisplay <name>` to get the VNC port.
+//! 6. The VNC port is `5900 + vnc_display` — we pick the
+//!    display on the Mac side (see `next_free_vnc_display`),
+//!    pass it to the script, and trust the script to bind
+//!    QEMU to that display. `virsh vncdisplay` doesn't know
+//!    about the qemu:commandline VNC (no `<graphics>` element),
+//!    so it would return an error — we use the display number
+//!    directly. (v3.7.5 used a 5900 hard-coded fallback
+//!    here; v3.7.16 makes it dynamic.)
 //! 7. Persist `computers` row with `state = running`, plus
 //!    the IP and VNC port.
 //!
@@ -101,6 +110,7 @@ pub async fn provision_vm(
     opts: &ProvisionOptions,
     pool: &SshPool,
     libvirt: &LibvirtClient,
+    vnc_display: u8,
 ) -> Result<ProvisionResult, ProvisionError> {
     // 1. Mint a per-Bot keypair.
     let (pkcs8, public_key) =
@@ -139,12 +149,22 @@ pub async fn provision_vm(
     //    The pubkey is the public half of a keypair.
     //    The ssh connection to the server uses the OS
     //    keychain.
+    //
+    //    v3.7.16: pass the VNC display number as the 6th
+    //    positional arg (the 5th stays as the
+    //    preserved-and-ignored `<vnc_password>` slot from
+    //    v3.7.5). The script substitutes it into the
+    //    qemu:commandline so QEMU binds to
+    //    `127.0.0.1:<display>,password=off,to=5999`. This
+    //    is what makes multi-VM provisioning stop
+    //    colliding on port 5900.
     let cmd = format!(
-        "sudo -n /opt/maxbot/provision-vm.sh {} {} {} '{}'",
+        "sudo -n /opt/maxbot/provision-vm.sh {} {} {} '{}' '' {}",
         shell_quote(&vm_name),
         opts.disk_gb,
         opts.ram_mb,
         shell_quote(&public_key),
+        vnc_display,
     );
     let out = pool
         .server_exec(&cmd)
@@ -195,13 +215,30 @@ pub async fn provision_vm(
         .await
         .map_err(|e| ProvisionError::Ssh(e.to_string()))?;
 
-    // 7. VNC port. `virsh vncdisplay` is a single
-    //    round-trip; if it fails (rare — would mean
-    //    the domain is still being defined), retry a
-    //    couple of times.
-    let vnc_port = poll_for_vnc_port(libvirt, pool, &domain_name)
+    // 7. VNC port. v3.7.16: we picked the display number
+    //    on the Mac side (see `next_free_vnc_display`)
+    //    and passed it to the script. The script's
+    //    qemu:commandline binds QEMU to that display
+    //    (`-vnc 127.0.0.1:<display>,password=off,to=5999`).
+    //    Since the display is in 0..=99 and we picked one
+    //    that's free, the actual port is 5900 + display —
+    //    we don't need to ask libvirt (it doesn't know
+    //    about the qemu:commandline VNC anyway because
+    //    `--graphics none` removed the `<graphics>`
+    //    element).
+    //
+    //    We do, however, sanity-check the chosen display
+    //    by asking libvirt to confirm the VM is running
+    //    (the qemu:commandline patch + `virsh start` runs
+    //    inside provision-vm.sh, so by the time we get
+    //    here the VM should be live). If `virsh domstate`
+    //    says anything other than "running", surface a
+    //    clear error — the VNC port won't be reachable
+    //    otherwise.
+    poll_for_vm_running(libvirt, pool, &domain_name)
         .await
         .map_err(|e| ProvisionError::Libvirt(e.to_string()))?;
+    let vnc_port = vnc_port_from_display(vnc_display);
 
     // 8. v3.0.5: wait for the QEMU guest agent to
     //    become responsive. `provision-vm.sh` only
@@ -277,46 +314,73 @@ async fn poll_for_ip(
     }
 }
 
-async fn poll_for_vnc_port(
+/// v3.7.16: pick the lowest free VNC display number
+/// given the list of display numbers already in use.
+/// The display number maps to TCP port `5900 + display`,
+/// so the in-use list is a list of `(port - 5900)`.
+/// Returns `None` if the 100-display range
+/// (0..=99, ports 5900..=5999) is full.
+pub fn next_free_vnc_display(in_use: &[u16], range_lo: u16, range_hi: u16) -> Option<u16> {
+    if range_hi < range_lo {
+        return None;
+    }
+    let mut used: std::collections::BTreeSet<u16> = in_use
+        .iter()
+        .filter_map(|&p| p.checked_sub(5900))
+        .filter(|&d| d >= range_lo && d <= range_hi)
+        .collect();
+    for d in range_lo..=range_hi {
+        if !used.remove(&d) {
+            return Some(d);
+        }
+    }
+    None
+}
+
+/// v3.7.16: derive the VNC TCP port from the display
+/// number. Display 0 → 5900, display 1 → 5901, etc.
+/// The cap at 5999 matches the qemu:commandline's
+/// `to=5999` upper bound; a display above 99 would
+/// land outside the configured port range and the
+/// `to=5999` knob wouldn't help.
+pub fn vnc_port_from_display(display: u8) -> u16 {
+    // `display: u8` is at most 255; 5900 + u8 saturates
+    // at 6155 which is still in the 5900-65535 range,
+    // so a plain `+` is safe and won't overflow a u16
+    // until 5900+1216. Callers are expected to keep
+    // `display` in 0..=99 (the `next_free_vnc_display`
+    // range) but we don't assert here — the script's
+    // qemu:commandline will refuse to bind above 5999
+    // and the user will see a clear error.
+    5900u16.saturating_add(u16::from(display))
+}
+
+/// v3.7.16: confirm the domain reached the `running`
+/// state in libvirtd after provision-vm.sh returned.
+/// `virsh start` is fire-and-forget; libvirtd can take
+/// a moment to register the state. We poll a few times
+/// (500ms apart, 10 attempts) before giving up.
+async fn poll_for_vm_running(
     libvirt: &LibvirtClient,
     pool: &SshPool,
     domain: &str,
-) -> Result<u16, ProvisionError> {
-    // The domain takes a moment to register with
-    // libvirtd after `virt-install` returns. Try a few
-    // times before giving up.
-    let mut last_err = None;
+) -> Result<(), ProvisionError> {
+    let mut last_err: Option<String> = None;
     for _ in 0..10 {
-        match libvirt.vncdisplay(pool, domain).await {
-            Ok(p) => return Ok(p),
+        match libvirt.domstate(pool, domain).await {
+            Ok(s) if s == super::libvirt::DomainState::Running => return Ok(()),
+            Ok(s) => {
+                last_err = Some(format!("state is {s:?}, not running"));
+            }
             Err(e) => {
-                last_err = Some(e);
-                tokio::time::sleep(Duration::from_millis(500)).await;
+                last_err = Some(e.to_string());
             }
         }
-    }
-    // v3.7.5: with `--graphics none` on the virt-install side, the
-    // domain has no libvirt-managed VNC — the only VNC server is
-    // the one QEMU started from the `<qemu:commandline>` block
-    // (`-vnc 127.0.0.1:0,password=off,to=5999`). `virsh vncdisplay`
-    // doesn't know about it because libvirt didn't define a
-    // `<graphics>` element. Fall back to port 5900 (display 0 in
-    // the 5900-5999 range, which the qemu:commandline's
-    // `127.0.0.1:0` always picks first). This is the port the
-    // no-auth VNC actually listens on for the FIRST VM. Multiple
-    // VMs would need sequential port allocation (future work;
-    // v3.7.5 is a single-VM slice per Tyler's "lets use one vm"
-    // direction 2026-09-10).
-    if last_err.is_some() {
-        eprintln!(
-            "v3.7.5: vncdisplay failed ({}); falling back to port 5900 \
-             (qemu:commandline VNC, no libvirt <graphics> element)",
-            last_err.as_ref().unwrap()
-        );
-        return Ok(5900);
+        tokio::time::sleep(Duration::from_millis(500)).await;
     }
     Err(ProvisionError::Libvirt(format!(
-        "vncdisplay never succeeded: {last_err:?}"
+        "VM {domain} did not reach `running` state: {}",
+        last_err.unwrap_or_else(|| "unknown".into())
     )))
 }
 
@@ -378,5 +442,94 @@ mod tests {
         let o = ProvisionOptions::default();
         assert_eq!(o.disk_gb, 10);
         assert_eq!(o.ram_mb, 2048);
+    }
+
+    // --- v3.7.16: VNC port allocation tests ---
+
+    /// Empty list → display 0 (the v3.7.5 behavior).
+    #[test]
+    fn next_free_vnc_display_empty_list_returns_zero() {
+        assert_eq!(next_free_vnc_display(&[], 0, 99), Some(0));
+    }
+
+    /// First VM already on 5900 → next gets 5901 (display 1).
+    #[test]
+    fn next_free_vnc_display_skips_in_use() {
+        assert_eq!(next_free_vnc_display(&[5900], 0, 99), Some(1));
+    }
+
+    /// Out-of-range entries (e.g. 5899 from a stray row) are
+    /// ignored — we only consider ports in the configured
+    /// range.
+    #[test]
+    fn next_free_vnc_display_ignores_out_of_range() {
+        // 5899 is below the range; 6000 is above. Both
+        // should be ignored, so the function returns 0.
+        assert_eq!(next_free_vnc_display(&[5899, 6000], 0, 99), Some(0));
+    }
+
+    /// Multiple gaps — we pick the lowest free slot, not
+    /// the next sequential one. This matters when a
+    /// middle Bot gets Destroyed: the new Bot should
+    /// reuse the freed display, not push everyone forward.
+    #[test]
+    fn next_free_vnc_display_picks_lowest_free() {
+        // 5900 and 5902 in use → 5901 is free.
+        assert_eq!(next_free_vnc_display(&[5900, 5902], 0, 99), Some(1));
+        // 5901 and 5902 in use → 5900 is free.
+        assert_eq!(next_free_vnc_display(&[5901, 5902], 0, 99), Some(0));
+    }
+
+    /// The full range is exhausted → None (the caller
+    /// surfaces a clear "destroy a Bot" error).
+    #[test]
+    fn next_free_vnc_display_full_range_returns_none() {
+        let used: Vec<u16> = (5900..=5999).collect();
+        assert_eq!(next_free_vnc_display(&used, 0, 99), None);
+    }
+
+    /// The user can configure a tighter range via
+    /// `Settings.computer_vnc_local_port_range` (parsed
+    /// by the Settings UI into lo + hi ints). The
+    /// function respects the range.
+    #[test]
+    fn next_free_vnc_display_respects_range() {
+        // Range 5910..=5912 with 5911 in use → 5910 free.
+        assert_eq!(next_free_vnc_display(&[5911], 10, 12), Some(10));
+        // Range 5910..=5912 with all in use → None.
+        assert_eq!(
+            next_free_vnc_display(&[5910, 5911, 5912], 10, 12),
+            None
+        );
+    }
+
+    /// Invalid range (lo > hi) → None, not a panic.
+    /// Defensive — the Settings UI clamps this but
+    /// the function shouldn't trust its inputs.
+    #[test]
+    fn next_free_vnc_display_invalid_range_returns_none() {
+        assert_eq!(next_free_vnc_display(&[], 50, 10), None);
+    }
+
+    /// `vnc_port_from_display` is the inverse of
+    /// `display - 5900`. Lock the math here so any
+    /// drift (off-by-one, signedness) fails loudly.
+    #[test]
+    fn vnc_port_from_display_math_is_inverse() {
+        assert_eq!(vnc_port_from_display(0), 5900);
+        assert_eq!(vnc_port_from_display(1), 5901);
+        assert_eq!(vnc_port_from_display(50), 5950);
+        assert_eq!(vnc_port_from_display(99), 5999);
+    }
+
+    /// `vnc_port_from_display` must NOT overflow a u16
+    /// even if a future caller passes display=255.
+    /// (Today's range is 0..=99 so this can't happen
+    /// in practice, but `saturating_add` is cheap
+    /// insurance.)
+    #[test]
+    fn vnc_port_from_display_saturates() {
+        // 5900 + 255 = 6155, well within u16::MAX.
+        assert_eq!(vnc_port_from_display(255), 6155);
     }
 }
