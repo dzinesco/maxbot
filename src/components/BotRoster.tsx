@@ -383,8 +383,18 @@ function computerStateLabel(state: ComputerState | string): string {
  * because the roster is a navigation list, not an
  * activity log — the Activity rail carries the
  * per-run detail.
+ *
+ * The status argument is typed as `string` (not
+ * `BotRunStatus`) so the function can accept the
+ * "awaiting_approval" / "queued" values the
+ * BotAvatar's 6-state indicator already speaks,
+ * even though today's Rust `BotRunStatus` enum
+ * only has 4 variants. The string match falls
+ * through to "Idle" for unknown values, so a
+ * future enum addition doesn't break the
+ * roster.
  */
-export function presence(run: BotRun | undefined): string {
+export function presence(run: { status: string } | undefined): string {
   if (!run) return "Idle";
   switch (run.status) {
     case "running":

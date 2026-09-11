@@ -24,12 +24,15 @@ const makeBot = (overrides: Partial<Bot> = {}): Bot => ({
   avatar_color: "",
   last_active_at: null,
   state: "idle",
+  created_at: "2026-01-01T00:00:00Z",
+  updated_at: "2026-01-01T00:00:00Z",
   ...overrides,
 });
 
 const makeApproval = (overrides: Partial<Approval> = {}): Approval => ({
   id: "ap-1",
   bot_id: "bot-1",
+  bot_run_id: null,
   tool_name: "mail_draft",
   payload: { to: "x@y.com", subject: "Hi", body: "Hello" },
   status: "pending",

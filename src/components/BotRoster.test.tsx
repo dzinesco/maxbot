@@ -29,7 +29,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { render, screen, fireEvent, within } from "@testing-library/react";
 import { BotRoster } from "./BotRoster";
-import type { Bot } from "../lib/api";
+import type { Bot, BotRunStatus } from "../lib/api";
 
 const blankBot = (overrides: Partial<Bot> = {}): Bot => {
   const now = new Date().toISOString();
@@ -276,7 +276,7 @@ describe("BotRoster — presence (v3.7.13)", () => {
             status: "running",
             started_at: "2026-01-01T00:00:00Z",
             finished_at: null,
-            error: null,
+            result_summary: "",
           },
         }}
       />,
@@ -298,10 +298,20 @@ describe("BotRoster — presence (v3.7.13)", () => {
             id: "r-2",
             bot_id: "wait-bot",
             conversation_id: "c-2",
-            status: "awaiting_approval",
+            // v3.7.13 — UX-2. The Rust BotRunStatus
+            // enum today only has Running /
+            // Succeeded / Failed / Cancelled. The
+            // presence() function also accepts the
+            // 6-state "awaiting_approval" / "queued"
+            // values the BotAvatar already speaks,
+            // because the roster wants the same
+            // vocabulary as the avatar. Pin the
+            // cast via `as` so the test compiles
+            // against today's narrower enum.
+            status: "awaiting_approval" as BotRunStatus,
             started_at: "2026-01-01T00:00:00Z",
             finished_at: null,
-            error: null,
+            result_summary: "",
           },
         }}
       />,
@@ -323,10 +333,10 @@ describe("BotRoster — presence (v3.7.13)", () => {
             id: "r-3",
             bot_id: "q-bot",
             conversation_id: "c-3",
-            status: "queued",
+            status: "queued" as BotRunStatus,
             started_at: "2026-01-01T00:00:00Z",
             finished_at: null,
-            error: null,
+            result_summary: "",
           },
         }}
       />,
@@ -351,7 +361,7 @@ describe("BotRoster — presence (v3.7.13)", () => {
             status: "succeeded",
             started_at: "2026-01-01T00:00:00Z",
             finished_at: "2026-01-01T00:01:00Z",
-            error: null,
+            result_summary: "ok",
           },
         }}
       />,
