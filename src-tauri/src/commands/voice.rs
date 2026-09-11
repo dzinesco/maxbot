@@ -8,21 +8,22 @@
 //!
 //! ## STT provider
 //!
-//! OpenAI Whisper via `https://api.openai.com/v1/audio/transcriptions`.
-//! The API key comes from `Settings.openai_api_key`; we don't add
-//! a new `voice_stt_api_key` field because every Tyler-style
-//! install that uses the OpenAI provider for chat has the same
-//! key. If a future v2.x release wants a separate key, the right
-//! path is `add_column_if_missing("settings", "voice_stt_api_key",
-//! "TEXT")` plus a new `Settings` field — both additive.
+//! MiniMax's native STT endpoint `POST https://api.minimax.io/v1/speech_to_text`
+//! (model `asr-1.0`). The API key comes from `Settings.minimax_api_key` —
+//! the same key the LLM provider uses. No new field is added; STT
+//! reuses the existing one. If a future v2.x release wants a separate
+//! key, the right path is `add_column_if_missing("settings",
+//! "voice_stt_api_key", "TEXT")` plus a new `Settings` field — both
+//! additive.
 //!
 //! ## Request shape
 //!
 //! The MediaRecorder API in the webview produces `audio/webm`
-//! (Opus) blobs by default. Whisper accepts `webm` directly, so we
-//! pass the raw bytes through as a multipart `file` field. The
-//! `model` field is set to `whisper-1` (the only Whisper model
-//! OpenAI exposes for the transcriptions endpoint today).
+//! (Opus) blobs by default. MiniMax STT accepts `opus` (and many
+//! other formats) directly, so we pass the raw bytes through as a
+//! multipart `file` field. The `model` form field is set to
+//! `asr-1.0` (the only model the MiniMax `/v1/speech_to_text`
+//! endpoint exposes today).
 //!
 //! ## Testing
 //!
@@ -123,13 +124,13 @@ pub(crate) async fn audio_to_text_impl(
         .map_err(|e| format!("STT failed: settings load join: {e}"))?
         .map_err(|e| format!("STT failed: settings load: {e}"))?;
     let api_key = settings
-        .openai_api_key
+        .minimax_api_key
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .ok_or_else(|| {
-            "STT failed: OpenAI API key not configured. \
-             Open Settings → Voice → OpenAI API key."
+            "STT failed: MiniMax API key not configured. \
+             Open Settings → Providers → MiniMax."
                 .to_string()
         })?
         .to_string();
@@ -161,11 +162,11 @@ pub(crate) async fn transcribe_audio_impl(
         .map_err(|e| format!("STT failed: settings load join: {e}"))?
         .map_err(|e| format!("STT failed: settings load: {e}"))?;
     let api_key = settings
-        .openai_api_key
+        .minimax_api_key
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .ok_or_else(|| "STT failed: OpenAI API key not configured".to_string())?
+        .ok_or_else(|| "STT failed: MiniMax API key not configured".to_string())?
         .to_string();
     let transcript = stt::transcribe(&api_key, &audio_bytes, &mime_type)
         .await
@@ -207,9 +208,10 @@ mod stt {
         std::sync::Mutex::new(());
 
     /// Production HTTP path. Uses `reqwest` (already a dependency)
-    /// to send a multipart form to OpenAI. Returns a plain
-    /// `String` error so the caller can prefix it with "STT failed:"
-    /// without worrying about non-`std::error::Error` sources.
+    /// to send a multipart form to MiniMax's `/v1/speech_to_text`
+    /// endpoint. Returns a plain `String` error so the caller can
+    /// prefix it with "STT failed:" without worrying about
+    /// non-`std::error::Error` sources.
     ///
     /// In test builds, the override short-circuits the network
     /// call so unit tests run offline.
@@ -224,7 +226,7 @@ mod stt {
                 // Sanity-check: production arguments should
                 // still be passed through. A regression where
                 // the command stops forwarding the audio buffer
-                // would surface here.
+                // to MiniMax would surface here.
                 assert!(!audio_bytes.is_empty());
                 assert!(!mime_type.is_empty());
                 assert!(!api_key.is_empty());
@@ -236,15 +238,14 @@ mod stt {
             .mime_str(mime_type)
             .map_err(|e| format!("mime: {e}"))?;
         let form = reqwest::multipart::Form::new()
-            .text("model", "whisper-1")
-            .text("response_format", "json")
+            .text("model", "asr-1.0")
             .part("file", part);
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(60))
             .build()
             .map_err(|e| format!("client build: {e}"))?;
         let resp = client
-            .post("https://api.openai.com/v1/audio/transcriptions")
+            .post("https://api.minimax.io/v1/speech_to_text")
             .bearer_auth(api_key)
             .multipart(form)
             .send()
@@ -282,10 +283,10 @@ mod tests {
         let dir = TempDir::new().expect("tempdir");
         let path = dir.path().join("voice.sqlite");
         let db = Database::open(&path).expect("open test db");
-        // Seed an OpenAI key so the production code path doesn't
+        // Seed a MiniMax key so the production code path doesn't
         // bail on "API key not configured" before the stub fires.
         let mut settings = db.load_settings().expect("load default settings");
-        settings.openai_api_key = Some("sk-test".to_string());
+        settings.minimax_api_key = Some("minimax-test-key".to_string());
         db.save_settings(&settings).expect("save seeded settings");
         let computer = Arc::new(ComputerManager::new(&settings));
         let state = Arc::new(AppState {
@@ -389,9 +390,9 @@ mod tests {
         );
     }
 
-    /// v3.7.14 — A missing OpenAI key surfaces the
+    /// v3.7.15 — A missing MiniMax key surfaces the
     /// user-facing error: the brief specifies the exact text
-    /// (mentioning "OpenAI API key" + the Settings path) so
+    /// (mentioning "MiniMax API key" + the Settings path) so
     /// the user can find the field. This test guards against
     /// the error text regressing to a generic "key missing".
     #[tokio::test]
@@ -400,7 +401,7 @@ mod tests {
         let dir = TempDir::new().expect("tempdir");
         let path = dir.path().join("voice.sqlite");
         let db = Database::open(&path).expect("open test db");
-        // Deliberately leave openai_api_key unset on this
+        // Deliberately leave minimax_api_key unset on this
         // fresh DB so the production code path returns the
         // missing-key error.
         let computer = Arc::new(ComputerManager::new(&db.load_settings().expect("load default settings")));
@@ -417,8 +418,8 @@ mod tests {
         assert!(result.is_err(), "missing key must error");
         let err = result.unwrap_err();
         assert!(
-            err.contains("OpenAI API key"),
-            "expected 'OpenAI API key' in error, got: {err}"
+            err.contains("MiniMax API key"),
+            "expected 'MiniMax API key' in error, got: {err}"
         );
         assert!(
             err.contains("Settings"),

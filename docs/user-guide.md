@@ -45,20 +45,20 @@ tool calls) to the clipboard.
   <code>Samantha</code> (high-quality en-US, ships with every macOS
   install).
 
-### VoiceMode (v3.7.14)
+### VoiceMode (v3.7.15)
 
 VoiceMode is the inbound half of the voice loop. A click-to-start /
 click-to-stop mic in the chat header captures your voice, ships the
-audio to OpenAI Whisper for transcription, and dispatches the
-transcript as a regular user message — the LLM response streams in
-just like a typed message would.
+audio to MiniMax's native STT endpoint for transcription, and
+dispatches the transcript as a regular user message — the LLM
+response streams in just like a typed message would.
 
 - Click the <kbd>🎤</kbd> button next to the TTS toolbar to start
   recording. A pulsing red dot + a thin "Listening…" pill with a
   level meter appears. The meter fills left-to-right as you talk
   so you can see the mic is picking up your voice.
 - Click the button again (now <kbd>⏹</kbd>) to stop. The "Transcribing…"
-  indicator shows briefly while the audio is sent to Whisper.
+  indicator shows briefly while the audio is sent to MiniMax.
 - The transcript auto-sends as a user message. No need to touch the
   Composer — the existing `sendMessage` pipeline (request id,
   state, tool calls) takes over from there.
@@ -66,12 +66,11 @@ just like a typed message would.
   (the prompt is enabled by the `NSMicrophoneUsageDescription` key
   in the bundled Info.plist). Click <kbd>Allow</kbd>; subsequent
   clicks skip the prompt.
-- API key: VoiceMode uses the same OpenAI API key as the chat
-  provider. Set it in the Settings palette under "Voice → OpenAI API
-  key" (or under Settings → Providers → OpenAI; both paths write to
-  the same row). The first time you click the mic without a key
-  configured, the error is "OpenAI API key not configured: open
-  Settings → Voice → OpenAI API key."
+- API key: VoiceMode uses the same MiniMax API key as the chat
+  provider. Set it in the Settings palette under "Providers →
+  MiniMax". The first time you click the mic without a key
+  configured, the error is "MiniMax API key not configured: open
+  Settings → Providers → MiniMax."
 - VoiceMode is the speech-to-text companion to TTS: SPEAK reads
   the LLM response out loud, MIC captures your next message. They
   share the chat-header toolbar so the read/write pair is one click
