@@ -67,29 +67,41 @@ impl LoopdHandle {
     }
 }
 
-/// Snapshot of the loopd state for the UI. Read-only — every field is
-/// derived from STATE.json + `kill(pid, 0)`.
+/// v3.7.17 Slice 3 — minimal poll shape. The UI's 2-second tick
+/// pulls ONLY these fields. Full TASK.md + journal + turn counters
+/// are loaded on explicit Read (`loopd_read_task` / `loopd_read_journal`),
+/// not on every tick. The full STATE.json is read at most once per
+/// tick; the body bytes and journal markdown can be KB and don't
+/// change every 2s — the cost of pulling them on every tick is
+/// real CPU + serialization time the UI doesn't need.
+///
+/// Per Tyler's Slice 3 brief: "LoopPanel 2s poll returns ONLY
+/// { pid, state, task_status, task_excerpt_len }. Full TASK.md /
+/// journal only on explicit Read, not every tick."
 #[derive(Debug, Clone, Serialize)]
 pub struct LoopdStatus {
     /// "alive" — STATE.json's pid is currently a live process.
-    /// "dead"  — STATE.json exists but its pid is gone (or STATE.json's
-    ///           pid field is missing/unparseable).
-    /// "no_state" — STATE.json doesn't exist yet (supervisor never ran).
+    /// "dead"  — STATE.json exists but its pid is gone.
+    /// "no_state" — STATE.json doesn't exist yet.
     pub state: &'static str,
     pub alive: bool,
     pub pid: Option<u32>,
-    pub turn: Option<u64>,
-    pub completed_turn: Option<u64>,
+    /// Current TASK.md `status:` line, or "" if TASK.md doesn't exist
+    /// yet. The renderer derives the pill color from this string.
+    pub task_status: String,
+    /// Length of the TASK.md body in bytes (UTF-8 char count). Cheap
+    /// to compute and gives the renderer enough to decide "the task
+    /// body changed since last full Read" without re-parsing markdown.
+    pub task_excerpt_len: u64,
     pub last_heartbeat: Option<String>,
     pub age_secs: Option<i64>,
-    pub started_at: Option<String>,
-    pub run_id: Option<String>,
-    pub last_action_id: Option<String>,
-    /// Path the supervisor was pointed at. Useful for "where do I
-    /// look?" debugging in the UI's tooltip.
+    /// Path the supervisor was pointed at. Useful for the UI's
+    /// tooltip and for "where do I look?" debugging.
     pub loop_dir: String,
 }
 
+/// Full TASK.md frontmatter + body. Returned by `loopd_read_task` on
+/// explicit Read (initial mount + manual Refresh).
 #[derive(Debug, Clone, Serialize)]
 pub struct LoopdTask {
     pub status: String,
@@ -98,6 +110,8 @@ pub struct LoopdTask {
     pub exists: bool,
 }
 
+/// Last journal heading + actions + note. Returned by
+/// `loopd_read_journal` on explicit Read.
 #[derive(Debug, Clone, Serialize)]
 pub struct LoopdJournal {
     pub date: String,
@@ -118,24 +132,66 @@ fn resolve_loop_dir(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(data_dir.join("loop"))
 }
 
-fn resolve_loopd_binary(app: &AppHandle) -> Result<PathBuf, String> {
-    // The Mac app's binary is `maxbot`; `maxbot_loopd` is its sibling in
-    // the same target directory. In dev that's
-    // `src-tauri/target/debug/`; in a packaged `.app` it's inside
-    // `Contents/MacOS/`. The Cargo.toml already declares both as
-    // `[[bin]]` targets — `cargo build` produces both side-by-side.
-    //
-    // Tyler explicitly excluded shipping/bundling from Slice 2 — the
-    // loopd is a dev artifact today. When the bundling slice lands,
-    // this resolver will need to look inside `Contents/Resources/` or
-    // similar. For now: sibling-of-current-exe is correct for both dev
-    // and the existing /Applications install (if both binaries were
-    // ever packaged together).
+/// v3.7.17 Slice 3 — bundled binary resolver. In a packaged
+/// `MaxBot.app`, `maxbot_loopd` sits next to `maxbot` in
+/// `Contents/MacOS/`. In dev (`cargo run`), both binaries sit in
+/// `target/debug/` (or `release/`). This helper covers both with
+/// one rule: "is `maxbot_loopd` next to the running `maxbot`?".
+///
+/// Tauri 2's `bundle.externalBin` declaration places the sidecar
+/// next to the host binary (no target-triple suffix in the bundle),
+/// so `parent().join("maxbot_loopd")` is correct for both layouts.
+///
+/// Per Tyler's Slice 3 brief: "loopd_start resolves that bundled
+/// path first, then a documented dev fallback (target/debug).
+/// Never PATH-only in production." We never search `$PATH` —
+/// the binary is always located via filesystem convention.
+pub(crate) fn resolve_bundled_loopd_path(exe_dir: &Path) -> Option<PathBuf> {
+    let candidate = exe_dir.join("maxbot_loopd");
+    if candidate.is_file() {
+        Some(candidate)
+    } else {
+        None
+    }
+}
+
+/// Resolve the `maxbot_loopd` binary path.
+///
+/// 1. **Bundled / side-by-side:** next to the running `maxbot`
+///    binary (`Contents/MacOS/maxbot_loopd` in a packaged `.app`;
+///    `target/debug/maxbot_loopd` next to a `cargo run`-launched
+///    `maxbot`). Same lookup rule covers both.
+/// 2. **Dev fallback:** `src-tauri/target/{debug,release}/maxbot_loopd`.
+///    Used when the user runs the Tauri app from a build dir that
+///    isn't the same dir `cargo build` put the binary in (e.g.
+///    `cargo tauri dev` from a worktree, or running the binary
+///    straight from `target/release` without `cargo run`).
+///
+/// Never consults `$PATH`. Never reads symlinks to a different
+/// version. The user is responsible for putting the binary
+/// somewhere this resolver looks.
+fn resolve_loopd_binary() -> Result<PathBuf, String> {
     let exe = std::env::current_exe().map_err(|e| format!("current_exe: {e}"))?;
-    let dir = exe
-        .parent()
-        .ok_or_else(|| "current_exe has no parent".to_string())?;
-    Ok(dir.join("maxbot_loopd"))
+    if let Some(dir) = exe.parent() {
+        if let Some(p) = resolve_bundled_loopd_path(dir) {
+            return Ok(p);
+        }
+    }
+    // Dev fallback: search both profiles so `cargo build --release`
+    // works without re-running `--bin maxbot_loopd` from a debug dir.
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    for profile in &["debug", "release"] {
+        let candidate = manifest_dir.join("target").join(profile).join("maxbot_loopd");
+        if candidate.is_file() {
+            return Ok(candidate);
+        }
+    }
+    Err(format!(
+        "maxbot_loopd not found. Looked next to current_exe ({}) and in src-tauri/target/{{debug,release}}/. \
+         Build it with `cargo build --bin maxbot_loopd` in src-tauri/, or place the bundled sidecar at \
+         MaxBot.app/Contents/MacOS/maxbot_loopd.",
+        exe.display()
+    ))
 }
 
 fn pid_alive(pid: u32) -> bool {
@@ -289,29 +345,40 @@ fn read_journal(dir: &Path, date: &str) -> LoopdJournal {
 // --- Tauri commands ----------------------------------------------------
 
 /// Build a `LoopdStatus` from a loop dir + an optional pid-alive hint.
+/// Build a `LoopdStatus` from a loop dir + an optional pid-alive hint.
 /// Extracted so integration tests can exercise the read path without
 /// needing an `AppHandle`. The hint is "the caller already knows
 /// whether THIS pid is alive" — used by `loopd_start`'s
 /// idempotency check to avoid a redundant `kill(pid, 0)`.
+///
+/// v3.7.17 Slice 3 — minimal poll shape. Reads STATE.json for the
+/// daemon's pid + heartbeat, and reads the byte length of TASK.md's
+/// body for "did the task change?" Without parsing the markdown
+/// frontmatter on every 2s tick. `task_status` and `task_excerpt_len`
+/// are derived from a tiny peek at TASK.md, not the full parse — the
+/// renderer calls `loopd_read_task` on explicit Read to get the body.
 pub(crate) fn status_from_dir(dir: &Path, alive_hint: Option<u32>) -> LoopdStatus {
     let state = read_state(dir);
     let mut out = LoopdStatus {
         state: "no_state",
         alive: false,
         pid: None,
-        turn: None,
-        completed_turn: None,
+        task_status: String::new(),
+        task_excerpt_len: 0,
         last_heartbeat: None,
         age_secs: None,
-        started_at: None,
-        run_id: None,
-        last_action_id: None,
         loop_dir: dir.display().to_string(),
     };
 
     let v = match state {
         Some(v) => v,
-        None => return out,
+        None => {
+            // No STATE.json — but TASK.md may still exist from a
+            // previous run. Peek at it for the renderer.
+            out.task_status = peek_task_status(dir);
+            out.task_excerpt_len = peek_task_body_len(dir);
+            return out;
+        }
     };
 
     let pid = v
@@ -327,20 +394,6 @@ pub(crate) fn status_from_dir(dir: &Path, alive_hint: Option<u32>) -> LoopdStatu
     out.pid = pid;
     out.alive = alive;
     out.state = if alive { "alive" } else { "dead" };
-    out.turn = v.get("turn").and_then(|x| x.as_u64());
-    out.completed_turn = v.get("completed_turn").and_then(|x| x.as_u64());
-    out.started_at = v
-        .get("started_at")
-        .and_then(|x| x.as_str())
-        .map(|s| s.to_string());
-    out.run_id = v
-        .get("run_id")
-        .and_then(|x| x.as_str())
-        .map(|s| s.to_string());
-    out.last_action_id = v
-        .get("last_action_id")
-        .and_then(|x| x.as_str())
-        .map(|s| s.to_string());
     let heartbeat = v
         .get("last_heartbeat")
         .and_then(|x| x.as_str())
@@ -355,7 +408,67 @@ pub(crate) fn status_from_dir(dir: &Path, alive_hint: Option<u32>) -> LoopdStatu
             out.age_secs = Some(now - ts);
         }
     }
+    out.task_status = peek_task_status(dir);
+    out.task_excerpt_len = peek_task_body_len(dir);
     out
+}
+
+/// Cheap peek at TASK.md's `status:` line. Returns "" if the file is
+/// missing or the frontmatter is malformed. This intentionally does
+/// NOT parse the whole frontmatter — the renderer's `loopd_read_task`
+/// does that on explicit Read. We just want the status pill color.
+fn peek_task_status(dir: &Path) -> String {
+    let p = dir.join("TASK.md");
+    let Ok(raw) = std::fs::read_to_string(&p) else {
+        return String::new();
+    };
+    let mut lines = raw.lines();
+    let Some(first) = lines.next() else {
+        return String::new();
+    };
+    if first.trim() != "---" {
+        return String::new();
+    }
+    for line in lines {
+        if line.trim() == "---" {
+            break;
+        }
+        if let Some(rest) = line.strip_prefix("status:") {
+            return rest.trim().to_string();
+        }
+    }
+    String::new()
+}
+
+/// Cheap byte-length peek at TASK.md's body (everything after the
+/// closing `---` of the frontmatter, trimmed). Used to drive the
+/// "task changed since last full Read" hint in the UI without
+/// pulling the body on every 2s tick.
+fn peek_task_body_len(dir: &Path) -> u64 {
+    let p = dir.join("TASK.md");
+    let Ok(raw) = std::fs::read_to_string(&p) else {
+        return 0;
+    };
+    let mut lines = raw.lines();
+    let Some(first) = lines.next() else {
+        return 0;
+    };
+    if first.trim() != "---" {
+        // No frontmatter — the whole file is body.
+        return raw.trim().len() as u64;
+    }
+    let mut in_body = false;
+    let mut body_len = 0u64;
+    for line in lines {
+        if !in_body && line.trim() == "---" {
+            in_body = true;
+            continue;
+        }
+        if in_body {
+            body_len = body_len.saturating_add(line.len() as u64 + 1); // +1 for \n
+        }
+    }
+    body_len
 }
 
 #[tauri::command]
@@ -390,7 +503,8 @@ pub async fn loopd_start(
         }
     }
 
-    let bin = resolve_loopd_binary(&app)?;
+    let bin = resolve_loopd_binary()?;
+    log::info!("loopd_start: resolved binary = {}", bin.display());
     let child = spawn_loopd(&bin, &dir)?;
 
     if let Some(prev) = handle.replace(child) {
@@ -727,13 +841,85 @@ mod tests {
             "completed_turn": 5
         });
         std::fs::write(dir.join("STATE.json"), serde_json::to_string_pretty(&state).unwrap()).unwrap();
+        // Drop a TASK.md so the peek paths have something to read.
+        std::fs::write(
+            dir.join("TASK.md"),
+            "---\nstatus: done\nupdated_at: 2026-09-11T18:00:00+00:00\n---\n\ntask body here\n",
+        )
+        .unwrap();
         let s = status_from_dir(&dir, None);
         assert_eq!(s.state, "dead");
         assert!(!s.alive);
         assert_eq!(s.pid, Some(9_999_999));
-        assert_eq!(s.turn, Some(5));
-        assert_eq!(s.completed_turn, Some(5));
+        // v3.7.17 Slice 3 minimal poll shape — turn / completed_turn
+        // are NOT in the polling response anymore. The renderer
+        // asks for full info on explicit Read.
+        assert_eq!(s.task_status, "done");
+        assert!(s.task_excerpt_len > 0);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn peek_task_status_reads_frontmatter_status() {
+        let dir = fresh_loop_dir("peek-status");
+        std::fs::write(
+            dir.join("TASK.md"),
+            "---\nstatus: blocked\nupdated_at: 2026-09-11T18:00:00+00:00\n---\n\nbody\n",
+        )
+        .unwrap();
+        assert_eq!(peek_task_status(&dir), "blocked");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn peek_task_status_returns_empty_when_no_file() {
+        let dir = fresh_loop_dir("peek-status-empty");
+        assert_eq!(peek_task_status(&dir), "");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn peek_task_body_len_includes_only_body() {
+        let dir = fresh_loop_dir("peek-bodylen");
+        std::fs::write(
+            dir.join("TASK.md"),
+            "---\nstatus: running\nupdated_at: x\n---\n\nthis is the body of the task\n",
+        )
+        .unwrap();
+        let len = peek_task_body_len(&dir);
+        assert!(len > 0, "len should be > 0 for a real body, got {len}");
+        // Should not include the frontmatter bytes (the `status: running` line etc).
+        let full = std::fs::read_to_string(dir.join("TASK.md")).unwrap();
+        assert!(len < full.len() as u64, "peek should exclude frontmatter, got {len} >= {}", full.len());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn resolve_bundled_loopd_path_finds_sibling() {
+        // Simulate the packaged layout: MaxBot.app/Contents/MacOS/
+        //   maxbot
+        //   maxbot_loopd
+        let root = make_dir("resolve-bundled");
+        let contents = root.join("Contents").join("MacOS");
+        std::fs::create_dir_all(&contents).unwrap();
+        // Touch a fake "main" binary and a fake "loopd" binary.
+        std::fs::write(contents.join("maxbot"), b"#!/bin/sh\n").unwrap();
+        std::fs::write(contents.join("maxbot_loopd"), b"#!/bin/sh\n").unwrap();
+        let resolved = resolve_bundled_loopd_path(&contents);
+        assert_eq!(resolved, Some(contents.join("maxbot_loopd")));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn resolve_bundled_loopd_path_returns_none_when_absent() {
+        // Empty dir, no maxbot_loopd.
+        let root = make_dir("resolve-bundled-empty");
+        let contents = root.join("Contents").join("MacOS");
+        std::fs::create_dir_all(&contents).unwrap();
+        std::fs::write(contents.join("maxbot"), b"x").unwrap();
+        let resolved = resolve_bundled_loopd_path(&contents);
+        assert_eq!(resolved, None);
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]

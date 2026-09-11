@@ -961,12 +961,19 @@ export interface GoogleOauthStatus {
   scopes: string[];
 }
 
-// v3.7.17 Slice 2 — UI surface for `maxbot_loopd`. Mirrors
-// the Rust types in `commands::loopd` (LoopdStatus /
-// LoopdTask / LoopdJournal). Read-only with respect to
-// `loop/io` — these are the IPC shapes the renderer polls.
+// v3.7.17 Slice 3 — minimal poll shape. The LoopPanel's
+// 2-second tick pulls ONLY these fields. Full TASK.md +
+// journal are loaded on explicit Read
+// (`loopd_read_task` / `loopd_read_journal`), not on every
+// tick. Per Tyler's Slice 3 brief: "LoopPanel 2s poll returns
+// ONLY { pid, state, task_status, task_excerpt_len }. Full
+// TASK.md / journal only on explicit Read, not every tick."
+//
+// The full body / journal markdown can be KB and don't change
+// every 2s — pulling them on every tick was real CPU +
+// serialization cost the UI didn't need.
 
-/** Snapshot of `maxbot_loopd` for the Loop panel.
+/** Minimal snapshot of `maxbot_loopd`. Polled every 2s.
  *  `state` is one of:
  *  - `"alive"`     — STATE.json's pid is currently a live process.
  *  - `"dead"`      — STATE.json exists but its pid is gone.
@@ -975,19 +982,22 @@ export interface LoopdStatus {
   state: "alive" | "dead" | "no_state";
   alive: boolean;
   pid: number | null;
-  turn: number | null;
-  completed_turn: number | null;
+  /** Current TASK.md `status:` line, or "" if TASK.md doesn't exist. */
+  task_status: string;
+  /** Length of the TASK.md body in bytes (UTF-8 char count). The
+   *  renderer compares against its cached length to decide whether
+   *  the body has changed since the last explicit Read. */
+  task_excerpt_len: number;
   last_heartbeat: string | null;
   age_secs: number | null;
-  started_at: string | null;
-  run_id: string | null;
-  last_action_id: string | null;
+  /** Path the supervisor was pointed at. Useful for the UI's
+   *  tooltip and for "where do I look?" debugging. */
   loop_dir: string;
 }
 
-/** Parsed TASK.md frontmatter + body. `exists=false` means the
- *  file isn't on disk yet (supervisor has never written one —
- *  e.g. on a fresh install the UI hasn't seeded anything). */
+/** Full TASK.md frontmatter + body. Returned by `loopd_read_task`
+ *  on explicit Read (initial mount + manual Refresh).
+ *  `exists=false` means the file isn't on disk yet. */
 export interface LoopdTask {
   status: string;
   body: string;
@@ -996,6 +1006,7 @@ export interface LoopdTask {
 }
 
 /** Last journal entry (today's date) for the Loop panel.
+ *  Returned by `loopd_read_journal` on explicit Read.
  *  `last_heading` is the most recent `## Turn N @ t` line.
  *  `last_actions` are the bullets under the most recent
  *  `### Actions` section. `last_note` is the prose under the

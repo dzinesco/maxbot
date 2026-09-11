@@ -1100,20 +1100,25 @@ export async function googleOauthStatus(): Promise<GoogleOauthStatus> {
   return invoke<GoogleOauthStatus>("google_oauth_status_cmd");
 }
 
-// ---- v3.7.17 Slice 2 — `maxbot_loopd` UI surface ----
+// ---- v3.7.17 Slice 3 — `maxbot_loopd` UI surface ----
 //
-// The Loop panel in the Sidebar polls `loopdStatus` every 2s
-// and calls `loopdStart` / `loopdStop` from its buttons. Read
-// of TASK.md + the last journal heading go through
-// `loopdReadTask` / `loopdReadJournal` so the same panel can
-// show what the supervisor is currently working on.
+// Per Tyler's Slice 3 brief: "LoopPanel 2s poll returns ONLY
+// { pid, state, task_status, task_excerpt_len }. Full TASK.md
+// / journal only on explicit Read, not every tick."
+//
+// The Loop panel calls `loopdStatus` every 2s (the polling
+// surface — cheap), and `loopdReadTask` / `loopdReadJournal`
+// on mount + manual Refresh (the explicit Read surface — KB
+// of markdown that doesn't need to round-trip every tick).
 //
 // All five commands are read-only or process-lifecycle only.
 // They never touch STATE.json, MEMORY.md, or any other loop
 // file directly — every write goes through the supervisor.
 
-/** Snapshot of `maxbot_loopd` (alive / dead / no_state +
- *  pid / turn / heartbeat). The UI polls this every 2s. */
+/** Minimal snapshot of `maxbot_loopd`. The UI polls this
+ *  every 2s. Returns just the data needed to drive the
+ *  status pill + task-status badge + "task changed since last
+ *  Read" hint — NOT the full body. Per Slice 3. */
 export async function loopdStatus(): Promise<LoopdStatus> {
   return invoke<LoopdStatus>("loopd_status");
 }
@@ -1122,7 +1127,10 @@ export async function loopdStatus(): Promise<LoopdStatus> {
  *  Idempotent — returns the same shape as `loopdStatus`
  *  reflecting the post-spawn state. Throws if the
  *  `maxbot_loopd` binary can't be found (the user is on a
- *  fresh checkout that hasn't been cargo-built yet). */
+ *  fresh checkout that hasn't been cargo-built yet, or the
+ *  sidecar wasn't bundled into MaxBot.app). The Rust side
+ *  resolves the binary via filesystem convention, never
+ *  `$PATH` — see `commands::loopd::resolve_loopd_binary`. */
 export async function loopdStart(): Promise<LoopdStatus> {
   return invoke<LoopdStatus>("loopd_start");
 }
@@ -1137,18 +1145,19 @@ export async function loopdStop(): Promise<LoopdStatus> {
   return invoke<LoopdStatus>("loopd_stop");
 }
 
-/** Read TASK.md frontmatter + body. `exists: false` means
- *  the file isn't on disk yet (supervisor never wrote one —
- *  e.g. before the first turn). The UI shows an empty state
- *  in that case. */
+/** Full TASK.md frontmatter + body. Read on explicit Read
+ *  (initial mount + manual Refresh), NOT on every 2s tick.
+ *  `exists: false` means the file isn't on disk yet
+ *  (supervisor never wrote one — e.g. before the first turn).
+ *  The UI shows an empty state in that case. */
 export async function loopdReadTask(): Promise<LoopdTask> {
   return invoke<LoopdTask>("loopd_read_task");
 }
 
-/** Read today's journal and return the last `## Turn N`
- *  heading + its actions / note. The UI's "Last journal"
- *  line shows this. Date is the supervisor's `today_utc()`
- *  (YYYY-MM-DD), so the renderer doesn't need to compute it. */
+/** Today's journal last `## Turn N` heading + its actions /
+ *  note. Read on explicit Read, NOT on every 2s tick. Date
+ *  is the supervisor's `today_utc()` (YYYY-MM-DD), so the
+ *  renderer doesn't need to compute it. */
 export async function loopdReadJournal(): Promise<LoopdJournal> {
   return invoke<LoopdJournal>("loopd_read_journal");
 }

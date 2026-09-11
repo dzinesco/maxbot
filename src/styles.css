@@ -448,6 +448,25 @@ textarea:focus {
   white-space: pre-wrap;
 }
 
+/* v3.7.17 Slice 3 — the Refresh button sits next to the task
+   body. When the poll's task_excerpt_len differs from the last
+   explicit Read's body length, we surface a `Refresh*` hint so
+   the user knows the body has changed without auto-pulling the
+   markdown on every 2s tick. */
+.loop-panel-btn--refresh {
+  flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.loop-panel-btn--refresh[data-task-changed="true"] {
+  color: #fbbf24;
+  border-color: rgba(251, 191, 36, 0.5);
+}
+
+.loop-panel-btn--refresh[data-task-changed="true"]:hover {
+  background: rgba(251, 191, 36, 0.1);
+}
+
 .loop-panel-journal {
   border-top: 1px dashed var(--border);
   padding-top: 6px;

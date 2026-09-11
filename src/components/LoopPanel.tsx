@@ -1,16 +1,26 @@
-// v3.7.17 Slice 2 — UI surface for `maxbot_loopd`.
+// v3.7.17 Slice 3 — UI surface for `maxbot_loopd`.
 //
-// Mounted in the Sidebar above the footer. Polls
-// `loopdStatus` / `loopdReadTask` / `loopdReadJournal` every
-// 2 seconds and shows the supervisor's current state.
+// Mounted in the Sidebar above the footer.
 //
-// The component is **read-only with respect to the loop's
-// data files**. The only writes are lifecycle calls
-// (`loopdStart` / `loopdStop`) — both of which spawn or kill
-// `maxbot_loopd`. Every actual file write (STATE.json,
-// TASK.md, journal, MEMORY.json) goes through the
-// supervisor's `atomic_write` path; this component never
-// touches those files directly. Per Tyler's Slice 2 brief.
+// Two IPC surfaces, two cadences:
+//
+// 1. POLLING (every 2s): `loopdStatus` returns ONLY the
+//    minimal shape (pid, state, task_status, task_excerpt_len,
+//    last_heartbeat, age_secs). Cheap — drives the status pill
+//    + task-status badge + "task changed since last Read" hint.
+//
+// 2. EXPLICIT READ (mount + manual Refresh button):
+//    `loopdReadTask` + `loopdReadJournal` return the full TASK.md
+//    body and the last journal heading/actions/note. These are
+//    KB-sized markdown that doesn't change every 2s.
+//
+// Per Tyler's Slice 3 brief: "LoopPanel 2s poll returns ONLY
+// { pid, state, task_status, task_excerpt_len }. Full TASK.md /
+// journal only on explicit Read, not every tick."
+//
+// The component is **read-only with respect to the loop's data
+// files**. The only writes are lifecycle calls (`loopdStart` /
+// `loopdStop`) — both of which spawn or kill `maxbot_loopd`.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
@@ -22,16 +32,13 @@ import {
 } from "../lib/tauri";
 import type { LoopdJournal, LoopdStatus, LoopdTask } from "../lib/api";
 
-/** Poll interval for the three IPC calls. 2s matches the
- *  supervisor's `--heartbeat-secs` default, so a turn
- *  starting in the supervisor shows up in the UI within
- *  one poll cycle. Tighter than 2s would burn CPU for
- *  little gain; looser would feel laggy to the user. */
+/** Poll interval for the minimal `loopdStatus` IPC call. 2s
+ *  matches the supervisor's `--heartbeat-secs` default, so a
+ *  turn starting in the supervisor shows up in the UI within
+ *  one poll cycle. Tighter would burn CPU for little gain;
+ *  looser would feel laggy. */
 const POLL_INTERVAL_MS = 2000;
 
-/** Status text shown next to the indicator dot. Kept
- *  short — the Sidebar is ~280px wide and the panel
- *  doesn't get its own row. */
 function statusLabel(s: LoopdStatus | null): {
   text: string;
   tone: "alive" | "dead" | "idle" | "unknown";
@@ -52,58 +59,78 @@ function truncateBody(body: string, max = 240): string {
 }
 
 export function LoopPanel() {
+  // Minimal polling state — updated every 2s.
   const [status, setStatus] = useState<LoopdStatus | null>(null);
+  // Full content state — updated on explicit Read (mount + manual Refresh).
   const [task, setTask] = useState<LoopdTask | null>(null);
   const [journal, setJournal] = useState<LoopdJournal | null>(null);
-  const [busy, setBusy] = useState<"start" | "stop" | null>(null);
+  const [busy, setBusy] = useState<"start" | "stop" | "refresh" | null>(null);
   const [error, setError] = useState<string | null>(null);
-  // Mounted ref prevents a stale poll from setting state after
-  // unmount (the 2s poll can outlive the component if the user
-  // quits while a poll is in flight).
+  // taskLen at last explicit Read. The poll's task_excerpt_len is
+  // compared against this to surface "task changed — refresh to see".
+  const [lastReadTaskLen, setLastReadTaskLen] = useState<number | null>(null);
   const mounted = useRef(true);
 
-  const poll = useCallback(async () => {
+  const readFull = useCallback(async () => {
     if (!mounted.current) return;
-    try {
-      const [s, t, j] = await Promise.all([
-        loopdStatus(),
-        loopdReadTask(),
-        loopdReadJournal(),
-      ]);
-      if (!mounted.current) return;
-      setStatus(s);
-      setTask(t);
-      setJournal(j);
-      setError(null);
-    } catch (e) {
-      if (!mounted.current) return;
-      // Surface the error once; subsequent polls clear it.
-      setError(String(e));
-    }
-  }, []);
-
-  useEffect(() => {
-    mounted.current = true;
-    poll();
-    const id = window.setInterval(poll, POLL_INTERVAL_MS);
-    return () => {
-      mounted.current = false;
-      window.clearInterval(id);
-    };
-  }, [poll]);
-
-  const handleStart = useCallback(async () => {
-    setBusy("start");
+    setBusy("refresh");
     setError(null);
     try {
-      const s = await loopdStart();
-      if (mounted.current) setStatus(s);
+      const [t, j] = await Promise.all([loopdReadTask(), loopdReadJournal()]);
+      if (!mounted.current) return;
+      setTask(t);
+      setJournal(j);
+      setLastReadTaskLen(t.exists ? t.body.length : 0);
     } catch (e) {
       if (mounted.current) setError(String(e));
     } finally {
       if (mounted.current) setBusy(null);
     }
   }, []);
+
+  const poll = useCallback(async () => {
+    if (!mounted.current) return;
+    try {
+      const s = await loopdStatus();
+      if (!mounted.current) return;
+      setStatus(s);
+      setError(null);
+    } catch (e) {
+      if (mounted.current) setError(String(e));
+    }
+  }, []);
+
+  useEffect(() => {
+    mounted.current = true;
+    // First paint: poll the minimal state AND read the full content.
+    // After that, poll keeps going; full content only updates on
+    // explicit Read (Refresh button).
+    poll();
+    readFull();
+    const id = window.setInterval(poll, POLL_INTERVAL_MS);
+    return () => {
+      mounted.current = false;
+      window.clearInterval(id);
+    };
+  }, [poll, readFull]);
+
+  const handleStart = useCallback(async () => {
+    setBusy("start");
+    setError(null);
+    try {
+      const s = await loopdStart();
+      if (mounted.current) {
+        setStatus(s);
+        // Refresh full content too — daemon just started and may
+        // have written TASK.md / journal immediately.
+        await readFull();
+      }
+    } catch (e) {
+      if (mounted.current) setError(String(e));
+    } finally {
+      if (mounted.current) setBusy(null);
+    }
+  }, [readFull]);
 
   const handleStop = useCallback(async () => {
     setBusy("stop");
@@ -121,6 +148,15 @@ export function LoopPanel() {
   const label = statusLabel(status);
   const showStart = status?.state !== "alive";
   const showStop = status?.state === "alive";
+  // "Task changed since last Read" hint. Cheap comparison — the
+  // poll's task_excerpt_len (byte count) vs the readFull's
+  // task.body.length (char count). They diverge by ±1 for non-ASCII
+  // bodies, but the user just wants to know "did something change".
+  const taskChanged =
+    task?.exists === true &&
+    status !== null &&
+    lastReadTaskLen !== null &&
+    status.task_excerpt_len !== lastReadTaskLen;
 
   return (
     <section className="loop-panel" aria-label="Loop supervisor">
@@ -159,29 +195,39 @@ export function LoopPanel() {
         )}
       </header>
 
-      {/* TASK.md preview. `exists=false` means the supervisor
-          has never written one — common on a fresh install or
-          before the first turn. */}
-      {task && task.exists && (
-        <div className="loop-panel-task" title={task.updated_at}>
-          <span className={`loop-panel-pill loop-panel-pill--${task.status || "unknown"}`}>
-            {task.status || "unknown"}
+      {/* TASK.md preview. `exists=false` means the supervisor has
+          never written one. The header row has the status pill +
+          a "Refresh" affordance so the user can pull the latest
+          full body on demand. */}
+      {task && (
+        <div className="loop-panel-task">
+          <span className={`loop-panel-pill loop-panel-pill--${task.status || (status?.task_status ?? "unknown")}`}>
+            {task.status || status?.task_status || "unknown"}
           </span>
           <span className="loop-panel-task-body">
-            {truncateBody(task.body)}
+            {task.exists ? truncateBody(task.body) : "(no TASK.md yet)"}
           </span>
-        </div>
-      )}
-      {task && !task.exists && (
-        <div className="loop-panel-task loop-panel-task--empty">
-          TASK.md: not yet written
+          <button
+            type="button"
+            className="ghost small loop-panel-btn loop-panel-btn--refresh"
+            onClick={readFull}
+            disabled={busy !== null}
+            aria-label="Refresh TASK.md and journal"
+            title={
+              taskChanged
+                ? "Task changed since last Read — click to load new body"
+                : "Refresh TASK.md and journal"
+            }
+            data-task-changed={taskChanged ? "true" : "false"}
+          >
+            {busy === "refresh" ? "…" : taskChanged ? "Refresh*" : "Refresh"}
+          </button>
         </div>
       )}
 
-      {/* Last journal heading + actions. The supervisor's
-          journal is append-only (plain `O_APPEND`); reading it
-          from the UI is fine because nothing on the renderer
-          side touches the journal file. */}
+      {/* Last journal heading + actions. The poll doesn't pull
+          this — the readFull does. So this section renders the
+          last-explicitly-read content. */}
       {journal && journal.exists && journal.last_heading && (
         <div className="loop-panel-journal">
           <div className="loop-panel-journal-heading">

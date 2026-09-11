@@ -4,6 +4,91 @@ All notable changes to MaxBot are documented in this file. The format
 follows [Keep a Changelog](https://keepachangelog.com/) and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## Unreleased — 3.7.17
+
+### Added — `maxbot_loopd` sidecar bundle + Sidebar UI (Slices 1, 2, 3)
+
+The keep-alive loop supervisor is now a bundled sidecar of
+`MaxBot.app`. From the Sidebar's Loop panel, the user can
+start/stop the supervisor, watch its state, and read the
+current TASK.md + last journal entry. Closing MaxBot does
+not kill the supervisor if a turn is in flight — the
+supervisor is detached via `Stdio::null()` + `setsid()` and
+its source-of-truth for "is anything running?" is
+`STATE.json.pid` + `kill(pid, 0)`, not the child handle.
+
+- **`src-tauri/src/loop/{io,daemon,sandbox}/`** — new
+  supervisor module. Files-on-disk is the source of truth
+  (no in-context accumulation); per-turn LLM with a single
+  `NoopModelCaller` for now. Writes go through `atomic_write`
+  (`.tmp` + `fsync` + `rename`), verified safe under SIGKILL
+  in 26 live-binary rounds.
+- **`src-tauri/src/bin/maxbot_loopd.rs`** — CLI binary
+  (`--loop-dir`, `--heartbeat-secs`, `--log-level`).
+- **`src-tauri/src/commands/loopd.rs`** — five Tauri
+  commands (`loopd_status` / `loopd_start` / `loopd_stop` /
+  `loopd_read_task` / `loopd_read_journal`). Read-only with
+  respect to `loop/io` — parses `STATE.json` / `TASK.md` /
+  journal standalone, never imports from `crate::r#loop::io`.
+  Spawns the supervisor via `Command::spawn` with stdio
+  detached and `setsid()` in `pre_exec`. Stops via SIGTERM
+  → 3-second poll → SIGKILL.
+- **`src/components/LoopPanel.tsx`** — Sidebar panel.
+  Polls `loopdStatus` every 2s for the minimal shape (pid,
+  state, task_status, task_excerpt_len, last_heartbeat,
+  age_secs). Reads the full TASK.md body + last journal
+  entry only on explicit Read (initial mount + manual
+  Refresh). The Refresh button highlights when the body has
+  changed since the last Read.
+- **`src-tauri/tauri.conf.json`** — `bundle.externalBin`
+  declares `binaries/maxbot_loopd` (resolved to
+  `binaries/maxbot_loopd-<target-triple>` at bundle time).
+  Tauri copies the sidecar to `Contents/MacOS/` of the
+  packaged `.app` and codesigns it with the same ad-hoc /
+  runtime flags as the host binary.
+- **`src-tauri/binaries/.gitkeep`** — placeholder so the
+  dir is tracked. The actual `maxbot_loopd-<triple>`
+  binary is NOT checked in; the release pipeline builds it
+  and stages it before `cargo tauri build`.
+
+**Build command for the sidecar** (release pipeline):
+
+```sh
+cargo build --release --bin maxbot_loopd --target aarch64-apple-darwin
+cp src-tauri/target/aarch64-apple-darwin/release/maxbot_loopd \
+   src-tauri/binaries/maxbot_loopd-aarch64-apple-darwin
+cargo tauri build
+```
+
+### Changed — Renderer `loopdStatus` IPC shape (Slice 3)
+
+The Sidebar's 2-second poll pulls ONLY the minimal
+`LoopdStatus` shape. Full TASK.md body + last journal
+entry are loaded on explicit Read. The full STATE.json
+counters (`turn`, `completed_turn`, `started_at`, `run_id`,
+`last_action_id`) are NOT in the polling response anymore
+— they were KB-sized reads on every tick that the renderer
+didn't need.
+
+### Bundle identifier
+
+Bundle identifier is `com.maxbot.app` in this branch
+(d964581 baseline). The v3.7.17 production identifier
+rename (`com.maxbot.app` → `com.maxbot.app.devtools`) is
+on `release/3.7.17-bundle-id-rename` and merges separately.
+The `loopd` binary works with either identifier; the loop
+dir is `<app_data_dir>/loop/`, which Tauri resolves
+per-app.
+
+### Out of scope (still parked)
+
+- Plaintext `computer_passphrase` in SQLite settings row.
+- Orphan VM `maxbot-bot-d42b8c1c-…`.
+- `tauri.conf.json` trailing comma.
+- WebKit memory leak "fixes" other than the v3.7.17
+  identifier rename.
+- Sandbox policy edits.
+
 ## v3.7.16 — 2026-09-10
 
 ### Changed — Multi-VM VNC port allocation (Hardening item #3)

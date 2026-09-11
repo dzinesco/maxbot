@@ -1,0 +1,6 @@
+Placeholder so the directory is tracked. The actual sidecar
+binary `maxbot_loopd-<target-triple>` is NOT checked in — see
+the `bundle.externalBin` note in `src-tauri/tauri.conf.json`
+for the build command. Without a binary present,
+`cargo tauri build` will fail with "external binary not found";
+that's expected and intentional for dev checkouts.

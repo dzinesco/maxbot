@@ -9,3 +9,12 @@ src-tauri/gen/
 .env
 .env.local
 
+# v3.7.17 Slice 3 — bundled maxbot_loopd sidecar binary.
+# The release pipeline builds it and stages it at
+# src-tauri/binaries/maxbot_loopd-<target-triple> before
+# cargo tauri build. Dev checkouts don't have it; build
+# with `cargo build --bin maxbot_loopd` if you need it locally.
+src-tauri/binaries/maxbot_loopd-*
+# TypeScript incremental build cache (regenerated on every
+# `tsc --noEmit` / build). Safe to delete; rebuilds in seconds.
+*.tsbuildinfo
