@@ -17,7 +17,7 @@
 // disabled>`) is reusable.
 
 import { useEffect, useMemo, useRef } from "react";
-import type { Bot, Conversation, Message } from "../lib/api";
+import type { Bot, Computer, Conversation, Message } from "../lib/api";
 import {
   MessageBubble,
   TTSToolbar,
@@ -55,6 +55,17 @@ interface ChatViewProps {
   /** Callback when the user clicks the "New conversation"
    *  button in the scoped list. */
   onNewConversation?: () => void;
+  /** v3.7.13 — UX-7. The active Bot's Computer
+   *  Use VM, if one exists. The chat header
+   *  surfaces a "PC" pill when the VM is
+   *  provisioning / stopped / errored, and the
+   *  pill click target opens the Computer panel.
+   *  `null` means "no VM yet" — no pill. */
+  activeComputer?: Computer | null;
+  /** v3.7.13 — UX-7. Fires when the user
+   *  clicks the "PC" pill. The parent opens
+   *  the Computer panel for `activeBot.id`. */
+  onOpenComputer?: (botId: string) => void;
 }
 
 export function ChatView({
@@ -66,6 +77,8 @@ export function ChatView({
   activeConversationId,
   onSelectConversation,
   onNewConversation,
+  activeComputer,
+  onOpenComputer,
 }: ChatViewProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -115,6 +128,36 @@ export function ChatView({
               {stateLabel(activeBot.state)}
             </div>
           </div>
+          {/*
+            v3.7.13 — UX-7. Computer pill. The pill
+            is hidden when the VM is running (the
+            user can already see the Bot is up —
+            surfacing the chip would be visual
+            noise). When the VM is provisioning /
+            stopped / errored, the pill shows the
+            state and a single click target that
+            opens the Computer panel. The click
+            target is the same one the sidebar
+            uses; ChatView delegates to the
+            parent's `onOpenComputer(botId)`.
+          */}
+          {activeComputer &&
+            activeComputer.state !== "running" &&
+            onOpenComputer && (
+              <button
+                type="button"
+                className="chat-view__pc-pill"
+                data-testid="chat-view-pc-pill"
+                data-state={activeComputer.state}
+                onClick={() => onOpenComputer(activeBot.id)}
+                title={`Open the Computer panel (${activeComputer.state})`}
+              >
+                <span className="chat-view__pc-pill-dot" aria-hidden />
+                <span>
+                  PC · {stateLabelForComputer(activeComputer.state)}
+                </span>
+              </button>
+            )}
           {scopedConversations && scopedConversations.length > 0 && (
             <ConversationPills
               conversations={scopedConversations}
@@ -233,5 +276,26 @@ function stateLabel(state: Bot["state"]): string {
     case "idle":
     default:
       return "Idle";
+  }
+}
+
+// v3.7.13 — UX-7. Computer-state verb for the
+// chat-view PC pill. The pill surfaces
+// non-running states (provisioning / stopped /
+// error); the "running" case is hidden entirely
+// so the pill doesn't add visual noise when
+// everything is fine.
+function stateLabelForComputer(state: string): string {
+  switch (state) {
+    case "provisioning":
+      return "provisioning";
+    case "stopped":
+      return "stopped";
+    case "error":
+      return "errored";
+    case "running":
+      return "running";
+    default:
+      return state;
   }
 }
