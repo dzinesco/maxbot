@@ -32,6 +32,7 @@
 //! command's wire shape (the returned string is the transcript,
 //! not the raw Whisper JSON).
 
+use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use serde::{Deserialize, Serialize};
 use tauri::State;
 
@@ -44,6 +45,17 @@ use crate::AppState;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct WhisperResponse {
     text: String,
+}
+
+/// v3.7.14 — Public wire shape returned by `audio_to_text`.
+/// The renderer drops the inner `text` straight into the chat
+/// as a user message. The struct exists (vs. a plain `String`)
+/// so future STT metadata (language, duration, confidence)
+/// can be added without breaking the IPC contract.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenAITranscribeResponse {
+    pub text: String,
 }
 
 /// Public command: take raw audio bytes + their MIME type
@@ -59,6 +71,72 @@ pub async fn transcribe_audio(
     mime_type: String,
 ) -> Result<String, String> {
     transcribe_audio_impl(state.inner(), audio_bytes, mime_type).await
+}
+
+/// v3.7.14 — Public command: take a base64-encoded audio blob
+/// (the wire shape the new `VoiceToolbar.tsx` produces from
+/// `MediaRecorder` in the chat header) and POST it to OpenAI
+/// Whisper, returning the transcript wrapped in
+/// `OpenAITranscribeResponse`.
+///
+/// The base64 path is preferred over the raw-bytes path for
+/// the renderer because JSON is the only type Tauri can carry
+/// across the IPC boundary — `Vec<u8>` requires the
+/// `Array.from(uint8Array)` round-trip the existing
+/// `transcribeAudio` wrapper does, which is a few extra
+/// characters the new `audioToText` wrapper doesn't have to
+/// write. The decode here is symmetric and cheap.
+///
+/// Errors come back as a plain `String` so the renderer can
+/// show them in a toast without unwrapping a structured error
+/// type. A missing API key is a separate, clear error: the
+/// brief specifies the exact text the user sees.
+#[tauri::command]
+pub async fn audio_to_text(
+    state: State<'_, AppState>,
+    audio_base64: String,
+    mime_type: String,
+) -> Result<OpenAITranscribeResponse, String> {
+    audio_to_text_impl(state.inner(), audio_base64, mime_type).await
+}
+
+/// Inner async body for `audio_to_text`. Factored out of the
+/// `#[tauri::command]` wrapper so unit tests can hit it
+/// without spinning up a Tauri `App`.
+pub(crate) async fn audio_to_text_impl(
+    state: &AppState,
+    audio_base64: String,
+    mime_type: String,
+) -> Result<OpenAITranscribeResponse, String> {
+    if audio_base64.is_empty() {
+        return Err("STT failed: empty audio buffer".to_string());
+    }
+    let audio_bytes = B64
+        .decode(audio_base64.as_bytes())
+        .map_err(|e| format!("STT failed: base64 decode: {e}"))?;
+    if audio_bytes.is_empty() {
+        return Err("STT failed: empty audio buffer".to_string());
+    }
+    let db = state.db.clone();
+    let settings = tokio::task::spawn_blocking(move || db.load_settings())
+        .await
+        .map_err(|e| format!("STT failed: settings load join: {e}"))?
+        .map_err(|e| format!("STT failed: settings load: {e}"))?;
+    let api_key = settings
+        .openai_api_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            "STT failed: OpenAI API key not configured. \
+             Open Settings → Voice → OpenAI API key."
+                .to_string()
+        })?
+        .to_string();
+    let transcript = stt::transcribe(&api_key, &audio_bytes, &mime_type)
+        .await
+        .map_err(|e| format!("STT failed: {e}"))?;
+    Ok(OpenAITranscribeResponse { text: transcript })
 }
 
 /// Inner async body, factored out of the `#[tauri::command]`
@@ -110,6 +188,23 @@ mod stt {
     pub(crate) static OVERRIDE: std::sync::Mutex<
         Option<Result<String, String>>,
     > = std::sync::Mutex::new(None);
+
+    /// v3.7.14 — Test-only serializer. The OVERRIDE global
+    /// is a single static; with multiple tests touching it
+    /// (the existing `transcribe_audio_returns_text_for_valid_input`
+    /// plus the new `audio_to_text_returns_wrapped_response`),
+    /// `cargo test`'s default parallelism races them. Each
+    /// test that touches OVERRIDE acquires this lock for its
+    /// entire body so the set → call → reset sequence is
+    /// atomic from the test runner's perspective.
+    ///
+    /// We use a `std::sync::Mutex<()>` rather than a
+    /// `tokio::sync::Mutex` because `#[tokio::test]` runs on
+    /// the current_thread runtime by default, so holding a
+    /// sync lock across an `.await` doesn't deadlock.
+    #[cfg(test)]
+    pub(crate) static TEST_LOCK: std::sync::Mutex<()> =
+        std::sync::Mutex::new(());
 
     /// Production HTTP path. Uses `reqwest` (already a dependency)
     /// to send a multipart form to OpenAI. Returns a plain
@@ -212,6 +307,12 @@ mod tests {
     /// what the React side expects to drop into the Composer.
     #[tokio::test]
     async fn transcribe_audio_returns_text_for_valid_input() {
+        // v3.7.14 — Serialize with the new TEST_LOCK so
+        // this test's set → call → reset sequence is
+        // atomic. The companion `audio_to_text_*` tests
+        // also acquire this lock, so they can't race
+        // against us.
+        let _serial = stt::TEST_LOCK.lock().unwrap();
         let _ = env_logger::builder().is_test(true).try_init();
         let (state_arc, _dir) = fresh_state();
         // Force the stub to return a canned transcript.
@@ -240,6 +341,109 @@ mod tests {
         assert!(
             err.contains("empty audio buffer"),
             "expected 'empty audio buffer' in error, got: {err}"
+        );
+    }
+
+    // ---- v3.7.14 — audio_to_text (base64 in, struct out) ----
+    //
+    // The new `VoiceToolbar.tsx` is wired through a different
+    // wire shape (base64 in, `OpenAITranscribeResponse` out).
+    // The tests below lock down: (a) the round-trip decode +
+    // wrap, (b) the user-facing empty-buffer error, and
+    // (c) the user-facing "missing API key" error that names
+    // the right Settings page so the user can find the field.
+
+    /// v3.7.14 — Happy path: base64 in, struct out. The
+    /// canned transcript from the STT stub is wrapped in
+    /// `OpenAITranscribeResponse { text }` so the renderer
+    /// can spread the field straight onto a user message.
+    #[tokio::test]
+    async fn audio_to_text_returns_wrapped_response() {
+        // Serialize with the existing test (and any
+        // other future OVERRIDE user) via TEST_LOCK.
+        let _serial = stt::TEST_LOCK.lock().unwrap();
+        let _ = env_logger::builder().is_test(true).try_init();
+        let (state_arc, _dir) = fresh_state();
+        *OVERRIDE.lock().unwrap() = Some(Ok("hello world".to_string()));
+        let b64 = B64.encode(b"fake-audio-bytes");
+        let result =
+            audio_to_text_impl(&state_arc, b64, "audio/webm".to_string()).await;
+        *OVERRIDE.lock().unwrap() = None;
+        let resp = result.expect("audio_to_text should return the canned response");
+        assert_eq!(resp.text, "hello world");
+    }
+
+    /// v3.7.14 — Empty base64 strings are rejected up
+    /// front (before the STT round-trip) so the user gets a
+    /// clear error instead of a 400 from Whisper.
+    #[tokio::test]
+    async fn audio_to_text_rejects_empty_input() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let (state_arc, _dir) = fresh_state();
+        let result = audio_to_text_impl(&state_arc, String::new(), "audio/webm".to_string()).await;
+        assert!(result.is_err(), "empty input must error");
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("empty audio buffer"),
+            "expected 'empty audio buffer' in error, got: {err}"
+        );
+    }
+
+    /// v3.7.14 — A missing OpenAI key surfaces the
+    /// user-facing error: the brief specifies the exact text
+    /// (mentioning "OpenAI API key" + the Settings path) so
+    /// the user can find the field. This test guards against
+    /// the error text regressing to a generic "key missing".
+    #[tokio::test]
+    async fn audio_to_text_missing_api_key_surfaces_hint() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("voice.sqlite");
+        let db = Database::open(&path).expect("open test db");
+        // Deliberately leave openai_api_key unset on this
+        // fresh DB so the production code path returns the
+        // missing-key error.
+        let computer = Arc::new(ComputerManager::new(&db.load_settings().expect("load default settings")));
+        let state = Arc::new(AppState {
+            db: Arc::new(db),
+            mcp: McpRegistry::default(),
+            bot_runs: Arc::new(BotRunRegistry::new()),
+            computer,
+            recorder: Arc::new(RecorderState::new()),
+            llm_key_override: Arc::new(std::sync::RwLock::new(None)),
+        });
+        let b64 = B64.encode(b"fake-audio-bytes");
+        let result = audio_to_text_impl(&state, b64, "audio/webm".to_string()).await;
+        assert!(result.is_err(), "missing key must error");
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("OpenAI API key"),
+            "expected 'OpenAI API key' in error, got: {err}"
+        );
+        assert!(
+            err.contains("Settings"),
+            "expected 'Settings' in error, got: {err}"
+        );
+    }
+
+    /// v3.7.14 — Garbage base64 (e.g. user-supplied data
+    /// that isn't valid base64) is rejected with a clear
+    /// decode error before any network call.
+    #[tokio::test]
+    async fn audio_to_text_rejects_invalid_base64() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let (state_arc, _dir) = fresh_state();
+        let result = audio_to_text_impl(
+            &state_arc,
+            "not-valid-base64-!@#$".to_string(),
+            "audio/webm".to_string(),
+        )
+        .await;
+        assert!(result.is_err(), "invalid base64 must error");
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("base64"),
+            "expected 'base64' in error, got: {err}"
         );
     }
 }

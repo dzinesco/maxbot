@@ -225,6 +225,16 @@ pub fn run() {
             // in the Composer; the STT call lands here. The
             // TTS commands above are the outbound half.
             commands::voice::transcribe_audio,
+            // v3.7.14 — Click-to-start/stop mic in the chat
+            // header. Takes base64-encoded audio + a MIME
+            // type, returns the transcript wrapped in a
+            // camelCase struct. Parallel surface to
+            // `transcribe_audio` (raw bytes, plain String);
+            // the new VoiceToolbar ships base64 over IPC
+            // because JSON is the only Tauri-friendly wire
+            // type, and the decode on the Rust side is
+            // symmetric.
+            commands::voice::audio_to_text,
             commands::meta::meta_get,
             commands::meta::meta_set,
             commands::meta::meta_list,

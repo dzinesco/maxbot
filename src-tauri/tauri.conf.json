@@ -42,7 +42,8 @@
     "macOS": {
       "minimumSystemVersion": "11.0",
       "entitlements": null,
-      "exceptionDomain": null
+      "exceptionDomain": null,
+      "infoPlist": "Info.plist"
     }
   }
 }

@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!--
+	  v3.7.14 — VoiceMode. macOS requires an explicit
+	  reason string before the system will surface the
+	  microphone permission prompt. Without this key
+	  the webview's `getUserMedia({audio: true})` call
+	  silently fails (or, on a hardened build, errors
+	  with a generic DOMException).
+
+	  This file is merged with the Tauri-generated
+	  default Info.plist during `cargo tauri build`.
+	  Tauri's `infoPlist` config (in `tauri.conf.json`)
+	  points at this file by relative path.
+	-->
+	<key>NSMicrophoneUsageDescription</key>
+	<string>MaxBot needs microphone access for VoiceMode (v3.7.14). Click the mic in the chat header to dictate a message that gets transcribed and sent to the active Bot.</string>
+</dict>
+</plist>
