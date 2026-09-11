@@ -1504,7 +1504,11 @@ function FullComputerPanel({
           </div>
         ) : null}
       </div>
-      <ComputerFooter computer={computer} uptime={uptime} />
+      <ComputerFooter
+        computer={computer}
+        uptime={uptime}
+        error={viewerError}
+      />
     </div>
   );
 }
@@ -1657,9 +1661,18 @@ function ComputerToolbar({
 interface ComputerFooterProps {
   computer: Computer;
   uptime: number | null;
+  // v3.7.16 smoothness: the footer is the
+  // canonical "one line" surface for transient
+  // Computer errors. The Drive / screenshot /
+  // provision error path routes here instead of
+  // dumping a stack trace in the preview. The
+  // footer shows the error as a single muted
+  // cell; clicking it does nothing (the parent
+  // clears it on the next successful poll).
+  error?: string | null;
 }
 
-function ComputerFooter({ computer, uptime }: ComputerFooterProps) {
+function ComputerFooter({ computer, uptime, error }: ComputerFooterProps) {
   // v3.7.9: the footer is just the readout row now.
   // The "Hand back" / "Stop now" buttons that lived
   // here in v3.7.5/v3.7.7 are gone — driving mode
@@ -1675,6 +1688,15 @@ function ComputerFooter({ computer, uptime }: ComputerFooterProps) {
       <span className="computer-panel__footer-cell muted">
         up {formatUptime(uptime)}
       </span>
+      {error && (
+        <span
+          className="computer-panel__footer-cell computer-panel__footer-cell--error"
+          data-testid="computer-footer-error"
+          title={error}
+        >
+          {error.length > 80 ? error.slice(0, 77) + "…" : error}
+        </span>
+      )}
     </div>
   );
 }

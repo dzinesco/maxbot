@@ -1068,4 +1068,42 @@ describe("ComputerPanel — click-through takeover (v3.7.9)", () => {
       });
     }
   });
+
+  it("the Computer footer surfaces a one-line error when a screenshot poll fails", async () => {
+    // v3.7.16: the prompt's "Drive / screenshot /
+    // provision errors: one line in the Computer
+    // footer, not a stack dump in the preview" rule.
+    // The viewerError state is the canonical
+    // transient-error channel; the footer renders
+    // it as a single muted cell (truncated to 80
+    // chars). The preview itself stays usable
+    // (showing the last good frame) instead of
+    // dumping the error in the image area.
+    vi.mocked(computerGet).mockResolvedValue(runningComputer);
+    // First call succeeds (so we get a frame), then
+    // subsequent calls fail.
+    let n = 0;
+    vi.mocked(computerScreenshot).mockImplementation(async () => {
+      n += 1;
+      if (n === 1) return FAKE_JPEG;
+      throw new Error("virsh: connection refused");
+    });
+    render(
+      <ComputerPanel
+        botId="bot-1"
+        mode="preview"
+        pollIntervalMs={60000}
+      />,
+    );
+    // Wait for the first frame, then the first
+    // error.
+    await waitFor(() => {
+      expect(computerScreenshot).toHaveBeenCalled();
+    });
+    await new Promise((r) => setTimeout(r, 700));
+    // Footer should now show the error.
+    const footerError = screen.queryByTestId("computer-footer-error");
+    expect(footerError).toBeInTheDocument();
+    expect(footerError?.textContent).toContain("virsh: connection refused");
+  });
 });

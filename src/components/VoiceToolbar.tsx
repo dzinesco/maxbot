@@ -329,9 +329,17 @@ export function VoiceToolbar({
       }
     } catch (e) {
       // Level meter is best-effort. The mic still works
-      // without it; we just don't draw a meter.
-      // eslint-disable-next-line no-console
-      console.warn("voice-toolbar: level meter init failed", e);
+      // without it; we just don't draw a meter. v3.7.16
+      // smoothness: surface the degraded mode through
+      // the parent's `onError` (which routes to the
+      // chat toast) instead of console.warn — the
+      // prompt's "no console.warn as the product path"
+      // rule. The recording still succeeds, so we
+      // prefix the message with "level meter: " so
+      // the user knows the mic still works.
+      onErrorRef.current?.(
+        `level meter: ${e instanceof Error ? e.message : String(e)} (recording still works)`,
+      );
     }
 
     try {
