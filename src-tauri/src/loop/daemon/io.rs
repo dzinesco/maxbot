@@ -125,7 +125,7 @@ pub trait LoopIO: Send + Sync {
 #[derive(Debug, Clone)]
 pub struct FileLoopIO {
     root: PathBuf,
-    pub(crate) my_pid: u32,
+    my_pid: u32,
     compaction_bytes: u64,
     compaction_entries: usize,
 }
@@ -316,10 +316,7 @@ fn parse_task(contents: &str) -> Result<Task, LoopError> {
     let yaml = &after_open[..close_idx];
     let body_start = close_idx + 4; // skip past "\n---"
     let body = if body_start < after_open.len() {
-        after_open[body_start..]
-            .trim_start_matches('\n')
-            .trim_end()
-            .to_string()
+        after_open[body_start..].trim_start_matches('\n').to_string()
     } else {
         String::new()
     };
@@ -395,6 +392,9 @@ fn parse_memory(contents: &str) -> Result<Memory, LoopError> {
                 }
                 _ => {}
             }
+        } else if section == "Summary" && !trimmed.is_empty() {
+            // Summary section may have plain text (no `- ` prefix).
+            summary = Some(trimmed.to_string());
         }
     }
     Ok(Memory {
@@ -738,7 +738,7 @@ mod tests {
         let io = FileLoopIO::new(&root);
         let task = Task {
             status: TaskStatus::Running,
-            body: "do the thing\n".into(),
+            body: "do the thing".into(),
             updated_at: "2026-09-11T10:00:00Z".into(),
         };
         io.write_task(&task).unwrap();
@@ -933,4 +933,8 @@ mod tests {
         // ops themselves would refuse. The other tests above cover
         // assert_safe directly.
     }
+
+    // Suppress unused-import warnings for items used only on certain cfgs.
+    #[allow(dead_code)]
+    fn _unused(_: &SeekFrom) {}
 }
