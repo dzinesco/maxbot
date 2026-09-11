@@ -1,220 +1,115 @@
-# OVERNIGHT_LOG — 2026-09-10 → 2026-09-11
+# OVERNIGHT_LOG — 2026-09-10/11 — Smoothness overhaul
 
-Working branch: `overnight/2026-09-10` (off `main` @ `509ae66` = v3.7.15).
+Working branch: `overnight/smooth-2026-09-11` (off `overnight/2026-09-10` @ `63234d4`).
 
-## Inventory (read in 60s)
+## Smoothness inventory (jank sources ranked by user-facing cost)
 
-### Versions
-- `package.json`: 3.7.15
-- `src-tauri/Cargo.toml`: 3.7.15
-- `src-tauri/tauri.conf.json`: 3.7.15
-- Working tree: clean on `main`, up to date with `origin/main`
+### 1. Screenshot poll blob lifecycle (highest cost — drives the v3.7.15 leak)
+**File:** `src/components/ComputerPanel.tsx:540-641` (poll effect) and `:677-693` (unmount cleanup).
 
-### Test baseline (all green)
-- `npm test`: 22 files, **194 passed**, 0 failed (vitest 5.0.0, 2.4s)
-- `cargo test --lib`: **356 passed**, 0 failed, 3 ignored
-- `cargo test --bin maxbotd`: **10 passed**, 0 failed, 1 ignored (the 1 ignored is the live `daemon_webhook_round_trip_30s` — out of scope, no live server)
-- No failing tests. **Priority A (fix failures) is N/A.**
+- **300ms poll** (150ms while `mouseDownRef.current`) when VM is `running` AND the panel is mounted.
+- **Already in place (good):**
+  - `inFlight.current` guard prevents stacking.
+  - `document.hidden` check pauses the poll.
+  - Previous blob URL is revoked before the new one is assigned.
+  - Unmount effect revokes the current ref.
+  - visibilitychange handler restarts the poll when the tab becomes visible again.
+- **Holes that could keep growing RSS:**
+  - **Bot switch mid-await**: when `botId` changes, the effect re-runs and the previous one is cancelled, but the previous effect's poll might still be in flight. The `cancelled` flag short-circuits the `setBlob` and `setComputer`-related work, but the new blob URL is NOT created and the new `setBlob` is NOT called, so the old URL still pins the old JPEG bytes for the rest of the page lifetime — but actually the `<img src=...>` is bound to the new effect's `blob` state, not the old one, so the old URL becomes orphaned. Revoke on cancel is missing.
+  - **Error path leaks no URL** (the throw happens before `URL.createObjectURL`), but the `inFlight` is reset in `finally` so the next tick is fine.
+  - **Bot switch while ComputerPanel is hidden** by the parent's "panel closed" state: the panel itself isn't mounted when closed, so the poll doesn't run. ✓ But the parent might keep `mounted` and toggle `display: none` — the poll then keeps running invisibly, which is a waste. Audit needed.
+  - **Bytes-unchanged short-circuit**: the poll always calls `setBlob` and triggers a render even if the new JPEG is byte-identical to the old one. With a 50KB JPEG at 3.3 fps, that's ~10MB/s of "we re-rendered the img with the same bytes" — not a leak, but wasted work.
+  - **No debouncing on the input rate**: if a tool call is mid-flight, the poll still runs at 300ms even though the user can't interact. 500ms is fine.
+- **Tests:** `ComputerPanel.test.tsx` has a `does not stack in-flight` test and a `revokes previous blob on src change` test. ✓ But no test for: bot switch while in flight, document.hidden in middle of in-flight, parent-unmount while in flight.
 
-### CHANGELOG coverage
-- Documented: v3.7.0, v3.7.1, v3.7.2, v3.7.3, v3.7.4, v3.7.5
-- **Undocumented shipped versions (per git log, between documented sections):**
-  v3.7.6 (Destroy in roster), v3.7.7 (Stop now + 2FA docs), v3.7.8 (backup_memory),
-  v3.7.9 (click-through takeover), v3.7.10 (Chromium --user-data-dir), v3.7.11
-  (composite reliability), v3.7.12 (Google OAuth), v3.7.13 (UX hardening),
-  v3.7.14 (VoiceMode), v3.7.15 (STT provider fix)
-- The user prompt's "backup_memory was deferred" is **incorrect** — `backup_memory`
-  is fully shipped: Rust command in `src-tauri/src/commands/memory.rs:169`,
-  tauri.ts wrapper in `src/lib/tauri.ts:865`, MemoryPanel UI in
-  `src/components/MemoryPanel.tsx:158`, tests in
-  `src/components/MemoryPanel.test.tsx:159-260`. Moving it off Priority B.
+### 2. MessageBubble / chat re-render storm
+**File:** `src/components/ChatView.tsx:209-217` (messages.map), `src/App.tsx:513-540` (chunk handler).
 
-### TODO / FIXME / "future work" inventory
-- `src-tauri/src/computer/provision.rs:307` — **multi-VM VNC port allocation
-  (future work; v3.7.5 is a single-VM slice)** — this is Priority C. Real
-  leftover from v3.7.5.
-- `src-tauri/src/skills/executor.rs:90` — input binding is a future slice
-  (out of scope tonight, not a hard TODO).
-- `src-tauri/src/computer/input.rs:62,81` — VNC port display-number
-  allocation notes. Related to Priority C.
-- `src-tauri/src/approvals/defaults.rs:62` — "future work will start
-  gating." Not actionable tonight.
-- `src-tauri/src/bin/maxbotd.rs:438,484` — future slices for stricter
-  token / filesystem hardening. Not actionable tonight.
-- All other matches were false positives (e.g. `Connector::OAuth::…future`).
+- **Per chunk**: `setMessages(prev => prev.map(...))` triggers a full re-render of the chat view.
+- **MessageBubble** is NOT wrapped in `React.memo`. Every streaming chunk re-renders every message in the conversation, including the historical bubbles (greetings, system messages, prior tool calls).
+- The streaming bubble itself needs to re-render to show new tokens. The others shouldn't.
+- **Real cost:** For a 50-message conversation, every chunk = 50 React reconciliation steps. At 50 tokens/s = 50×50 = 2500 reconciliations/s. That's measurable on the main thread, especially on a Mac with a busy battery.
+- **Fix:** `React.memo(MessageBubble, (prev, next) => prev.message.content === next.message.content && prev.streaming === next.streaming && ...)` — content-only equality. The streaming bubble re-renders because `content` changed; the others don't.
 
-### Doc alignment state (Priority D)
-- `docs/user-guide.md` Computer section: last swept in v3.7.4 (Tauri 2 + noVNC
-  references removed) but still mentions "v3.7.7's first-bot-20-minutes.md is
-  the canonical flow" — needs the v3.7.9 click-through takeover mention
-  removed (the click-through was rolled BACK in v3.7.9 step 8 — now the
-  Hand back / Stop now flow uses SSH tunnels again per the v3.7.9
-  commit `ddc1fba`).
-- `docs/first-bot-20-minutes.md`: canonical 20-minute flow. Need to
-  read and align with v3.7.10 (Chromium --user-data-dir) +
-  v3.7.9 (TigerVNC) language.
-- `README.md` "Three access levels": line 13 says "Take over with
-  Screen Sharing" — that's correct for v3.7.9+, but the sentence
-  should reference `v3.7.2+ flow` which it does. Probably fine.
+### 3. BotRoster re-renders on every chunk
+**File:** `src/components/BotRoster.tsx`, parent `App.tsx`.
 
-### Data
-- `~/Library/Application Support/com.maxbot.app/` — not touched.
-- Live SQLite / live VMs / live libvirt — not touched (smoke tests
-  are gated behind `#[ignore]` and stay ignored).
+- App.tsx's main render fires on every state change. Without memo, BotRoster re-renders too.
+- BotRoster reads `bots`, `activeBotId`, `presence`. None of these change during a chat stream. So it shouldn't re-render.
+- **Fix:** Wrap with `React.memo` and a custom equality on the props it actually reads.
+- **Risk:** BotRoster is interactive (hover, click). Memo might break hover animations. Use a shallow equality on the props, not the whole component.
 
-## Ranked task list
+### 4. VoiceToolbar RAF + level meter re-renders
+**File:** `src/components/VoiceToolbar.tsx:140-336`.
 
-1. **Priority C: VNC multi-VM port allocation.** v3.7.5 hard-codes port
-   5900 fallback (`provision.rs:316`). For VM #2, port 5900 is
-   already in use, so QEMU's `to=5999` auto-pick returns 5901 (or
-   the first free). But the Mac side still tries to SSH-tunnel to
-   5900. Slice:
-   - Mac side picks the next free display number from
-     `Settings.computer_vnc_local_port_range` and the existing
-     `computers.vnc_port` rows. Pass that display number to the
-     script as a new positional.
-   - `provision-vm.sh` substitutes `127.0.0.1:<N>,password=off,to=5999`
-     instead of `:0`.
-   - Drop the 5900 fallback in `provision.rs` — `virsh vncdisplay`
-     still won't know about the qemu:commandline VNC, but we KNOW
-     the port (we picked it). Use that.
-   - Add tests + CHANGELOG entry.
-2. **Doc alignment (Priority D).** Light sweep of user-guide.md
-   Computer section + first-bot-20-minutes.md to match v3.7.9
-   (TigerVNC) + v3.7.10 (Chromium persistent) + v3.7.13 (UX).
-   No mass rewrite.
-3. **CHANGELOG backfill (housekeeping).** Add a `## Unreleased` block
-   that lists v3.7.6 through v3.7.15 with one-line summaries +
-   pointers to the git history. Don't fabricate details — refer
-   to `git log` for canonical per-commit summaries.
-4. **Small UI/UX holes (Priority E).** Discoverability only —
-   no dead buttons, no new features.
+- `requestAnimationFrame` loop fires at 60fps when recording.
+- `setLevel(rms)` on every frame triggers a re-render of the whole VoiceToolbar. The meter is a single element; the rest of the toolbar (button, status) doesn't need to re-render at 60fps.
+- **Fix:** split the meter into a sub-component wrapped in `React.memo`, OR use a ref + DOM mutation directly (bypass React).
+- **Lifecycle:** RAF is cancelled in the stop effect. AudioContext is closed. MediaRecorder tracks are stopped. The `recorderRef.current` is nulled. ✓ This is actually well-trodden.
+- **Real risk:** If the user clicks the mic and then immediately closes the tab, the cleanup runs on unmount and the RAF is cancelled. ✓
 
-## Assumptions / reversibility
-- Multi-VM port allocation defaults to display 0 (port 5900) when
-  no other VM is provisioned. This is what v3.7.5 already does.
-  Existing VMs (single-VM era) keep their port; new VMs get the
-  next free. Reversible: a single destroy + re-provision.
-- For the qemu:commandline `-vnc` line, we keep `to=5999` so QEMU
-  can still auto-pick if a specific port is busy. The Mac side
-  then learns the actual port by parsing QEMU's monitor output
-  OR by relying on the user-picked display number. Going with the
-  latter (cleaner; matches the data we already pass in).
-- CHANGELOG backfill summaries are sourced from `git log --oneline`
-  + the per-version commit messages that already exist on the
-  branch. Not invented.
+### 5. Sidebar / ActivityFeed re-renders on every event
+**File:** `src/components/ActivityFeed.tsx`, `src/components/Sidebar.tsx`.
 
-## Hard rules in effect
-- Stay in repo. No new product.
-- No live SSH / live libvirt / live VMs / real API keys.
-- No push to origin. Local commits on `overnight/2026-09-10` only.
-- File-disjoint slices where possible.
-- Tests green for everything I touch.
-- BLOCKER.md only if the same issue hits twice.
+- ActivityFeed listens to `memory:written` and updates local state on every event.
+- Sidebar's `ApprovalsSection` polls every 5s.
+- Both re-render the entire feed on every update.
+- **Real cost:** Each memory:written event causes a full feed re-render. If the LLM writes 10 memory items per turn, that's 10 feed re-renders per turn.
+- **Fix:** useReducer with a normalized event log + windowed list. Larger refactor; defer unless 1-4 land cleanly.
+
+### 6. Settings save blocking
+**File:** `src/components/Settings.tsx`, `src-tauri/src/commands/settings.rs`.
+
+- The Settings UI calls `pushSettingsToDaemon` on every change.
+- If the user is typing in a text field, every keystroke fires a save.
+- **Real cost:** If the daemon is unreachable, the save blocks with a retry; if it's slow, the typing lags.
+- **Fix:** debounce the save (300ms idle), batch rapid changes.
+- **Risk:** If the user closes the panel mid-debounce, the last change is lost. Use a flush on unmount.
+
+### 7. ComputerPanel mount cost
+**File:** `src/components/ComputerPanel.tsx:442-528` (loadComputer + state-changed event), `src/components/ComputerPanel.tsx:553-641` (screenshot poll).
+
+- On mount, 3 effects fire in parallel: `loadComputer`, `getSettings`, `onComputerStateChanged`.
+- The screenshot poll starts 300ms later.
+- If the user clicks the Computer chip on Bot-A, then quickly clicks Bot-B, both panels get partially-mounted, with overlapping in-flight requests.
+- **Real cost:** Wasted IPC calls and re-renders during bot-switch.
+- **Fix:** keyed unmount is the parent's job; ComputerPanel can do better by cancelling ALL pending requests on botId change.
+
+### 8. App-level re-renders
+**File:** `src/App.tsx` (2346 lines).
+
+- App.tsx owns the messages state, the bots state, the activeBotId state, the activity state, the settings state.
+- Every `setMessages` re-renders the whole App.
+- Children should be memoized; check if they are.
+
+## Priority (per the prompt's WORKSTREAM 1-5)
+
+I'll do these in this order:
+1. **Blob/RAF/poll lifecycle hardening** (Workstream 1) — guaranteed wins, no risk, measurable.
+2. **Bot-switch mid-await revoking** (Workstream 1, gap #1) — leak risk.
+3. **Bytes-unchanged short-circuit** (Workstream 1, gap #1) — render storm.
+4. **`React.memo` for MessageBubble, BotRoster, ComputerToolbar** (Workstream 2) — render isolation.
+5. **VoiceToolbar level meter sub-component** (Workstream 1, #4) — sub-component.
+6. **Settings save debounce** (Workstream 2, #6) — small refactor.
+7. **Console.warn as product path audit** (Workstream 3) — small fixes.
+8. **Idle timer audit** (Workstream 4) — verify all setInterval/setTimeout die with their component.
+
+## Assumptions
+- "Smoother" is the success metric; I'll measure by the tests passing and by static analysis (no new blob URLs created, all RAFs cancelled, etc.).
+- I won't ship a "leak fixed" claim without a closed lifecycle. The leak hunt itself is a separate Web Inspector investigation (per the v3.7.15 entry in MEMORY.md).
+- BLOCKER.md only if a smoothness fix needs Web Inspector to validate (per the prompt: "If you cannot prove the leak in unit tests, still close the blob/RAF holes and document what a human should check in Web Inspector in BLOCKER.md. That is allowed.").
+
+## Hard rules
+- Stay in this repo.
+- No new product / no new architecture / no new UI kit.
+- No live SSH / live libvirt / real API keys.
+- Branch: `overnight/smooth-2026-09-11`. No push to origin. No merge to main.
+- `OVERNIGHT_LOG.md` stays separate from a release commit.
+
+## Test baseline (carryover from previous night)
+- `npm test`: 196 passed
+- `cargo test --lib`: 365 passed, 0 failed, 3 ignored
+- `cargo test --bin maxbotd`: 10 passed, 0 failed, 1 ignored
 
 ## Progress
-- 22:23 — Inventory done. All tests green. No priority-A work needed.
-- 22:23 → 22:34 — **Slice 1 DONE** (multi-VM VNC port allocation, v3.7.16).
-- 22:34 → 22:35 — **Slice 2 DONE** (doc alignment: README, first-bot-20-minutes, user-guide).
-- 22:35 → 22:35 — **Slice 3 DONE** (CHANGELOG backfill v3.7.6 → v3.7.15, 10 versions).
-- 22:35 → 22:37 — **Slice 4 DONE** (ComputerPanel: drop the broken `up —` from toolbar title; 2 regression tests).
-- 22:38 — **Final test gate green** (see below).
-
-## Final test gate (morning-readout)
-
-- `npm test`: 22 files, **196 passed**, 0 failed (+2 from baseline of 194 — the 2 new ComputerPanel regression tests in Slice 4)
-- `cargo test --lib`: **365 passed**, 0 failed, 3 ignored (+9 from baseline of 356 — the 9 new `next_free_vnc_display` / `vnc_port_from_display` tests in Slice 1)
-- `cargo test --bin maxbotd`: **10 passed**, 0 failed, 1 ignored (unchanged from baseline)
-- Working tree clean on `overnight/2026-09-10`. Not pushed (per the "No push to origin" hard rule).
-
-## Final commit log on `overnight/2026-09-10`
-
-```
-30e2bc5 ComputerPanel: drop the broken 'up —' from the toolbar title
-f3f3c52 CHANGELOG: backfill v3.7.6 through v3.7.15 entries (10 versions)
-5655109 docs: align README + first-bot + user-guide with shipped versions
-f710cbb overnight/2026-09-10: inventory log (Slice 1 done, 2-4 queued)
-6cd8dee v3.7.16: bump to 3.7.16 for the multi-VM VNC allocation release
-dee312a v3.7.16: multi-VM VNC port allocation
-```
-
-6 commits ahead of `main` (509ae66). Branch is local; no push to origin.
-
-## Slice-by-slice summary
-
-### Slice 1 — v3.7.16 Multi-VM VNC port allocation
-The user-prompt Priority C. Closes the v3.7.5 "5900 hard-coded
-fallback" hole. The Mac side now reads `computers.vnc_port`
-rows, picks the lowest free display in 5900-5999, and passes
-it to `provision-vm.sh` as a new 6th positional arg. The
-script substitutes it into the qemu:commandline. Result: VM
-#1 → 5900, VM #2 → 5901, VM #3 → 5902, etc.
-
-Files touched:
-- `src-tauri/src/computer/provision.rs` (new `next_free_vnc_display`, `vnc_port_from_display`, `poll_for_vm_running`; 9 new tests)
-- `src-tauri/src/computer/mod.rs` (`ComputerManager::provision` queries in-use ports)
-- `src-tauri/src/computer/libvirt.rs` (new `domstate`)
-- `src-tauri/scripts/provision-vm.sh` (6th arg, Python `sys.argv[1]`)
-- `package.json`, `src-tauri/Cargo.toml`, `src-tauri/tauri.conf.json` (3.7.15 → 3.7.16)
-- `CHANGELOG.md` (v3.7.16 entry)
-
-### Slice 2 — Doc alignment
-The user-prompt Priority D. Surgical edits to fix drift
-between shipped versions and what the docs say. No mass
-rewrite.
-
-Files touched:
-- `README.md` — replaced the v3.7.2 "Take over with Screen
-  Sharing" line with the v3.7.9+ Drive model. "Three access
-  levels" now reads "Status / Preview / Drive". Added a
-  v3.7.16 multi-VM VNC port note.
-- `docs/user-guide.md` — fixed "VoiceMode (v3.7.15)" →
-  "VoiceMode (v3.7.14, STT provider in v3.7.15)". Added a
-  v3.7.16 multi-VM VNC port paragraph to the Computer section.
-- `docs/first-bot-20-minutes.md` — fixed "v3.7.5 added a Stop
-  now action" → "v3.7.7 added" (Stop now shipped in v3.7.7,
-  commit 4efd198). Same fix for the "(v3.7.5 semantics,
-  unchanged)" callout. Updated "VoiceMode (v3.7.15)" →
-  "VoiceMode (v3.7.14, STT provider in v3.7.15)". Fixed the
-  "Robot (VNC 5901)" example for a first-Bot walkthrough →
-  "VNC 5900" with a parenthetical about subsequent Bots.
-
-### Slice 3 — CHANGELOG backfill
-The CHANGELOG only had entries for v3.7.0 through v3.7.5.
-Versions v3.7.6 through v3.7.15 shipped over the next 24
-hours without a CHANGELOG entry. Backfilled all 10 with
-summaries sourced from the existing per-commit messages
-on main (no fabricated details). The big slices
-(v3.7.9 click-through Drive, v3.7.12 real Google OAuth,
-v3.7.13 UX-1 through UX-7) get full sections; smaller
-housekeeping commits get one-line entries.
-
-### Slice 4 — ComputerPanel discoverability fix
-Found a real bug: the toolbar's status title rendered
-`${state} · ${vm_ip} · up ${formatUptime(null)}`, but
-`formatUptime(null)` returns `"—"`. The user saw
-`running · 192.168.0.50 · up —` — broken, confusing, and
-duplicative with `ComputerFooter` (which shows the real
-uptime). Dropped the `state` + `up` parts; the title is
-now just the IP. 2 regression tests pin the new contract.
-
-## Items NOT addressed (intentionally)
-- The v3.7.15 renderer memory leak (separate issue, requires
-  Web Inspector heap snapshots — out of scope for this
-  overnight sweep).
-- The v3.7.13 UX-1..UX-7 commit messages were already
-  detailed enough for the CHANGELOG; no per-UX-* commit
-  message reconstruction needed.
-- The `src-tauri/Cargo.lock` change in the Slice 1 commit
-  was regenerated by `cargo build` during the test run. I
-  `git checkout --` it before each commit to avoid the
-  "would be overwritten" gate (matching the v3.7.15
-  rollback pattern from the previous session).
-
-## Hard rules observed
-- Stayed in repo. No new product.
-- No live SSH / live libvirt / live VMs / real API keys.
-- No push to origin. Local commits on `overnight/2026-09-10`.
-- File-disjoint slices where possible.
-- Tests green for everything I touched.
-- BLOCKER.md not needed — no blocker occurred.
+- 23:08 — Inventory written. Starting Workstream 1.
