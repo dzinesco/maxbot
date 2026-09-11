@@ -116,6 +116,328 @@ v3.7.16 makes the allocation explicit and Mac-side-driven:
   required (the port on its existing `computers` row
   stays the same).
 
+## v3.7.6 — 2026-09-10
+
+### Added — Per-row Destroy button in BotRoster (cascades `computer_destroy` + `delete_bot`)
+
+- **`src/components/BotRoster.tsx`** — each row in the sidebar
+  roster gets a small `×` button on hover. Clicking it fires a
+  confirm dialog ("Destroy Bot + VM?") that cascades both
+  `computer_destroy` (server-side `virsh undefine` +
+  `remove-all-storage`) and `delete_bot` (the SQLite row)
+  in one shot. The Bot editor's existing Delete button
+  delegates to the same handler (v3.7.7 rewired it) so
+  the two entry points converge on the same cascade.
+- **No orphaned VMs.** The cascade runs in one transaction
+  on the Rust side; if either step fails the other is
+  rolled back to the pre-destroy state.
+- The `×` is hover-only so the roster stays quiet when
+  the user is just reading.
+
+## v3.7.7 — 2026-09-10
+
+### Added — Takeover **Stop now** button + canonical 2FA walkthrough
+
+- **`src/components/ApprovalQueue.tsx`** — the approval row
+  that surfaces a `needs_human: true` from the Bot's
+  `vm_computer_use` tool now has two distinct primary
+  actions: **Hand back** (the 2FA happy path — synthesizes
+  a tool success so the Bot's run resumes) and
+  **Stop now** (cascades to `stop_bot_run(runId)` +
+  `approval_decide(rejected)`, ends the run row as
+  `Failed`, halts the executor).
+- **`docs/2fa-walkthrough.md`** — the canonical
+  Gmail → 2FA → takeover → solve → hand back end-to-end
+  walkthrough, with the "Hand back vs Stop now" decision
+  table and the daemon-parked-run internals. The brief
+  asked for a step-by-step the user can follow on a
+  first attempt; the doc is that artifact.
+- **`stop_bot_run` is best-effort on purpose** — for
+  daemon-parked runs (started while the app was closed),
+  the runId is not in `activeRunByBot`, so the
+  `approvalDecide` alone unblocks the row. The
+  user-facing contract: after **Stop now**, the row is
+  `Failed` and no more tool calls will fire.
+
+## v3.7.8 — 2026-09-10
+
+### Added — `backup_memory(bot_id)` Tauri command + Memory panel button
+
+- **`src-tauri/src/commands/memory.rs:169`** — new
+  `backup_memory(bot_id)` Tauri command. Reads all
+  three memory kinds (Facts, Preferences, History) from
+  the Bot's VM, concatenates them into a single
+  `~/bots/_shared/memory/<bot_id>/<timestamp>.jsonl`
+  on the host (the same path the `shared_fs` Bot tool
+  uses), and returns the absolute resolved path +
+  entry count. The file write goes through the existing
+  `SshPool` and is base64-encoded so it's binary-safe.
+- **`src/components/MemoryPanel.tsx:158`** — new
+  "Back up to shared/" button in the Memory panel. A
+  `✓ Backed up N entries to /home/<user>/bots/_shared/...`
+  toast confirms the write. Empty memory is a no-op
+  (writes an empty file with a timestamp marker) so
+  the user gets a clear "0 entries" toast instead of
+  an error.
+- **Restore is not part of v3.7.8** — a future slice
+  will read the JSONL back into the per-Bot
+  `{kind}.jsonl` files based on the `kind` field on
+  every line. The schema is forward-compatible.
+- The `kind` field is on every line of the JSONL
+  (each kind's individual files don't carry the
+  discriminator — it's implicit in the filename).
+
+## v3.7.9 — 2026-09-10
+
+### Changed — In-panel click-through **Drive** replaces SSH-tunnel Takeover
+
+The v3.7.2 Takeover flow spawned an SSH-tunnel to the
+Bot's VNC display and opened macOS Screen Sharing in a
+new window. The v3.7.5 "TigerVNC instead of Screen
+Sharing" pivot kept the same tunnel-plus-external-viewer
+shape. v3.7.9 deletes both: the in-Preview click-through
+**Drive** button forwards pointer + keyboard to xdotool
+over the same SSH connection the rest of the Computer
+surface already uses. No external viewer, no password
+prompt, no tunnel.
+
+- **`src/components/ComputerPanel.tsx`** — Drive is a
+  single in-panel click. The banner reads "You are
+  driving — bot input paused" while active. Click
+  **Hand back** in the banner to clear the per-Bot
+  driving flag; the Bot's `vm_computer_use` tool then
+  resumes on the next turn. The preview JPEG and the
+  Drive click targets are the same surface — there's
+  no separate Takeover mode anymore.
+- **`src-tauri/src/computer/mod.rs`** — the
+  `ComputerManager` keeps a `driving: Mutex<HashMap<String,
+  Arc<AtomicBool>>>` so the renderer can set / clear
+  the per-Bot driving flag without round-tripping to
+  the DB. The flag is consulted by `vm_computer_use`:
+  when a Bot's flag is on, the tool refuses to run
+  xdotool / scrot itself so the user's events and the
+  agent's events don't fight for the same X11 session.
+- **`src/lib/tauri.ts`** — the `takeover_*` wrappers
+  (open / close / status) are replaced with
+  `computer_input_open` / `computer_input_event` /
+  `computer_input_close` + a `screenshot_size` query.
+  The renderer translates panel clicks into the input
+  event shape the Rust side expects.
+- **No SSH tunnel, no external viewer, no
+  password prompt.** The only auth is the SSH key
+  the user already has to the server.
+- **Existing VMs need Destroy + re-provision** to
+  pick up the new `qemu:commandline` (the v3.7.5
+  `auth=none` works correctly; v3.7.9 just drops
+  the tunnel plumbing). For most users the only
+  visible change is the panel UI: Preview + Drive
+  instead of Preview + Take over (TigerVNC).
+
+## v3.7.10 — 2026-09-10
+
+### Changed — Persistent VM Chromium session (explicit `--user-data-dir`)
+
+The Bot's Chromium session previously lost login state
+between agent runs because `chromium-browser ... --user-data-dir
+/tmp/...` pointed at a tmpfs that died with the run.
+v3.7.10 makes the session persistent: the `provision-vm.sh`
+script now creates `/home/bot/.config/chromium-default/`
+on first boot, the `vm_computer_use` tool's `open_url`
+helper pins `--user-data-dir=/home/bot/.config/chromium-default/`,
+and the `Bot`'s library loads the same profile on every
+subsequent run. Logins (GitHub, Google, banking sites)
+survive across agent runs.
+
+- **`src-tauri/scripts/provision-vm.sh`** — `bootcmd:`
+  gains an `mkdir -p /home/bot/.config/chromium-default &&
+  chown -R bot:bot ...` line so the dir exists before
+  Chromium first runs.
+- **`src-tauri/src/tools/vm_computer_use.rs`** —
+  `build_open_url_cmd` now pins the user-data-dir
+  (and pins `--no-first-run` so the welcome screen
+  doesn't show on subsequent runs). The directory
+  path is checked to start with `/home/bot/`; the
+  `description_mentions_every_helper` test pins the
+  helper list.
+- **Existing VMs need Destroy + re-provision** to
+  pick up the new `bootcmd`. New VMs get the
+  persistent dir on first boot.
+
+## v3.7.11 — 2026-09-10
+
+### Changed — Composite reliability (OCR-augmented screenshots + `wait_for_stable`)
+
+The `vm_computer_use` tool's screenshot helper used to
+return a base64 PNG plus a JPEGs-as-text "page content"
+guess from xdotool's `getactivewindow` output. For modern
+JS-heavy sites the active-window title is often empty or
+the cookie banner's, which made the agent loop on "the
+page didn't change." v3.7.11 augments that with a
+`tesseract` OCR pass on the PNG and a `wait_for_stable`
+helper that polls the screenshot until three consecutive
+frames hash equal (or a timeout fires).
+
+- **`src-tauri/src/tools/vm_computer_use.rs`** —
+  `take_screenshot` returns both the PNG and a best-effort
+  OCR text (empty string when tesseract is missing on
+  the server — the helper doesn't fail loudly because
+  the PNG is still useful). `wait_for_stable` is a new
+  helper that takes a per-Bot stable-hash of the last
+  3 frames; agent scripts can wait for the page to
+  actually settle instead of polling blind.
+- **Better xdotool error context** — the script-side
+  error message now includes the failed command's exit
+  code + stderr tail so the agent can debug "I clicked
+  the wrong coordinate" without SSHing in.
+- **Tesseract is optional.** The helper gracefully
+  degrades when it's not installed (the
+  `take_screenshot_returns_empty_text_when_tesseract_missing`
+  test pins the no-tesseract path).
+
+## v3.7.12 — 2026-09-10
+
+### Changed — Real Google OAuth 2.0 (replaces "paste a token" mock)
+
+The v3.7.0 Gmail + Calendar connector tools accepted an
+OAuth refresh token pasted into the Settings palette,
+and stored it in the SQLite `connectors` table. v3.7.12
+replaces that with the proper Desktop OAuth auth-code
+flow: the user pastes a Google Cloud project's Desktop
+OAuth `client_id` + `client_secret`, clicks **Connect
+Google**, completes the consent in the browser, and the
+refresh token is stored and rotated automatically.
+
+- **`src-tauri/src/connectors/oauth.rs`** — new
+  auth-code flow handler. The Mac side opens the
+  browser, captures the redirect, and exchanges the
+  auth code for a refresh token. Tokens are stored
+  in the encrypted-at-rest `connectors` table; the
+  `get_userinfo` follow-up runs at first use to
+  confirm the refresh token is alive.
+- **`src/components/Settings.tsx`** — new Google
+  Account section with the `client_id` + `client_secret`
+  inputs, the **Connect Google** button, and a
+  **Disconnect** button that revokes + deletes the
+  stored refresh token. The old "paste a token"
+  textarea is gone.
+- **Wire shape unchanged for the LLM.** The
+  `gmail_send` / `calendar_event_create` tools
+  resolve the same `googleapis.com` endpoints; the
+  only thing that changed is how the refresh token
+  gets in the SQLite row.
+
+## v3.7.13 — 2026-09-10
+
+### Changed — UX hardening (7 commits: UX-1 through UX-7)
+
+- **UX-1 (`f0a9843`)** — `ActivityFeed` empty / error
+  copy. The rail now explains "no recent activity" and
+  "couldn't load — retry" instead of leaving the column
+  blank.
+- **UX-2 (`8e03b20`)** — `BotRoster` presence verb.
+  The status chip now reads **Working / Waiting /
+  Queued / Idle** instead of the v2.x "active" / "idle"
+  binary, so the user can tell "the Bot is mid-tool"
+  from "the Bot is mid-tool but blocked on an approval."
+- **UX-3 (`3eb47cd`)** — Tool-call form for
+  `mail_draft` / `calendar_event_create` / `gmail_send`.
+  The approval row for these tools now shows a form
+  with the parsed arguments, so the user can correct
+  a wrong email address or recipient before approving
+  instead of re-typing the whole tool call.
+- **UX-4 (`d32a047`)** — Approval sheet (right
+  drawer / bottom panel). Long approval rows now
+  expand into a side drawer on wide screens and a
+  bottom panel on narrow ones, so the full
+  approval-decision context is visible without
+  scrolling.
+- **UX-5 (`29d745f`)** — Composer density. The
+  TTSToolbar + tool-call one-liner collapse into a
+  single dense row when the composer is short on
+  width, and expand to a full toolbar on wide
+  screens.
+- **UX-6 (`141dc76`)** — Settings + BotEditor
+  side-drawer panels. Both modals now slide in
+  from the right edge instead of centering,
+  matching the rest of the renderer's right-rail
+  pattern.
+- **UX-7 (`c54bc4f`)** — Chat header `PC` pill. A
+  small chip in the chat header shows whether the
+  selected Bot has a running computer (PC visible
+  ↔ PC hidden), so the user knows whether
+  Computer panel is going to show a VM or a
+  "no computer" placeholder.
+- **Wire shape (`fece74a`)** — `ApprovalToolResult`
+  enum + `denied_tool_calls` guard. The
+  `approval_decide` response now distinguishes
+  `Approved` / `Denied` / `Error` (the previous
+  boolean was ambiguous on transient failures), and
+  the agent's tool loop refuses to re-issue a denied
+  tool call within the same turn.
+
+## v3.7.14 — 2026-09-10
+
+### Added — VoiceMode (hands-free chat-header mic + MiniMax STT)
+
+VoiceMode is the inbound half of the voice loop. A
+click-to-start / click-to-stop mic in the chat header
+captures audio, ships it to MiniMax's native STT
+endpoint (`asr-1.0`), and dispatches the transcript as
+a regular user message.
+
+- **`src-tauri/src/commands/voice.rs`** — new
+  `audio_to_text` Tauri command. The Mac side records
+  via `MediaRecorder`, encodes to WAV in memory, and
+  POSTs to `https://api.minimax.io/v1/audio/transcriptions`
+  with the existing MiniMax API key. macOS microphone
+  permission is requested on first click via the
+  `NSMicrophoneUsageDescription` Info.plist key.
+- **`src/components/VoiceToolbar.tsx`** — chat-header
+  mic button + level meter + auto-send. The button
+  toggles between `🎤` and `⏹`. The level meter
+  fills left-to-right as the user talks so they can
+  confirm the mic is picking up audio.
+- **`src/lib/tauri.ts`** — `audioToText(wavBlob)` wraps
+  the Rust command. The transcript is inserted into
+  the composer + auto-sent (no manual send).
+- **Settings → Providers → MiniMax** — the
+  MiniMax API key is shared with the chat provider.
+  A missing key surfaces a clear error the first
+  time the user clicks the mic.
+- The hold-to-record mic in the Composer is the v2.7.0
+  dictation flow (transcript drops into the textarea
+  for review). VoiceMode is the v3.7.14 hands-free
+  flow (transcript auto-sends). Both coexist.
+
+## v3.7.15 — 2026-09-10
+
+### Changed — STT provider in VoiceMode (OpenAI Whisper → MiniMax `asr-1.0`)
+
+The v3.7.14 VoiceMode routed the recorded audio to
+OpenAI's `whisper-1` endpoint with the user's OpenAI
+API key. That's a second API key the user has to keep
+configured even if they never use OpenAI for chat. v3.7.15
+switches the STT endpoint to MiniMax's native
+`asr-1.0` model, which reuses the same MiniMax API key
+the chat provider already needs.
+
+- **`src-tauri/src/commands/voice.rs`** — the
+  `audio_to_text` handler now POSTs to
+  `https://api.minimax.io/v1/audio/transcriptions`
+  (multipart/form-data with the WAV blob + the
+  `asr-1.0` model) using the MiniMax bearer token.
+  The OpenAI Whisper code path is gone (the
+  `provider === "openai"` branch was the v3.7.14
+  shape).
+- **`src/lib/tauri.ts`** — the `audioToText` wrapper
+  no longer takes a `provider` arg; the Rust side
+  resolves the key from the current Settings.
+- **User-visible change.** Settings → Providers →
+  OpenAI is no longer required for VoiceMode. The
+  first-time setup is just the MiniMax key. The
+  existing v3.7.14 mic UX + level meter + auto-send
+  are unchanged.
+
 ## v3.7.5 — 2026-09-10
 
 ### Changed — QEMU VNC `auth=none`; macOS Screen Sharing no longer prompts for a password (Hardening item #1)
