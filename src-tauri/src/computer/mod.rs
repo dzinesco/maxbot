@@ -862,6 +862,64 @@ impl ComputerManager {
         Ok(response)
     }
 
+    /// v4 S7 — start the X11 desktop inside the VM.
+    ///
+    /// The VM has `xfce4` installed via cloud-init's
+    /// `packages:` block but no display manager is launched
+    /// on boot. Without a running X server the QEMU
+    /// virtual framebuffer stays in VGA text mode and the
+    /// renderer shows an empty black frame with a text
+    /// cursor. We kick off `xinit /usr/bin/xfce4-session
+    /// -- :0` via QGA `guest-exec`, which:
+    ///   - runs `nohup … &` so the QGA call returns
+    ///     immediately (xinit would otherwise block the
+    ///     call for the lifetime of the X session);
+    ///   - uses `-- :0` to claim display 0 (the QEMU
+    ///     virtual VGA). We deliberately don't specify a VT
+    ///     because cloud-init VMs often lack VTs;
+    ///   - is idempotent: xinit on a busy display exits
+    ///     non-zero, which QGA surfaces — the renderer's
+    ///     `computerShowDesktop(...).catch(() => {})` on
+    ///     the JS side swallows it. Re-mounts of
+    ///     ComputerRoute are safe.
+    ///
+    /// Fire-and-forget. The renderer doesn't await; the
+    /// next screenshot poll (TICK_OK_MS = 750 ms after
+    /// the xinit lands, typically ~5–10 s end-to-end)
+    /// shows the desktop.
+    ///
+    /// Returns the QGA JSON response on success (informational;
+    /// the renderer discards it). On any libvirt / SSH /
+    /// QGA error the caller surfaces the message; the
+    /// renderer's auto-call still catches and ignores.
+    pub async fn show_desktop(
+        &self,
+        db: &Database,
+        bot_id: &str,
+    ) -> Result<String, ComputerError> {
+        // 1. Look up the VM domain name so we know which
+        //    qemu-agent-command to address.
+        let computer = db
+            .get_computer(bot_id)?
+            .ok_or_else(|| ComputerError::NoComputer(bot_id.into()))?;
+        if computer.vm_name.is_empty() {
+            return Err(ComputerError::NoComputer(bot_id.into()));
+        }
+        // 2. Build the QGA guest-exec JSON. `nohup … &`
+        //    detaches the xinit process from QGA's wait
+        //    group; without it the QGA call blocks for the
+        //    lifetime of the X session (i.e. forever).
+        //    `> /tmp/xinit.log 2>&1` captures stderr so a
+        //    future failure is debuggable; the renderer
+        //    never reads it.
+        let cmd_json = build_show_desktop_payload();
+        let response = self
+            .libvirt
+            .qemu_agent_command(&*self.pool, &computer.vm_name, &cmd_json)
+            .await?;
+        Ok(response)
+    }
+
     /// Ensure the per-Bot key is decrypted + cached in
     /// the pool. Called before every `vm_sftp_*` and
     /// `vm_exec`. Idempotent — if the key is already
@@ -1010,6 +1068,56 @@ fn shell_quote(s: &str) -> String {
     format!("'{escaped}'")
 }
 
+/// v4 S7 — build the QGA guest-exec JSON that kicks off
+/// `xinit /usr/bin/xfce4-session -- :0` inside the VM.
+/// Extracted into a free function so the unit test can
+/// exercise the wire shape without spinning up QGA / SSH
+/// / virsh.
+///
+/// Wire shape (matches the QGA schema used elsewhere in
+/// this module, e.g. `install_default_key_via_qga`):
+///
+/// ```json
+/// {
+///   "execute": "guest-exec",
+///   "arguments": {
+///     "path": "/bin/sh",
+///     "arg": ["-c", "nohup xinit /usr/bin/xfce4-session -- :0 > /tmp/xinit.log 2>&1 &"]
+///   }
+/// }
+/// ```
+///
+/// Why `nohup … &`:
+///   - `&` detaches xinit from QGA's wait group so the
+///     guest-exec call returns immediately instead of
+///     blocking for the lifetime of the X session.
+///   - `nohup` lets xinit survive the QGA shell exiting.
+///
+/// Why `-- :0`:
+///   - Claims display 0 on the QEMU virtual VGA — the
+///     same framebuffer that `virsh screenshot` captures.
+///
+/// Why no VT (`-- :0 vt7` is the alternative):
+///   - Cloud-init headless QEMU VMs commonly lack allocated
+///     VTs, and specifying one is a frequent xinit failure
+///     mode. Bare `:0` works against the QEMU virtual VGA.
+///
+/// Why redirect to `/tmp/xinit.log`:
+///   - The renderer's auto-call catches and ignores errors;
+///     the log is a debug aid for a future failure
+///     investigation, not a user-facing surface.
+fn build_show_desktop_payload() -> String {
+    let script = "nohup xinit /usr/bin/xfce4-session -- :0 > /tmp/xinit.log 2>&1 &";
+    serde_json::json!({
+        "execute": "guest-exec",
+        "arguments": {
+            "path": "/bin/sh",
+            "arg": ["-c", script],
+        }
+    })
+    .to_string()
+}
+
 /// v2.3.5/v2.3.6: pick the passphrase used to encrypt
 /// the per-Bot SSH key during provisioning. Returns
 /// `None` when the user hasn't configured the per-Bot
@@ -1047,6 +1155,40 @@ mod tests {
         assert_eq!(ComputerState::Running.as_str(), "running");
         assert_eq!(ComputerState::Stopped.as_str(), "stopped");
         assert_eq!(ComputerState::Error.as_str(), "error");
+    }
+
+    /// v4 S7 — QGA payload shape for the show-desktop
+    /// guest-exec call. The wire format is part of the
+    /// public surface (it round-trips through
+    /// `virsh qemu-agent-command` on the host server), so
+    /// lock the shape down.
+    #[test]
+    fn show_desktop_qga_payload_uses_xinit_and_display_zero() {
+        let payload = build_show_desktop_payload();
+        let json: serde_json::Value =
+            serde_json::from_str(&payload).expect("payload is JSON");
+        assert_eq!(json["execute"], "guest-exec");
+        assert_eq!(json["arguments"]["path"], "/bin/sh");
+        let args = json["arguments"]["arg"].as_array().expect("arg array");
+        assert_eq!(args[0], "-c");
+        let shell = args[1].as_str().expect("arg[1] string");
+        assert!(shell.contains("xinit"), "shell must invoke xinit: {shell}");
+        assert!(
+            shell.contains("-- :0"),
+            "shell must pin display :0 (no VT): {shell}"
+        );
+        assert!(
+            shell.contains("nohup"),
+            "shell must nohup so the QGA call returns: {shell}"
+        );
+        assert!(
+            shell.trim_end().ends_with('&'),
+            "shell must background xinit so QGA returns: {shell}"
+        );
+        assert!(
+            shell.contains("/usr/bin/xfce4-session"),
+            "shell must launch the installed xfce4 session: {shell}"
+        );
     }
 
     // ----- v2.3.6: provision-passphrase resolver -----

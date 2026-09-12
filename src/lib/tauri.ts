@@ -382,6 +382,30 @@ export async function computerScreenshot(
   return invoke<ComputerScreenshotOutput>("computer_screenshot", { botId });
 }
 
+/**
+ * v4 S7 — start the X11 desktop inside the VM via QGA
+ * `guest-exec`. The VM has `xfce4` installed by
+ * cloud-init but no display manager boots it; this
+ * kicks off `xinit /usr/bin/xfce4-session -- :0` so the
+ * framebuffer screenshot shows a real desktop instead
+ * of an empty VGA text-mode console.
+ *
+ * Fire-and-forget from the renderer's perspective. The
+ * Rust side returns once the QGA call returns, which
+ * happens immediately because the xinit command is
+ * backgrounded with `nohup … &`. xinit itself takes
+ * ~5–10 s; the next screenshot poll captures the result.
+ *
+ * Idempotent: xinit on a busy display exits non-zero,
+ * which the Rust side surfaces as a regular error and
+ * the renderer's `.catch(() => {})` swallows.
+ */
+export async function computerShowDesktop(
+  botId: string,
+): Promise<void> {
+  await invoke("computer_show_desktop", { botId });
+}
+
 /** v3.7.9: the renderer calls this when the user
  *  clicks "Drive" in the Computer panel. Sets the
  *  per-Bot driving flag; the bot's `vm_computer_use`

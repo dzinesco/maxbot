@@ -296,4 +296,27 @@ describe("ComputerRoute — S6 contract", () => {
     fireEvent.click(screen.getByRole("button", { name: /close/i }));
     expect(onClose).toHaveBeenCalledTimes(1);
   });
+
+  it("auto-calls computer_show_desktop on mount (S7)", async () => {
+    render(
+      <ComputerRoute
+        botId="bot-1"
+        botName="Robot"
+        onClose={() => {}}
+      />,
+    );
+    // Wait for the call to land. computer_get resolves
+    // first (the test mock), then computer_show_desktop
+    // fires fire-and-forget.
+    await waitFor(() => {
+      const calls = invokeMock.mock.calls.filter(
+        (c) => c[0] === "computer_show_desktop",
+      );
+      expect(calls.length).toBeGreaterThanOrEqual(1);
+    });
+    const call = invokeMock.mock.calls.find(
+      (c) => c[0] === "computer_show_desktop",
+    );
+    expect(call?.[1]).toEqual({ botId: "bot-1" });
+  });
 });

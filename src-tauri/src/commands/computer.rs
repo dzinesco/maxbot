@@ -179,11 +179,34 @@ pub async fn computer_destroy(
         Err(e) => serde_json::json!({
             "bot_id": bot_id_for_event,
             "state": "error",
-            "error": e,
+            "error": e.to_string(),
         }),
     };
     let _ = app.emit(STATE_CHANGED_EVENT, payload);
     result
+}
+
+/// v4 S7 — start the X11 desktop inside the VM via
+/// `xinit /usr/bin/xfce4-session -- :0`. The VM has
+/// `xfce4` installed by cloud-init but no display manager
+/// boots it on its own; the QEMU virtual framebuffer stays
+/// in VGA text mode and the Computer preview shows an
+/// empty black frame with a text-mode caret. We kick off
+/// xinit via QGA `guest-exec` so the framebuffer shows a
+/// graphical XFCE4 desktop within ~5–10 s of the next
+/// screenshot poll.
+///
+/// Fire-and-forget. The renderer's auto-call catches and
+/// ignores errors (e.g. xinit on a busy display exits
+/// non-zero — that's the idempotency contract).
+#[tauri::command]
+pub async fn computer_show_desktop(
+    state: State<'_, AppState>,
+    bot_id: String,
+) -> Result<(), String> {
+    let db = state.db.clone();
+    let mgr = state.computer.clone();
+    mgr.show_desktop(&db, &bot_id).await.map(|_| ()).map_err(|e| e.to_string())
 }
 
 /// v3.7.2: capture a single JPEG frame from the VM's

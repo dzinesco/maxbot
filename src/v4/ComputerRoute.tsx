@@ -35,6 +35,7 @@ import { useEffect, useRef, useState } from "react";
 import {
   computerGet,
   computerScreenshot,
+  computerShowDesktop,
   onComputerStateChanged,
 } from "../lib/tauri";
 import type { Computer, ComputerStateChangedEvent } from "../lib/api";
@@ -102,6 +103,18 @@ export function ComputerRoute({ botId, botName, onClose }: ComputerRouteProps) {
         const c = await computerGet(botId);
         if (cancelled) return;
         setComputer(c);
+        // v4 S7 — kick off the X11 desktop. The VM has
+        // xfce4 installed by cloud-init but no display
+        // manager boots it on its own. xinit on a busy
+        // display exits non-zero (idempotent). The next
+        // screenshot poll (~750 ms later, after xinit
+        // lands at ~5–10 s end-to-end) shows the
+        // desktop. Best-effort: we do NOT await — the
+        // screenshot loop doesn't depend on this
+        // resolving.
+        computerShowDesktop(botId).catch(() => {
+          /* ignored — best effort */
+        });
       } catch (e) {
         if (cancelled) return;
         setError(`Could not load computer: ${e}`);
